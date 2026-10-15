@@ -2858,6 +2858,9 @@ void generate_track(s32 modelId) {
 
     asset_load(ASSET_LEVEL_MODELS, temp, mdl, temp_s4);
     gzip_inflate((u8 *) temp, (u8 *) gCurrentLevelModel);
+#ifdef TARGET_PORT
+    port_swap_level_model(gCurrentLevelModel);
+#endif
     mempool_free(gLevelModelTable); // Done with the level models table, so free it.
 
     mdl = (s32) gCurrentLevelModel;

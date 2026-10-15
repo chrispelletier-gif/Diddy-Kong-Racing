@@ -495,6 +495,9 @@ TextureHeader *load_texture(s32 id) {
     assetOffset = gTextureAssetTable[tableType][assetIndex];
     assetSize = gTextureAssetTable[tableType][assetIndex + 1] - assetOffset;
     asset_load(assetSection, (u32) gTempTextureHeader, assetOffset, sizeof(TempTexHeader));
+#ifdef TARGET_PORT
+    port_swap_texture_header(&gTempTextureHeader->header);
+#endif
     numberOfTextures = gTempTextureHeader->header.numOfTextures >> 8;
 
     // Allocate memory for the texture and its display lists.
@@ -521,6 +524,9 @@ TextureHeader *load_texture(s32 id) {
         gzip_inflate((u8 *) (compressedStart + sizeof(TextureHeader)), (u8 *) tex);
         assetSize = uncompressedSize - sizeof(TextureHeader);
     }
+#ifdef TARGET_PORT
+    port_swap_texture(tex, numberOfTextures);
+#endif
 
     // Find an available slot in the texture cache and store the newly loaded texture
     slotIndex = -1;
@@ -1095,6 +1101,9 @@ s32 tex_asset_size(s32 id) {
     new_var2 = gTempTextureHeader;
     if (new_var2->header.isCompressed) {
         asset_load(textureTable, (u32) new_var2, textureRomOffset, sizeof(TempTexHeader));
+#ifdef TARGET_PORT
+        port_swap_texture_header(&new_var2->header);
+#endif
         new_var4 = gTempTextureHeader;
         size = byteswap32((u8 *) (&new_var4->uncompressedSize));
     }

@@ -24,8 +24,16 @@ u32 *gAssetsLookupTable;
 
 /*******************************/
 
+#ifdef TARGET_PORT
+#include "asset_enums.h"
+#include "port.h"
+// The asset table lives at a fixed offset in the user supplied ROM.
+#define __ASSETS_LUT_START ((u8 *) port_assets_lut_start())
+#define __ASSETS_LUT_END ((u8 *) port_assets_lut_end())
+#else
 // These are both defined in the generated dkr.ld file.
 extern u8 __ASSETS_LUT_START[], __ASSETS_LUT_END[];
+#endif
 
 /**
  * Set up the peripheral interface message queues and scheduling.
@@ -48,6 +56,9 @@ void pi_init(void) {
     gAssetsLookupTable = (u32 *) mempool_alloc_safe(assetTableSize, COLOUR_TAG_GREY);
     mempool_locked_set((u8 *) gAssetsLookupTable);
     dmacopy_internal((u32) __ASSETS_LUT_START, (u32) gAssetsLookupTable, (s32) assetTableSize);
+#ifdef TARGET_PORT
+    port_swap32_array(gAssetsLookupTable, assetTableSize / 4);
+#endif
 }
 
 /**
@@ -78,6 +89,9 @@ u32 *asset_table_load(u32 assetIndex) {
     }
 
     dmacopy_internal((u32) (start + __ASSETS_LUT_END), (u32) out, size);
+#ifdef TARGET_PORT
+    port_swap_section(assetIndex - 1, out, size);
+#endif
 
 #if VERSION >= VERSION_79
     osSendMesg(&gDmaMutex, (OSMesg) 1, OS_MESG_NOBLOCK);
@@ -186,6 +200,12 @@ s32 asset_load(u32 assetIndex, u32 address, s32 assetOffset, s32 size) {
     start = *index + assetOffset;
 
     dmacopy_internal((u32) (start + __ASSETS_LUT_END), address, size);
+#ifdef TARGET_PORT
+    // Sprites are always loaded whole, straight from the table.
+    if (assetIndex - 1 == ASSET_SPRITES) {
+        port_swap_sprite_asset((void *) address);
+    }
+#endif
 
 #if VERSION >= VERSION_79
     osSendMesg(&gDmaMutex, (OSMesg) 1, OS_MESG_NOBLOCK);

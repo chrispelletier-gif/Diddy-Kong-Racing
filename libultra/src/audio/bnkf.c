@@ -54,6 +54,9 @@ void alBnkfNew(ALBankFile *file, u8 *table)
     /*
      * check the file format revision in debug libraries
      */
+#ifdef TARGET_PORT
+    port_swap_bank_file(file);
+#endif
     ALFailIf(file->revision != AL_BANK_VERSION, ERR_ALBNKFNEW);
     
     /*
@@ -74,6 +77,9 @@ void _bnkfPatchBank(ALBank *bank, s32 offset, s32 table)
         return;
 
     bank->flags = 1;
+#ifdef TARGET_PORT
+    port_swap_bank(bank);
+#endif
 
     if (bank->percussion) {
         bank->percussion = (ALInstrument *)((u8 *)bank->percussion + offset);
@@ -96,6 +102,9 @@ void _bnkfPatchInst(ALInstrument *inst, s32 offset, s32 table)
         return;
 
     inst->flags = 1;
+#ifdef TARGET_PORT
+    port_swap_instrument(inst);
+#endif
     
     for (i = 0; i < inst->soundCount; i++) {
         inst->soundArray[i] = (ALSound *)((u8 *)inst->soundArray[i] +
@@ -111,8 +120,14 @@ void _bnkfPatchSound(ALSound *s, s32 offset, s32 table)
         return;
 
     s->flags = 1;
+#ifdef TARGET_PORT
+    port_swap_sound(s);
+#endif
     
     s->envelope  = (ALEnvelope *)((u8 *)s->envelope + offset);
+#ifdef TARGET_PORT
+    port_swap_envelope(s->envelope);
+#endif
     s->keyMap    = (ALKeyMap *)((u8 *)s->keyMap + offset);
 
     s->wavetable = (ALWaveTable *)((u8 *)s->wavetable + offset);
@@ -125,6 +140,9 @@ void _bnkfPatchWaveTable(ALWaveTable *w, s32 offset, s32 table)
         return;
 
     w->flags = 1;
+#ifdef TARGET_PORT
+    port_swap_wavetable(w);
+#endif
     
     w->base += table;
 
@@ -134,10 +152,19 @@ void _bnkfPatchWaveTable(ALWaveTable *w, s32 offset, s32 table)
 	w->waveInfo.adpcmWave.book  = (ALADPCMBook *)((u8 *)w->waveInfo.adpcmWave.book + offset);
 	if (w->waveInfo.adpcmWave.loop)
 	    w->waveInfo.adpcmWave.loop = (ALADPCMloop *)((u8 *)w->waveInfo.adpcmWave.loop + offset);
+#ifdef TARGET_PORT
+	port_swap_adpcm_book(w->waveInfo.adpcmWave.book);
+	if (w->waveInfo.adpcmWave.loop)
+	    port_swap_adpcm_loop(w->waveInfo.adpcmWave.loop);
+#endif
     }
     else if (w->type == AL_RAW16_WAVE)
     {
 	if (w->waveInfo.rawWave.loop)
 	    w->waveInfo.rawWave.loop = (ALRawLoop *)((u8 *)w->waveInfo.rawWave.loop + offset);
+#ifdef TARGET_PORT
+	if (w->waveInfo.rawWave.loop)
+	    port_swap_raw_loop(w->waveInfo.rawWave.loop);
+#endif
     }	
 }

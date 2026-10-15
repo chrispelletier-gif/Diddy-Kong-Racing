@@ -760,6 +760,9 @@ void allocate_object_pools(void) {
         &gAssetsMiscSection[gAssetsMiscTable[ASSET_MISC_MAGIC_CODES]],
         (gAssetsMiscTable[ASSET_MISC_TITLE_SCREEN_DEMO_IDS] - gAssetsMiscTable[ASSET_MISC_MAGIC_CODES]) *
             sizeof(s32 *));
+#ifdef TARGET_PORT
+    port_swap_misc_assets(gAssetsMiscSection, gAssetsMiscTable, gAssetsMiscTableLength);
+#endif
     gObjPtrList = mempool_alloc_safe(sizeof(uintptr_t) * OBJECT_SLOT_COUNT, COLOUR_TAG_BLUE);
     gFirstTimeFinish = 0;
     gTimeTrialEnabled = 0;
@@ -902,6 +905,9 @@ ObjectHeader *load_object_header(s32 index) {
     address = mempool_alloc_pool((MemoryPoolSlot *) gObjectMemoryPool, size);
     if (address != NULL) {
         asset_load(ASSET_OBJECTS, (u32) address, assetOffset, size);
+#ifdef TARGET_PORT
+        port_swap_object_header(address);
+#endif
         address->unk24 = (ObjectHeader24 *) ((uintptr_t) address + (uintptr_t) address->unk24);
         address->objectParticles =
             (ObjHeaderParticleEntry *) ((uintptr_t) address + (uintptr_t) address->objectParticles);
@@ -995,6 +1001,9 @@ void track_spawn_objects(s32 mapID, s32 index) {
             ((compressedAsset + gzip_size_uncompressed(ASSET_LEVEL_OBJECT_MAPS, assetOffset)) - (0, assetSize)) + 0x20;
         asset_load(ASSET_LEVEL_OBJECT_MAPS, (u32) compressedAsset, assetOffset, assetSize);
         gzip_inflate(compressedAsset, (u8 *) mem);
+#ifdef TARGET_PORT
+        port_swap_object_map(mem);
+#endif
         mempool_free(objMapTable);
         gObjectMapSpawnList[index] = (u8 *) (gObjectMap[index] + sizeof(uintptr_t));
         gObjectMapSize[index] = *mem;

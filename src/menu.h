@@ -507,7 +507,13 @@ typedef struct TrackRenderDetails {
 } TrackRenderDetails;
 
 extern s32 gShowControllerPakMenu;
+#ifdef TARGET_PORT
+u32 port_rom_size(void);
+#define ROM_END_OFFSET ((s32) port_rom_size())
+#else
 extern u8 *__ROM_END;
+#define ROM_END_OFFSET ((s32) &__ROM_END)
+#endif
 
 s32 rand_range(s32, s32); // No file to pull from yet.
 

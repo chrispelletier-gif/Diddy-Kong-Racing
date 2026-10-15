@@ -2,6 +2,7 @@
 
 #include "game.h"
 #include "macros.h"
+#include "PR/gu.h"
 #include "PR/os_internal_reg.h"
 #include "string.h"
 #include "structs.h"
@@ -11,8 +12,8 @@
 extern u8 gIntDisFlag;
 extern s32 gCurrentRNGSeed; // Official Name: rngSeed
 extern s32 gPrevRNGSeed;
-extern s16 gSineTable[];
-extern s16 gArcTanTable[];
+extern u16 gSineTable[];
+extern u16 gArcTanTable[];
 
 /**
  * All of the functions below are handwritten assembly. Because of this, matching C code is impossible.
@@ -139,7 +140,7 @@ void mtxf_transform_point(float mf[4][4], float x, float y, float z, float *ox, 
 GLOBAL_ASM("asm/math_util/mtxf_transform_point.s")
 #endif
 
-#ifdef NON_EQUIVALENT
+#ifdef NON_MATCHING
 /**
  * Transforms a direction vector in 3D space using the rotation part of a 4×4 matrix.
  * This function multiplies the input vector by the upper-left 3×3 portion of the matrix mf,
@@ -148,9 +149,12 @@ GLOBAL_ASM("asm/math_util/mtxf_transform_point.s")
  * Official name: mathMtxFastXFMF
  */
 void mtxf_transform_dir(MtxF *mf, Vec3f *in, Vec3f *out) {
-    out->f[0] = (in->f[0] * (*mf)[0][0]) + (in->f[1] * *mf[1][0]) + (in->f[2] * (*mf)[2][0]);
-    out->f[1] = (in->f[0] * (*mf)[0][1]) + (in->f[1] * *mf[1][1]) + (in->f[2] * (*mf)[2][1]);
-    out->f[2] = (in->f[0] * (*mf)[0][2]) + (in->f[1] * *mf[1][2]) + (in->f[2] * (*mf)[2][2]);
+    f32 x = in->f[0];
+    f32 y = in->f[1];
+    f32 z = in->f[2];
+    out->f[0] = (x * (*mf)[0][0]) + (y * (*mf)[1][0]) + (z * (*mf)[2][0]);
+    out->f[1] = (x * (*mf)[0][1]) + (y * (*mf)[1][1]) + (z * (*mf)[2][1]);
+    out->f[2] = (x * (*mf)[0][2]) + (y * (*mf)[1][2]) + (z * (*mf)[2][2]);
 }
 #else
 GLOBAL_ASM("asm/math_util/mtxf_transform_dir.s")
@@ -747,7 +751,7 @@ static u16 atan2_lookup(f32 y, f32 x) {
 s32 atan2s(s32 xDelta, s32 zDelta) {
     u16 ret;
 
-    if (xDelta == 0 && yDelta == 0) {
+    if (xDelta == 0 && zDelta == 0) {
         return 0;
     }
 
@@ -819,10 +823,75 @@ UNUSED s32 bad_int_sqrt(s32 arg0) {
 GLOBAL_ASM("asm/math_util/bad_int_sqrt.s")
 #endif
 
+#ifdef NON_MATCHING
+/**
+ * Returns the sine of a binary angle (0x10000 = 360 degrees), interpolated between table entries.
+ * The result ranges from -0x10000 to 0x10000.
+ * Official Name: mathSinInterp
+ */
+s32 sins_s16(s16 angle) {
+    u32 a = (u32) (s32) angle;
+    u32 index;
+    s32 lo, hi, ret;
+
+    if ((s32) (a << 17) < 0) {
+        a ^= 0x7FFF;
+    }
+    index = ((a >> 3) & 0x7FE) >> 1;
+    lo = ((u16 *) gSineTable)[index];
+    hi = ((u16 *) gSineTable)[index + 1];
+    ret = (lo << 1) + ((u32) ((hi - lo) * (s32) (a & 0xF)) >> 3);
+    if ((s32) (a << 16) < 0) {
+        ret = -ret;
+    }
+    return ret;
+}
+
+/**
+ * Official Name: mathCosInterp
+ */
+s32 coss_s16(s16 angle) {
+    return sins_s16((s16) (angle + 0x4000));
+}
+
+/**
+ * Like sins_s16, without interpolation.
+ * Official Name: mathSin
+ */
+s32 sins_2(s16 angle) {
+    u32 a = (u32) (s32) angle;
+    s32 ret;
+
+    if ((s32) (a << 17) < 0) {
+        a ^= 0x7FFF;
+    }
+    ret = ((u16 *) gSineTable)[((a >> 3) & 0x7FE) >> 1] << 1;
+    if ((s32) (a << 16) < 0) {
+        ret = -ret;
+    }
+    return ret;
+}
+
+/**
+ * Official Name: mathCos
+ */
+s32 coss_2(s16 angle) {
+    return sins_2((s16) (angle + 0x4000));
+}
+
+f32 sins_f(s16 angle) {
+    return (f32) sins_s16(angle) * 0.0000152587890625f;
+}
+
+f32 coss_f(s16 angle) {
+    return (f32) coss_s16(angle) * 0.0000152587890625f;
+}
+#else
 GLOBAL_ASM("asm/math_util/sins_f.s")
 GLOBAL_ASM("asm/math_util/coss_f.s")
 GLOBAL_ASM("asm/math_util/coss.s")
 GLOBAL_ASM("asm/math_util/sins_2.s")
+#endif
 
 // Untested
 #ifdef NON_EQUIVALENT
