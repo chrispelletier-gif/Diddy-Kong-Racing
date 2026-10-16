@@ -63,6 +63,8 @@ void port_rcp_init(void);
 void port_rcp_wait_idle(void);
 void port_rcp_gfx_submitted(void);
 void port_si_init(void);
+/* Writes pending save data to disk now (called on exit and when the application is suspended). */
+void port_si_flush(void);
 void port_ai_init(void);
 
 /* Rendering and audio backends. */

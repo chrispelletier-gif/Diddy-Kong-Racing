@@ -15,6 +15,7 @@
 #include "plat/plat.h"
 
 void port_boot(void);
+void port_si_flush(void);
 int host_frames_rendered(void);
 
 int plat_main_loop_iteration(void) {
@@ -36,6 +37,7 @@ int main(int argc, char **argv) {
     port_boot();
     while (plat_main_loop_iteration()) {
     }
+    port_si_flush();
     fprintf(stderr, "Exiting after %d frames\n", host_frames_rendered());
     return 0;
 }

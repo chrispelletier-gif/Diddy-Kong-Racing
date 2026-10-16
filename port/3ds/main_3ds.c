@@ -6,6 +6,16 @@
 #include "plat/plat.h"
 
 void port_boot(void);
+void port_si_flush(void);
+
+/* Saves are written to the SD card shortly after the game makes them; make sure none are lost when leaving. */
+static aptHookCookie sAptCookie;
+static void apt_hook(APT_HookType hook, void *param) {
+    (void) param;
+    if (hook == APTHOOK_ONSUSPEND || hook == APTHOOK_ONSLEEP || hook == APTHOOK_ONEXIT) {
+        port_si_flush();
+    }
+}
 
 /* The game only uses the top screen; the bottom one shows the controls. */
 static void show_bottom_screen_help(void) {
@@ -46,8 +56,10 @@ int main(int argc, char **argv) {
     show_bottom_screen_help();
 
     port_boot();
+    aptHook(&sAptCookie, apt_hook, NULL);
     while (plat_main_loop_iteration()) {
     }
+    port_si_flush();
     gfxExit();
     return 0;
 }

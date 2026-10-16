@@ -8188,7 +8188,7 @@ s32 menu_file_select_loop(s32 updateRate) {
         gTrophyRaceWorldId = 0;
 #ifdef TARGET_PORT
         if (port_apply_test_save(settings)) { // DKR_TEST_SAVE
-            safe_mark_write_save_file(gSaveFileIndex); // Store the progress so the file keeps it without the setting.
+            force_mark_write_save_file(gSaveFileIndex); // Store the progress so the file keeps it without the setting.
         }
 #endif
         if (settings->newGame) {

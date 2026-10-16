@@ -125,6 +125,20 @@ controls) work there, as do these renderer switches:
 - `DKR_VERTEX_FOG=1` (the old per vertex fog, for comparison)
 - `DKR_GFX_TEST=1` (draws a reference quad)
 
+## Automated testing
+
+These settings work on both builds (in `env.txt` on the 3DS, as environment variables on the host):
+
+| Setting                  | Effect |
+| ------------------------ | ------ |
+| `DKR_WARP=all` or `DKR_WARP=4,7,12` | The title screen's attract demos load these levels instead (ids in `ASSET_LEVEL_*` order), one after another, with the AI driving and the title overlay hidden. |
+| `DKR_WARP_SECONDS=n`     | How long each warped level runs (default 20). |
+| `DKR_DIFF_EVERY=n`       | 3DS only: every nth frame is also drawn by the software renderer, and both images are written to `sdmc:/3ds/dkr/` (`diff_N_ref.png`, `diff_N_gpu.bin`). `port/tools/diff_frames.py <dir> <out>` compares them and writes side by side images of the frames that differ. |
+| `DKR_TEST_SAVE=1`        | Starting a save file gives it complete progress: all balloons, keys, trophies, amulets and Taj challenges, and every boss and door. The progress is written to the save, so the file keeps it without the setting. |
+
+`port/tools/testdata/eeprom_complete.bin` is a save made this way (file A, "AAA"). Copying it over `eeprom.bin`
+replaces your own saves.
+
 ## Testing in Azahar
 
 The port runs in the Azahar emulator.
