@@ -124,6 +124,7 @@ void gfxb_start_frame(void) {
 }
 
 /* DKR_GFX_TEST draws a reference quad: a 16x16 texture, red on top, blue at the bottom, with a green left column. */
+static int sTestMode;
 static void draw_test_pattern(void) {
     static GfxTexture sTex;
     static unsigned int sPixels[16 * 16];
@@ -151,6 +152,36 @@ static void draw_test_pattern(void) {
     state.combiner.rgb[0].c = GFX_CC_ZERO;
     state.combiner.rgb[0].d = GFX_CC_TEXEL0;
     state.combiner.alpha[0] = state.combiner.rgb[0];
+    if (sTestMode == 3) {
+        GfxCCEquation alpha = { GFX_CC_TEXEL0, GFX_CC_ZERO, GFX_CC_PRIM, GFX_CC_ZERO };
+        state.combiner.alpha[0] = alpha;
+        state.prim[0] = state.prim[1] = state.prim[2] = state.prim[3] = 255;
+        state.blend = GFX_BLEND_ALPHA;
+    }
+    if (sTestMode == 4) {
+        GfxCCEquation alpha = { GFX_CC_ZERO, GFX_CC_ZERO, GFX_CC_ZERO, GFX_CC_PRIM };
+        state.combiner.alpha[0] = alpha;
+        state.prim[3] = 255;
+        state.blend = GFX_BLEND_ALPHA;
+    }
+    if (sTestMode == 5) {
+        GfxCCEquation alpha = { GFX_CC_TEXEL0, GFX_CC_ZERO, GFX_CC_PRIM, GFX_CC_ZERO };
+        state.combiner.alpha[0] = alpha;
+        state.prim[3] = 255;
+        state.alphaTest = 1;
+        state.alphaRef = 128;
+    }
+    if (sTestMode == 2) {
+        // The menu font combiner: lerp(TEXEL0, ENV, ENV_ALPHA), alpha TEXEL0 * PRIM.
+        GfxCCEquation rgb = { GFX_CC_ENV, GFX_CC_TEXEL0, GFX_CC_ENV_ALPHA, GFX_CC_TEXEL0 };
+        GfxCCEquation alpha = { GFX_CC_TEXEL0, GFX_CC_ZERO, GFX_CC_PRIM, GFX_CC_ZERO };
+        state.combiner.rgb[0] = rgb;
+        state.combiner.alpha[0] = alpha;
+        state.env[0] = state.env[1] = state.env[2] = 255;
+        state.env[3] = 0;
+        state.prim[0] = state.prim[1] = state.prim[2] = state.prim[3] = 255;
+        state.blend = GFX_BLEND_ALPHA;
+    }
     state.textures[0] = &sTex;
     state.scissor[2] = GFX_SCREEN_WIDTH;
     state.scissor[3] = GFX_SCREEN_HEIGHT;
@@ -172,7 +203,9 @@ void gfxb_end_frame(void) {
     {
         static int sTest = -1;
         if (sTest < 0) {
-            sTest = plat_getenv("DKR_GFX_TEST") != NULL;
+            const char *env = plat_getenv("DKR_GFX_TEST");
+            sTest = env != NULL;
+            sTestMode = env != NULL ? atoi(env) : 0;
         }
         if (sTest) {
             draw_test_pattern();
@@ -392,14 +425,8 @@ static int compile_equation(TevStage *st, const GfxCCEquation *eq, int isAlpha, 
         *func = GPU_REPLACE;
         inputs[0] = d;
         n = 1;
-    } else if (b == d) {
-        // a * c + b * (1 - c)
-        *func = GPU_INTERPOLATE;
-        inputs[0] = a;
-        inputs[1] = b;
-        inputs[2] = c;
-        n = 3;
     } else if (b == GFX_CC_ZERO && d == GFX_CC_ZERO) {
+        // Checked before the interpolation below, which would otherwise need a constant for the zero.
         if (c == GFX_CC_ONE) {
             *func = GPU_REPLACE;
             inputs[0] = a;
@@ -410,6 +437,13 @@ static int compile_equation(TevStage *st, const GfxCCEquation *eq, int isAlpha, 
             inputs[1] = c;
             n = 2;
         }
+    } else if (b == d) {
+        // a * c + b * (1 - c)
+        *func = GPU_INTERPOLATE;
+        inputs[0] = a;
+        inputs[1] = b;
+        inputs[2] = c;
+        n = 3;
     } else if (b == GFX_CC_ZERO) {
         *func = GPU_MULTIPLY_ADD;
         inputs[0] = a;
