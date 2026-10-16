@@ -177,6 +177,8 @@ static void capture_pending_frame(void) {
     sCapturePath[0] = '\0';
 }
 
+static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
+
 static void process_pending_frees(void) {
     int i;
     for (i = 0; i < sNumPendingFrees; i++) {
@@ -217,12 +219,20 @@ void gfxb_start_frame(void) {
     }
     process_pending_frees();
     // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
-    // draws nothing (while a level loads) must not show up as a black flash.
-    C3D_RenderTargetClear(sTarget, sFrameStarted < 0 ? C3D_CLEAR_DEPTH : C3D_CLEAR_ALL, 0x000000FF, 0);
+    // draws nothing (while a level loads) must not show up as a black flash. So only the first frame uses a memory
+    // fill; after that the depth buffer is cleared by drawing. (A memory fill of the depth buffer alone never finished
+    // on a real New 3DS, which hung the game after its first frame. Emulators complete it.)
+    if (sFrameStarted >= 0) {
+        C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+    }
     C3D_FrameDrawOn(sTarget);
     sVboUsed = 0;
-    sFrameStarted = 1;
     set_projection();
+    if (sFrameStarted < 0) {
+        static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
+        draw_clear_rect(sFullScreen, 0, 1);
+    }
+    sFrameStarted = 1;
 }
 
 /* DKR_GFX_TEST draws a reference quad: a 16x16 texture, red on top, blue at the bottom, with a green left column. */
@@ -789,7 +799,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     if (sVboUsed + count > VBO_VERTICES) {
         return;
     }
-    if (C3D_GetCmdBufUsage() > 0.9f) {
+    if (gpuCmdBufOffset > gpuCmdBufSize - gpuCmdBufSize / 10) {
         // A full command buffer silently drops commands, and a half written command can hang the real GPU (an
         // emulator shrugs it off). Hand what is there to the GPU and carry on in an empty buffer instead.
         extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
@@ -911,21 +921,12 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
     sDepthOnly = 0;
 }
 
-/* A full clear can use the faster memory fill, but only before anything is drawn: fills are not ordered with draws. */
-static int is_full_clear(const short rect[4]) {
-    return sVboUsed == 0 && rect[0] <= 0 && rect[1] <= 0 && rect[2] >= GFX_SCREEN_WIDTH - 1 &&
-           rect[3] >= GFX_SCREEN_HEIGHT - 1;
-}
-
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
     // Colour fills are drawn so that they cover only the game's part of the screen, leaving black bars at the sides.
     draw_clear_rect(rect, (r << 24) | (g << 16) | (b << 8) | a, 0);
 }
 
 void gfxb_clear_depth(const short rect[4]) {
-    if (is_full_clear(rect)) {
-        C3D_FrameBufClear(&sTarget->frameBuf, C3D_CLEAR_DEPTH, 0, 0);
-        return;
-    }
+    // Always drawn: a memory fill of the depth buffer alone hangs a real 3DS (see gfxb_start_frame).
     draw_clear_rect(rect, 0, 1);
 }
