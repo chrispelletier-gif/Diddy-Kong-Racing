@@ -93,6 +93,7 @@ typedef struct GfxDrawState {
     unsigned char depthWrite;
     unsigned char decal;            /* Pull towards the camera to win depth fights (ZMODE_DEC) */
     unsigned char fogEnabled;       /* Blend towards fog colour using vertex alpha */
+    short fogMul, fogOffset;        /* Fog factor = clamp(z / w * fogMul + fogOffset, 0, 255), for per pixel fog */
     unsigned char cullMode;         /* 0 none, 1 back faces, 2 front faces (in screen space, CCW front) */
     GfxTexture *textures[2];
     short scissor[4];       /* x0, y0, x1, y1 (exclusive) */

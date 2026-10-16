@@ -513,6 +513,59 @@ static void init_stage(TevStage *st) {
     st->alphaFunc = GPU_REPLACE;
 }
 
+/*
+ * Fog. The N64 computes a fog factor per vertex from z / w. Interpolating that is wrong once the GPU clips a triangle
+ * at the near plane (the N64 recomputes it for the new vertices), which washed out geometry close to the camera.
+ * So by default the GPU's fog unit applies the same linear function per pixel, from a lookup table indexed by depth.
+ * DKR_VERTEX_FOG=1 restores the per vertex version, DKR_NO_FOG=1 turns fog off.
+ */
+enum { FOG_PIXEL, FOG_VERTEX, FOG_OFF };
+
+static int fog_mode(void) {
+    static int sMode = -1;
+    if (sMode < 0) {
+        sMode = plat_getenv("DKR_NO_FOG") != NULL ? FOG_OFF : plat_getenv("DKR_VERTEX_FOG") != NULL ? FOG_VERTEX : FOG_PIXEL;
+    }
+    return sMode;
+}
+
+static void apply_fog(const GfxDrawState *state) {
+    static C3D_FogLut sLut;
+    static int sLutMul = 0x7FFFFFFF, sLutOffset;
+    static int sFogOn = -1;
+    int on = state->fogEnabled && fog_mode() == FOG_PIXEL;
+
+    if (on && (state->fogMul != sLutMul || state->fogOffset != sLutOffset)) {
+        float data[256];
+        int i;
+        // Depth d runs from 1 at the near plane to 0 at the far plane, and z / w = 1 - 2d (see set_projection).
+        for (i = 0; i <= 128; i++) {
+            float zw = 1.0f - 2.0f * (i / 128.0f);
+            float fog = zw * state->fogMul + state->fogOffset;
+            float keep;
+            fog = (fog < 0.0f) ? 0.0f : (fog > 255.0f) ? 255.0f : fog;
+            keep = 1.0f - fog / 255.0f; // The table holds how much of the original colour remains.
+            if (i < 128) {
+                data[i] = keep;
+            }
+            if (i > 0) {
+                data[i + 127] = keep - data[i - 1];
+            }
+        }
+        FogLut_FromArray(&sLut, data);
+        C3D_FogLutBind(&sLut);
+        sLutMul = state->fogMul;
+        sLutOffset = state->fogOffset;
+    }
+    if (on) {
+        C3D_FogColor(state->fog[0] | (state->fog[1] << 8) | (state->fog[2] << 16));
+    }
+    if (on != sFogOn) {
+        C3D_FogGasMode(on ? GPU_FOG : GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+        sFogOn = on;
+    }
+}
+
 static void compile_combiner(const GfxDrawState *state, TevProgram *prog) {
     static const GfxCCEquation passthrough = { GFX_CC_ZERO, GFX_CC_ZERO, GFX_CC_ZERO, GFX_CC_COMBINED };
     int cycle;
@@ -540,11 +593,7 @@ static void compile_combiner(const GfxDrawState *state, TevProgram *prog) {
         compile_equation(st, &state->combiner.alpha[cycle], 1, prev == GPU_CONSTANT ? GPU_CONSTANT : GPU_PREVIOUS);
         prog->numStages++;
     }
-    static int sNoFog = -1;
-    if (sNoFog < 0) {
-        sNoFog = plat_getenv("DKR_NO_FOG") != NULL;
-    }
-    if (state->fogEnabled && !sNoFog) {
+    if (state->fogEnabled && fog_mode() == FOG_VERTEX) {
         // Blend towards the fog colour by the vertex alpha, keeping the combined alpha.
         TevStage *st = &prog->stages[prog->numStages++];
         init_stage(st);
@@ -678,6 +727,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexScale, su0, -sv0, su1, -sv1);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexOffset, 0.0f, 1.0f, 0.0f, 1.0f);
     apply_combiner(state);
+    apply_fog(state);
 
     switch (state->blend) {
         case GFX_BLEND_ALPHA:

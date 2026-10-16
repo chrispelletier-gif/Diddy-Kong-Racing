@@ -122,6 +122,7 @@ controls) work there, as do these renderer switches:
 - `DKR_NO_CULL=1`
 - `DKR_NO_SCISSOR=1`
 - `DKR_NO_FOG=1`
+- `DKR_VERTEX_FOG=1` (the old per vertex fog, for comparison)
 - `DKR_GFX_TEST=1` (draws a reference quad)
 
 ## Testing in Azahar

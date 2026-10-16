@@ -430,6 +430,8 @@ static void build_draw_state(GfxDrawState *s, s32 isRect) {
         s->env[i] = g.env[i];
         s->fog[i] = g.fogColor[i];
     }
+    s->fogMul = g.fogMul;
+    s->fogOffset = g.fogOffset;
     s->primLodFrac = g.primLodFrac;
 
     // Which textures does the combiner read?
