@@ -70,6 +70,9 @@ void *plat_malloc(size_t size);
 void plat_free(void *ptr);
 int plat_snprintf(char *buf, size_t size, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 
+/* Returns an environment variable / configuration value, or NULL. */
+const char *plat_getenv(const char *name);
+
 /* Directory where the ROM and save files live. */
 const char *plat_data_dir(void);
 

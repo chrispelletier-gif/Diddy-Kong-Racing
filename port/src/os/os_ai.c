@@ -26,15 +26,17 @@ s32 osAiSetNextBuffer(void *buf, u32 size) {
 }
 
 /*
- * Returns how many bytes of the buffer currently being played are left. The hardware only has a two entry
- * FIFO, so anything queued beyond the most recent buffer counts as part of the "current" buffer here.
+ * Returns how many bytes of the buffer currently being played are left. The hardware has a two entry FIFO, so
+ * the value never exceeds the size of one buffer. The audio manager sizes the next frame from this, so keeping it
+ * in range keeps production matched to playback even when the output device buffers more than the N64 would.
  */
 u32 osAiGetLength(void) {
     u32 remaining = port_audio_output_remaining_bytes();
-    if (remaining > sAiLastBufferSize) {
-        return remaining - sAiLastBufferSize;
+    if (remaining <= sAiLastBufferSize) {
+        return 0;
     }
-    return 0;
+    remaining -= sAiLastBufferSize;
+    return (remaining > sAiLastBufferSize) ? sAiLastBufferSize : remaining;
 }
 
 u32 osAiGetStatus(void) {

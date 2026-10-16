@@ -299,6 +299,11 @@ void mempool_free_addr(u8 *address) {
     MemoryPoolSlot *slots;
     MemoryPoolSlot *slot;
 
+#ifdef TARGET_PORT
+    // The display list being drawn may still use this memory.
+    port_rcp_wait_idle();
+#endif
+
     poolIndex = mempool_get_pool(address);
     pool = gMemoryPools;
     slots = pool[poolIndex].slots;

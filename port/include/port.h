@@ -58,14 +58,15 @@ void port_raise_event(u32 event);
 /* Emulated hardware startup. */
 void port_vi_init(void);
 void port_rcp_init(void);
+void port_rcp_wait_idle(void);
+void port_rcp_gfx_submitted(void);
 void port_si_init(void);
 void port_ai_init(void);
 
 /* Rendering and audio backends. */
-struct OSTask_s;
 void port_gfx_init(void);
-void port_gfx_run_task(struct OSTask_s *task);
-void port_audio_run_task(struct OSTask_s *task);
+void port_gfx_run_task(void *task);
+void port_audio_run_task(void *task);
 void port_audio_output_init(u32 frequency);
 void port_audio_output_queue(const s16 *samples, u32 numBytes);
 u32 port_audio_output_remaining_bytes(void);
@@ -83,6 +84,19 @@ void port_rumble(s32 controller, s32 enable);
 /* Save files. */
 s32 port_save_read(const char *name, void *data, u32 size);
 s32 port_save_write(const char *name, const void *data, u32 size);
+
+/* Small libc helpers. */
+static inline s32 port_atoi(const char *s) {
+    s32 v = 0, neg = 0;
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    }
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (*s++ - '0');
+    }
+    return neg ? -v : v;
+}
 
 /* Logging. */
 void port_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

@@ -321,6 +321,9 @@ void set_current_text(s32 textID) {
         }
 
         asset_load(ASSET_GAME_TEXT_TABLE, (u32) (*gGameTextTable)->entries, (textID & (~1)) << 2, 16);
+#ifdef TARGET_PORT
+        port_swap32_array((*gGameTextTable)->entries, 4);
+#endif
 
         entries = (*gGameTextTable)->entries;
         temp = ((s32) entries[textID & 1]) & 0xFF000000;

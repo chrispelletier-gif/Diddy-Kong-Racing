@@ -16,6 +16,7 @@ static volatile u32 sTaskQueueRead;
 static volatile u32 sTaskQueueWrite;
 static PlatSem *sTaskSem;
 static s32 sRcpStarted;
+static volatile s32 sGfxTasksPending;
 
 static void rcp_thread(void *arg) {
     OSTask *task;
@@ -30,6 +31,10 @@ static void rcp_thread(void *arg) {
         switch (task->t.type) {
             case M_GFXTASK:
                 port_gfx_run_task(task);
+                plat_klock();
+                sGfxTasksPending--;
+                plat_kbroadcast();
+                plat_kunlock();
                 port_raise_event(OS_EVENT_SP);
                 port_raise_event(OS_EVENT_DP);
                 break;
@@ -73,4 +78,23 @@ void osSpTaskYield(void) {
 OSYieldResult osSpTaskYielded(OSTask *task) {
     (void) task;
     return 0;
+}
+
+/* Called by the game when it hands a display list to the scheduler. */
+void port_rcp_gfx_submitted(void) {
+    plat_klock();
+    sGfxTasksPending++;
+    plat_kunlock();
+}
+
+/*
+ * Waits until no graphics task is queued or running. The game sometimes frees memory that the display list being
+ * drawn still uses, relying on the RCP having finished long before. This makes that safe however slow rendering is.
+ */
+void port_rcp_wait_idle(void) {
+    plat_klock();
+    while (sGfxTasksPending > 0) {
+        plat_kwait();
+    }
+    plat_kunlock();
 }

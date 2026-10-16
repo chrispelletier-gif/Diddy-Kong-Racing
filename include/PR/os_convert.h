@@ -71,7 +71,11 @@ extern "C" {
 #define OS_CYCLES_TO_USEC(c)	(((u64)(c)*(1000000LL/15625LL))/(OS_CPU_COUNTER/15625LL))
 
 /* OS_K?_TO_PHYSICAL macro bug fix for CodeWarrior */
-#ifndef __MWERKS__
+#if defined(TARGET_PORT)
+/* Native ports have no KSEG0/physical split, so addresses are passed through unchanged. */
+#define	OS_K0_TO_PHYSICAL(x)	((u32)(x))
+#define	OS_K1_TO_PHYSICAL(x)	((u32)(x))
+#elif !defined(__MWERKS__)
 #define	OS_K0_TO_PHYSICAL(x)	(u32)(((char *)(x)-0x80000000))
 #define	OS_K1_TO_PHYSICAL(x)	(u32)(((char *)(x)-0xa0000000))
 #else
@@ -79,8 +83,13 @@ extern "C" {
 #define	OS_K1_TO_PHYSICAL(x)	((char *)(x)-0xa0000000)
 #endif
 
+#if defined(TARGET_PORT)
+#define	OS_PHYSICAL_TO_K0(x)	((void *)(x))
+#define	OS_PHYSICAL_TO_K1(x)	((void *)(x))
+#else
 #define	OS_PHYSICAL_TO_K0(x)	(void *)(((u32)(x)+0x80000000))
 #define	OS_PHYSICAL_TO_K1(x)	(void *)(((u32)(x)+0xa0000000))
+#endif
 
 
 /**************************************************************************

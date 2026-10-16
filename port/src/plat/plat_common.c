@@ -77,3 +77,12 @@ void port_fatal(const char *fmt, ...) {
     va_end(args);
     plat_fatal("%s", buffer);
 }
+
+const char *plat_getenv(const char *name) {
+#ifdef __3DS__
+    (void) name;
+    return NULL;
+#else
+    return getenv(name);
+#endif
+}

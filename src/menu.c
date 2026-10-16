@@ -1975,6 +1975,10 @@ void load_menu_text(s32 language) {
     }
 
     asset_load(ASSET_MENU_TEXT, (u32) temp, langIndex, size);
+#ifdef TARGET_PORT
+    // A table of string offsets, followed by the strings.
+    port_swap32_array(temp, gMenuTextLangTable[0]);
+#endif
 
     // TODO: Find a way to clean up the ugly hacks.
     // Fill up the lookup table with proper RAM addresses

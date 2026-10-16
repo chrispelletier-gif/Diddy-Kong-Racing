@@ -1123,9 +1123,15 @@ s32 func_80027568(void) {
         flipSide = gCollisionCandidates[var_t4];
         if (flipSide > 0) {
             // this is segment Entry
+#ifdef TARGET_PORT
+            segment = COLLISION_SEGMENT_PTR(flipSide);
+        } else {
+            colNode = (CollisionNode *) COLLISION_FACET_PTR(flipSide);
+#else
             segment = (LevelModelSegment *) PHYS_TO_K0(flipSide);
         } else {
             colNode = (CollisionNode *) flipSide;
+#endif
             curViewport = colNode->colPlaneIndex << 2;
             planes = &segment->collisionPlanes[curViewport];
             A = planes[0];

@@ -314,6 +314,8 @@ void __scHandleRetrace(OSSched *sc) {
     u8 set_curRDPTask_NULL = FALSE;
     OSScTask *unkTask;
 
+#ifndef TARGET_PORT
+    // Native ports emulate the RCP, which never hangs but can take longer than 10 retraces on slow hardware.
     if (sc->curRSPTask) {
         gCurRSPTaskCounter++;
     }
@@ -321,6 +323,7 @@ void __scHandleRetrace(OSSched *sc) {
     if (sc->curRDPTask) {
         gCurRDPTaskCounter++;
     }
+#endif
 
     if ((gCurRSPTaskCounter > 10) && (sc->curRSPTask)) {
         gCurRSPTaskCounter = 0;
