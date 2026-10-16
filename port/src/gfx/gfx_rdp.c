@@ -1158,8 +1158,10 @@ void port_gfx_run_task(void *taskPtr) {
         g.scissor[2] = GFX_SCREEN_WIDTH;
         g.scissor[3] = GFX_SCREEN_HEIGHT;
     }
+    gPlatGfxStage = "running a display list";
     run_dl((const Gfx *) task->t.data_ptr, -1);
     flush_batch();
+    gPlatGfxStage = "ending the frame";
     gfxb_end_frame();
 #ifdef PORT_GFX_REFERENCE
     if (sRefActive) {

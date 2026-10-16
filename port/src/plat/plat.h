@@ -96,6 +96,22 @@ void plat_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void plat_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void plat_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 
+/*
+ * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
+ * stops counting says which part of the game stopped.
+ */
+enum PlatCounter {
+    PLAT_COUNTER_VI,         /* Retraces seen by the VI thread. */
+    PLAT_COUNTER_GFX_QUEUED, /* Display lists handed to the RCP by the game. */
+    PLAT_COUNTER_GFX_DONE,   /* Display lists the renderer has finished. */
+    PLAT_COUNTER_AUDIO,      /* Audio tasks run. */
+    PLAT_COUNTER_MAIN,       /* Main (system) loop iterations. */
+    PLAT_COUNTER_COUNT
+};
+extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
+/* What the renderer thread is doing right now. */
+extern const char *volatile gPlatGfxStage;
+
 #ifdef __cplusplus
 }
 #endif

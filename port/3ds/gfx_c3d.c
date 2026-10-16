@@ -48,6 +48,10 @@ static C3D_Tex sWhiteTex;
 static int sFrameStarted;
 static int sDepthOnly;
 static int sFrameCount, sFrameTriangles;
+/* For the hang report: the size of the last frame handed to the GPU. */
+static int sLastFrameTriangles;
+static float sLastFrameUsage;
+static int sCmdBufSplits;
 
 /* The N64 picture is 320 pixels wide; by default it is shown centred on the 400 pixel wide top screen. */
 static float sScreenScaleX = 320.0f / 400.0f;
@@ -189,7 +193,22 @@ void gfxb_start_frame(void) {
     if (sFrameCount < 3) {
         plat_log("frame %d: waiting for the GPU", sFrameCount);
     }
-    C3D_FrameBegin(0);
+    gPlatGfxStage = "waiting for the GPU";
+    if (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        // Poll instead of blocking, so that a GPU that never finishes the previous frame gets reported.
+        unsigned long long start = plat_time_ns();
+        int reported = 0;
+        while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+            if (!reported && plat_time_ns() - start > 3000000000ULL) {
+                reported = 1;
+                gPlatGfxStage = "GPU not responding";
+                plat_status("GPU stuck after frame %d (%d triangles, cmd buffer %.0f%%)", sFrameCount - 1,
+                            sLastFrameTriangles, sLastFrameUsage * 100.0f);
+            }
+            plat_sleep_ns(250000);
+        }
+    }
+    gPlatGfxStage = "drawing";
     if (sFrameCount < 3) {
         plat_log("frame %d: GPU ready", sFrameCount);
     }
@@ -304,6 +323,8 @@ void gfxb_end_frame(void) {
                      sFrameTriangles, plat_time_ns() / 1000000ULL, usage * 100.0f, sMaxUsage * 100.0f);
         }
     }
+    sLastFrameTriangles = sFrameTriangles;
+    sLastFrameUsage = C3D_GetCmdBufUsage();
     sFrameTriangles = 0;
     GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
     C3D_FrameEnd(0);
@@ -767,6 +788,16 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
 
     if (sVboUsed + count > VBO_VERTICES) {
         return;
+    }
+    if (C3D_GetCmdBufUsage() > 0.9f) {
+        // A full command buffer silently drops commands, and a half written command can hang the real GPU (an
+        // emulator shrugs it off). Hand what is there to the GPU and carry on in an empty buffer instead.
+        extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
+        if (sCmdBufSplits++ < 5) {
+            plat_log("frame %d: command buffer full, splitting it", sFrameCount);
+        }
+        GSPGPU_FlushDataCache((void *) __ctru_linear_heap, __ctru_linear_heap_size);
+        C3D_FrameSplit(GX_CMDLIST_FLUSH);
     }
     {
         static int sLogFrame = -2;

@@ -33,6 +33,9 @@ static LightLock sIntLock;
 static __thread void *sCurrentOsThread;
 static int sRcpCore;
 static int sAudioCore;
+static LightLock sConsoleLock;
+
+static void watchdog_start(void);
 
 static int prio_from_n64(int n64Priority) {
     int prio;
@@ -53,6 +56,7 @@ void plat_init(void) {
     LightLock_Init(&sKernelLock);
     CondVar_Init(&sKernelCond);
     LightLock_Init(&sIntLock);
+    LightLock_Init(&sConsoleLock);
 
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
     // DKR_SINGLE_CORE=1 keeps everything on the application core, as on an Old 3DS.
@@ -66,6 +70,7 @@ void plat_init(void) {
     // they run next to the renderer at the same high priority. (The system core, which only gives applications a
     // share of its time, made them take several times longer.)
     sAudioCore = sRcpCore;
+    watchdog_start();
 }
 
 /*
@@ -287,6 +292,13 @@ void plat_log(const char *fmt, ...) {
 #endif
 }
 
+/* Makes what the console wrote visible: nothing else flushes the bottom screen's framebuffer from the CPU cache. */
+static void console_flush(void) {
+    u16 width, height;
+    u8 *fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &width, &height);
+    GSPGPU_FlushDataCache(fb, width * height * 2);
+}
+
 /* The bottom screen console is the current one (see main_3ds.c). */
 void plat_status(const char *fmt, ...) {
     char buffer[256];
@@ -295,7 +307,58 @@ void plat_status(const char *fmt, ...) {
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     log_line("", buffer);
+    LightLock_Lock(&sConsoleLock);
     printf("  %s\n", buffer);
+    console_flush();
+    LightLock_Unlock(&sConsoleLock);
+}
+
+/*
+ * The watchdog shows the progress counters (plat.h) at the bottom of the bottom screen once a second, and logs them
+ * every few seconds for the first minute. Its thread has the highest priority an application can use, so it keeps
+ * running even if a game thread never yields; if its line stops updating, the whole system is stuck (for example
+ * the GPU).
+ */
+static void watchdog(void *arg) {
+    unsigned int last[PLAT_COUNTER_COUNT];
+    int seconds = 0;
+
+    (void) arg;
+    memset(last, 0, sizeof(last));
+    for (;;) {
+        char line[2][64];
+        unsigned int now[PLAT_COUNTER_COUNT];
+        int i;
+
+        svcSleepThread(1000000000LL);
+        seconds++;
+        for (i = 0; i < PLAT_COUNTER_COUNT; i++) {
+            now[i] = gPlatCounters[i];
+        }
+        snprintf(line[0], sizeof(line[0]), "%3ds vi%+4d gfx %u/%u aud%+4d sys%+3d", seconds,
+                 (int) (now[PLAT_COUNTER_VI] - last[PLAT_COUNTER_VI]), now[PLAT_COUNTER_GFX_QUEUED],
+                 now[PLAT_COUNTER_GFX_DONE], (int) (now[PLAT_COUNTER_AUDIO] - last[PLAT_COUNTER_AUDIO]),
+                 (int) (now[PLAT_COUNTER_MAIN] - last[PLAT_COUNTER_MAIN]));
+        snprintf(line[1], sizeof(line[1]), "rdp: %.34s", gPlatGfxStage);
+        memcpy(last, now, sizeof(last));
+
+        // Two fixed rows at the bottom; the cursor is put back for the start-up lines.
+        LightLock_Lock(&sConsoleLock);
+        printf("\x1b[s\x1b[29;1H\x1b[2K%.39s\x1b[30;1H\x1b[2K%.39s\x1b[u", line[0], line[1]);
+        console_flush();
+        LightLock_Unlock(&sConsoleLock);
+
+        if (seconds % 5 == 0 && seconds <= 60) {
+            log_line("watchdog: ", line[0]);
+            log_line("watchdog: ", line[1]);
+        }
+    }
+}
+
+static void watchdog_start(void) {
+    if (threadCreate(watchdog, NULL, 8 * 1024, 0x18, 0, true) == NULL) {
+        plat_log("watchdog: could not create its thread");
+    }
 }
 
 void plat_fatal(const char *fmt, ...) {

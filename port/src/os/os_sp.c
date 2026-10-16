@@ -51,11 +51,14 @@ static void gfx_thread(void *arg) {
     port_gfx_init();
     for (;;) {
         unsigned long long start;
+        gPlatGfxStage = "waiting for a display list";
         task = worker_next(&sGfxWorker);
         port_raise_event(OS_EVENT_SP);
         start = plat_time_ns();
         port_gfx_run_task(task);
         port_profile_add(PORT_PROFILE_GFX, plat_time_ns() - start);
+        gPlatCounters[PLAT_COUNTER_GFX_DONE]++;
+        gPlatGfxStage = "raising the DP interrupt";
         plat_klock();
         sGfxTasksPending--;
         plat_kbroadcast();
@@ -75,6 +78,7 @@ static void audio_thread(void *arg) {
             unsigned long long start = plat_time_ns();
             port_audio_run_task(task);
             port_profile_add(PORT_PROFILE_AUDIO, plat_time_ns() - start);
+            gPlatCounters[PLAT_COUNTER_AUDIO]++;
         }
         port_raise_event(OS_EVENT_SP);
     }
@@ -117,6 +121,7 @@ OSYieldResult osSpTaskYielded(OSTask *task) {
 
 /* Called by the game when it hands a display list to the scheduler. */
 void port_rcp_gfx_submitted(void) {
+    gPlatCounters[PLAT_COUNTER_GFX_QUEUED]++;
     plat_klock();
     sGfxTasksPending++;
     plat_kunlock();
