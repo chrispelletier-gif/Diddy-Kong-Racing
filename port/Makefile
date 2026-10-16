@@ -44,7 +44,7 @@ LIBULTRA_SRC := \
 # Port sources that are compiled like game code (libultra headers, no system headers).
 PORT_GAME_SRC := $(wildcard src/*.c src/os/*.c src/game/*.c src/gfx/*.c src/audio/*.c)
 # Port sources that use the platform's own headers.
-PORT_SYS_SRC := src/plat/plat_common.c $(wildcard src/gfx/sys/*.c src/audio/sys/*.c)
+PORT_SYS_SRC := src/plat/plat_common.c src/plat/input_script.c $(wildcard src/gfx/sys/*.c src/audio/sys/*.c)
 
 ifeq ($(TARGET),3ds)
   PORT_SYS_SRC += src/plat/plat_3ds.c $(wildcard 3ds/*.c)
@@ -67,10 +67,12 @@ GAME_INCLUDES := -I$(ROOT) -I$(ROOT)/include -I$(ROOT)/include/libc -I$(ROOT)/in
 
 # The N64 compiler treats char as unsigned and plain C semantics for overflow/aliasing are relied upon.
 COMMON_FLAGS := -funsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-stack-protector
+# DEBUG=asan: AddressSanitizer, plus the float to integer conversions that behave differently on ARM.
+SANITIZE_FLAGS := -fsanitize=address,float-cast-overflow
 ifeq ($(DEBUG),1)
   OPT_FLAGS := -O0 -g
 else ifeq ($(DEBUG),asan)
-  OPT_FLAGS := -O1 -g -fsanitize=address -fno-omit-frame-pointer
+  OPT_FLAGS := -O1 -g $(SANITIZE_FLAGS) -fno-omit-frame-pointer
 else
   OPT_FLAGS := -O2 -g
 endif
@@ -97,7 +99,7 @@ else
   ARCH      := -m32 -msse2 -mfpmath=sse
   SYS_CFLAGS := $(ARCH) -Iinclude -Isrc
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) $(ARCH) -print-file-name=include)
-  LDFLAGS   := $(ARCH) $(if $(filter asan,$(DEBUG)),-fsanitize=address)
+  LDFLAGS   := $(ARCH) $(if $(filter asan,$(DEBUG)),$(SANITIZE_FLAGS))
   LIBS      := -lm -lpthread
   EXE       := $(BUILD_DIR)/dkr
 endif

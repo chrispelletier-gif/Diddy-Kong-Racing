@@ -1118,6 +1118,10 @@ void obj_loop_characterflag(Object *obj, UNUSED s32 updateRate) {
             flagModel->texture = obj->textures[obj->properties.characterFlag.characterID];
             temp_t4 = (flagModel->texture->width - 1) << 21;
             temp_t5 = (flagModel->texture->height - 1) << 5;
+#ifdef TARGET_PORT
+            temp_t4 = TEXCOORDS_WORD(temp_t4);
+            temp_t5 = TEXCOORDS_WORD(temp_t5);
+#endif
             // 0x40 = Draw backface
             flagModel->triangles[0].vertices = DKR_TRIANGLE(BACKFACE_DRAW, 0, 1, 3);
             flagModel->triangles[0].uv0.texCoords = 0;

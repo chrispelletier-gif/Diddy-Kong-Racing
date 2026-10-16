@@ -1484,8 +1484,8 @@ void trackbg_render_flashy(void) {
 
     var_a3 = COLOUR_RGBA32(255, 255, 255, 0);
     if (var_t2 != NULL) {
-        var_a2 = var_t2->rgba.word;
-        var_a3 = levelHeader->rgba.word & (~0xFF);
+        var_a2 = COLOUR_WORD(var_t2->rgba);
+        var_a3 = COLOUR_WORD(levelHeader->rgba) & (~0xFF);
     }
 
     gfx_init_basic_xlu(&gTrackDL, 1, var_a2, var_a3);

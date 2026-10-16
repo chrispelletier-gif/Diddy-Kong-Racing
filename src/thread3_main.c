@@ -39,9 +39,6 @@
 #include "textures_sprites.h"
 #include "thread0_epc.h"
 #include "thread30_bgload.h"
-#ifdef TARGET_PORT
-#include "port.h"
-#endif
 #include "tracks.h"
 #include "types.h"
 #include "video.h"
@@ -286,9 +283,6 @@ void main_game_loop(void) {
     bgdraw_render(&gCurrDisplayList, &gGameCurrMatrix, TRUE);
     gSaveDataFlags = input_update(gSaveDataFlags, sLogicUpdateRate);
     if (get_lockup_status()) {
-#ifdef PORT_DEBUG_GAMELOOP
-        port_log("lockup status %d", get_lockup_status());
-#endif
         render_epc_lock_up_display();
         gGameMode = GAMEMODE_LOCKUP;
     }
@@ -302,16 +296,6 @@ void main_game_loop(void) {
         }
     }
 
-#ifdef PORT_DEBUG_GAMELOOP
-    extern s32 gCurrentMenuId;
-    {
-        static s32 sDbgFrames;
-        if ((sDbgFrames++ % 60) == 0) {
-            port_log("loop %d: mode %d boot %d menu %d loading %d rate %d", sDbgFrames, gGameMode, sBootDelayTimer,
-                     gCurrentMenuId, gIsLoading, sLogicUpdateRate);
-        }
-    }
-#endif
     switch (gGameMode) {
         case GAMEMODE_INTRO: // Pre-boot screen
             mode_intro();

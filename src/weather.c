@@ -698,9 +698,20 @@ void lensflare_render(Gfx **dList, Mtx **mats, Vertex **verts, Camera *camera) {
                             gDPSetPrimColor((*dList)++, 0, 0, lensFlareData->colour.r, lensFlareData->colour.g,
                                             lensFlareData->colour.b,
                                             (s32) (lensFlareData->colour.a * magSquareSquared));
+#ifdef AVOID_UB
+                            {
+                                // The billboard code reads Object fields past the transform, so pass a whole object.
+                                static Object sFlareObj;
+                                sFlareObj.trans = trans;
+                                render_sprite_billboard(dList, mats, verts, &sFlareObj,
+                                                        gLensFlare->sprites[lensFlareData->count],
+                                                        (RENDER_SEMI_TRANSPARENT | RENDER_Z_UPDATE));
+                            }
+#else
                             render_sprite_billboard(dList, mats, verts, (Object *) &trans,
                                                     gLensFlare->sprites[lensFlareData->count],
                                                     (RENDER_SEMI_TRANSPARENT | RENDER_Z_UPDATE));
+#endif
                             lensFlareData++;
                         }
                     }

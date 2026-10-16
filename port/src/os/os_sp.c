@@ -122,9 +122,17 @@ void port_rcp_gfx_submitted(void) {
  * drawn still uses, relying on the RCP having finished long before. This makes that safe however slow rendering is.
  */
 void port_rcp_wait_idle(void) {
+    int wasDisabled;
+    if (sGfxTasksPending <= 0) {
+        return;
+    }
+    // Callers may have "interrupts" disabled, but the frame can only finish if the VI and RCP threads can still
+    // raise their events, so let them in while waiting (as the OS does for any blocking call).
+    wasDisabled = port_int_release();
     plat_klock();
     while (sGfxTasksPending > 0) {
         plat_kwait();
     }
     plat_kunlock();
+    port_int_restore(wasDisabled);
 }

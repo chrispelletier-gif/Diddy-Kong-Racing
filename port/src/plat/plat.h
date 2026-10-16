@@ -73,6 +73,9 @@ int plat_snprintf(char *buf, size_t size, const char *fmt, ...) __attribute__((f
 /* Returns an environment variable / configuration value, or NULL. */
 const char *plat_getenv(const char *name);
 
+/* Scripted input (DKR_INPUT) for automated tests. Returns nonzero when a script is set. */
+int plat_input_script(int poll, unsigned short *buttons, signed char *stickX, signed char *stickY);
+
 /* Directory where the ROM and save files live. */
 const char *plat_data_dir(void);
 

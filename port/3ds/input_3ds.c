@@ -79,6 +79,18 @@ void port_input_poll(PortControllerState *state, s32 maxControllers) {
     }
     state[0].stickX = scale_axis(pad.dx);
     state[0].stickY = scale_axis(pad.dy);
+
+    // A test script (DKR_INPUT in env.txt) replaces the real controls.
+    {
+        static int sPolls;
+        unsigned short buttons = 0;
+        signed char x = 0, y = 0;
+        if (plat_input_script(sPolls++, &buttons, &x, &y)) {
+            state[0].buttons = buttons;
+            state[0].stickX = x;
+            state[0].stickY = y;
+        }
+    }
 }
 
 void port_rumble(s32 controller, s32 enable) {

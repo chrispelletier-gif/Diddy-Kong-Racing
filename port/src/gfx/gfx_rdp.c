@@ -610,8 +610,9 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
         // Fog, as the RSP computes it from the normalised depth.
         {
             float w = (v->w != 0.0f) ? v->w : 0.0001f;
-            s32 fog = (s32) ((v->z / w) * g.fogMul + g.fogOffset);
-            v->fog = (fog < 0) ? 0 : (fog > 255) ? 255 : fog;
+            // Clamp before converting: out of range float to int conversions differ between CPUs.
+            float fog = (v->z / w) * g.fogMul + g.fogOffset;
+            v->fog = (fog < 0.0f) ? 0 : (fog > 255.0f) ? 255 : (u8) fog;
         }
     }
 }
@@ -824,7 +825,7 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         u32 op = w0 >> 24;
         dl++;
         executed++;
-        TRACE("%*s%08X %08X", depth * 2, "", (unsigned) w0, (unsigned) w1);
+        TRACE("%*s%08X %08X", (int) (depth * 2), "", (unsigned) w0, (unsigned) w1);
 
         switch (op) {
             case OP(G_SPNOOP):

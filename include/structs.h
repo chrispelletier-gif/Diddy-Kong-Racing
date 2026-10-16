@@ -595,7 +595,15 @@ typedef struct TexCoords {
 #define BACKFACE_DRAW 0x40
 #define TRI_FLAG_80 0x80
 
+#ifdef TARGET_PORT
+// Written to Triangle.vertices, whose bytes are read as flags, vi0, vi1, vi2: lay the word out for little endian.
+#define DKR_TRIANGLE(flags, ind0, ind1, ind2) (((flags) << 0) | ((ind0) << 8) | ((ind1) << 16) | ((u32) (ind2) << 24))
+// Converts a big endian (u << 16 | v) word for TexCoords.texCoords.
+#define TEXCOORDS_WORD(w) (((u32) (w) >> 16) | ((u32) (w) << 16))
+#else
 #define DKR_TRIANGLE(flags, ind0, ind1, ind2) (((flags) << 24) | ((ind0) << 16) | ((ind1) << 8) | ((ind2) << 0))
+#define TEXCOORDS_WORD(w) (w)
+#endif
 
 /* Size: 0x10 bytes */
 typedef struct Triangle {

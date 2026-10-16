@@ -84,6 +84,15 @@
 // Used to make a u32 colour value look clearer. Transforms 0xFF0000FF to 255, 0, 0, 255
 #define COLOUR_RGBA32(r, g, b, a) ((u32)((r << 24) | (g << 16) |  (b << 8) | a))
 
+// ColourRGBA.word only equals COLOUR_RGBA32(r, g, b, a) on big endian machines. These convert explicitly.
+#ifdef TARGET_PORT
+#define COLOUR_WORD(c) COLOUR_RGBA32((u32) (c).r, (u32) (c).g, (u32) (c).b, (u32) (c).a)
+#define COLOUR_SET_WORD(c, w) ((c).r = (u8) ((w) >> 24), (c).g = (u8) ((w) >> 16), (c).b = (u8) ((w) >> 8), (c).a = (u8) (w))
+#else
+#define COLOUR_WORD(c) ((c).word)
+#define COLOUR_SET_WORD(c, w) ((c).word = (w))
+#endif
+
 // A few systems in the game use an array as a cache table. This gives you the asset ID
 #define ASSETCACHE_ID(x)    ((x << 1) + 0)
 // A few systems in the game use an array as a cache table. This gives you the pointer to the asset
