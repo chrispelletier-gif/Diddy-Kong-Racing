@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 void *plat_load_file(const char *path, unsigned int *size) {
     FILE *f = fopen(path, "rb");
@@ -78,11 +79,44 @@ void port_fatal(const char *fmt, ...) {
     plat_fatal("%s", buffer);
 }
 
-const char *plat_getenv(const char *name) {
 #ifdef __3DS__
-    (void) name;
+/* There is no environment on the 3DS, so the same settings can be given as NAME=VALUE lines in env.txt. */
+const char *plat_getenv(const char *name) {
+    static char *sEnvFile;
+    static int sLoaded;
+    size_t nameLen = strlen(name);
+    char *line;
+
+    if (!sLoaded) {
+        char path[256];
+        unsigned int size;
+        sLoaded = 1;
+        snprintf(path, sizeof(path), "%s/env.txt", plat_data_dir());
+        sEnvFile = plat_load_file(path, &size);
+        if (sEnvFile != NULL) {
+            sEnvFile = realloc(sEnvFile, size + 2);
+            sEnvFile[size] = 0;
+            sEnvFile[size + 1] = 1; // Marks the end; lines are separated by NULs.
+            for (line = sEnvFile; *line; line++) {
+                if (*line == '\r' || *line == '\n') {
+                    *line = 0;
+                }
+            }
+        }
+    }
+    if (sEnvFile == NULL) {
+        return NULL;
+    }
+    for (line = sEnvFile; *line != 1;) {
+        if (strncmp(line, name, nameLen) == 0 && line[nameLen] == '=') {
+            return line + nameLen + 1;
+        }
+        line += strlen(line) + 1;
+    }
     return NULL;
-#else
-    return getenv(name);
-#endif
 }
+#else
+const char *plat_getenv(const char *name) {
+    return getenv(name);
+}
+#endif

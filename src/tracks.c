@@ -3883,9 +3883,16 @@ void func_8002F440(void) {
     Triangle *tri;
     Vertex *vert;
     s32 alpha;
+#ifdef AVOID_UB
+    // A clipped polygon can have up to 8 vertices (unk8011C238.unk2).
+    s16 sp90[8];
+    s32 var_s2;
+    s16 sp80[8];
+#else
     s16 sp90[6];
     s32 var_s2;
     s16 sp80[6];
+#endif
     f32 temp_f18;
     f32 yRotCos;
     f32 yRotSin;

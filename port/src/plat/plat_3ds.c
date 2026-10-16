@@ -183,13 +183,34 @@ const char *plat_data_dir(void) {
     return "sdmc:/3ds/dkr";
 }
 
+/* Creating sdmc:/3ds/dkr/debug turns on logging to sdmc:/3ds/dkr/log.txt. */
+static FILE *log_file(void) {
+    static int sChecked;
+    static FILE *sFile;
+    if (!sChecked) {
+        FILE *flag = fopen("sdmc:/3ds/dkr/debug", "rb");
+        sChecked = 1;
+        if (flag != NULL) {
+            fclose(flag);
+            sFile = fopen("sdmc:/3ds/dkr/log.txt", "w");
+        }
+    }
+    return sFile;
+}
+
 void plat_log(const char *fmt, ...) {
     char buffer[256];
+    FILE *file;
     va_list args;
     va_start(args, fmt);
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     svcOutputDebugString(buffer, strlen(buffer));
+    file = log_file();
+    if (file != NULL) {
+        fprintf(file, "%s\n", buffer);
+        fflush(file);
+    }
 #ifdef PORT_DEBUG_CONSOLE
     printf("%s\n", buffer);
 #endif

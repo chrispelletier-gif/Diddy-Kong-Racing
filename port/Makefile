@@ -58,7 +58,7 @@ GAME_DEFINES := -DTARGET_PORT=1 -DNON_MATCHING=1 -DAVOID_UB=1 -D_LANGUAGE_C -D_F
                 -DVERSION_$(REGION)_$(VERSION) -DBUILD_VERSION=VERSION_G -DBUILD_VERSION_STRING=\"2.0G\" \
                 -D_MIPS_SZLONG=32
 # libultra names that clash with libctru/newlib symbols.
-GAME_DEFINES += -DosGetTime=n64_osGetTime -D__assert=n64___assert
+GAME_DEFINES += -DosGetTime=n64_osGetTime -D__assert=n64___assert $(EXTRA_DEFINES)
 
 GAME_INCLUDES := -I$(ROOT) -I$(ROOT)/include -I$(ROOT)/include/libc -I$(ROOT)/include/PR -I$(ROOT)/include/sys \
                  -I$(ROOT)/src -I$(ROOT)/libultra -I$(ROOT)/libultra/src/gu -I$(ROOT)/libultra/src/libc \
@@ -69,6 +69,8 @@ GAME_INCLUDES := -I$(ROOT) -I$(ROOT)/include -I$(ROOT)/include/libc -I$(ROOT)/in
 COMMON_FLAGS := -funsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-stack-protector
 ifeq ($(DEBUG),1)
   OPT_FLAGS := -O0 -g
+else ifeq ($(DEBUG),asan)
+  OPT_FLAGS := -O1 -g -fsanitize=address -fno-omit-frame-pointer
 else
   OPT_FLAGS := -O2 -g
 endif
@@ -82,10 +84,12 @@ ifeq ($(TARGET),3ds)
   PREFIX    := $(DEVKITARM)/bin/arm-none-eabi-
   CC        := $(PREFIX)gcc
   ARCH      := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
+  # The ARM EABI default of variable sized enums would change the layout of the game's structs.
+  GAME_ARCH_FLAGS := -fno-short-enums
   CTRULIB   := $(DEVKITPRO)/libctru
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -Iinclude -Isrc
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
-  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map
+  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning
   LIBS      := -lcitro3d -lctru -lm
   EXE       := $(BUILD_DIR)/dkr.elf
 else
@@ -93,14 +97,14 @@ else
   ARCH      := -m32 -msse2 -mfpmath=sse
   SYS_CFLAGS := $(ARCH) -Iinclude -Isrc
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) $(ARCH) -print-file-name=include)
-  LDFLAGS   := $(ARCH)
+  LDFLAGS   := $(ARCH) $(if $(filter asan,$(DEBUG)),-fsanitize=address)
   LIBS      := -lm -lpthread
   EXE       := $(BUILD_DIR)/dkr
 endif
 
-GAME_CFLAGS := $(ARCH) $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
+GAME_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
                -include port_swap.h -w -Werror=implicit-function-declaration
-PORT_CFLAGS := $(ARCH) $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
+PORT_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
                -Wall -Wno-unused-function -Wno-missing-braces -Werror=implicit-function-declaration
 SYS_CFLAGS  += $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu99 -Wall -Wno-unused-function
 

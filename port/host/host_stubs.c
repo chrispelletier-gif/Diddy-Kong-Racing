@@ -33,8 +33,28 @@ static unsigned long long audio_played_bytes(void) {
     return (plat_time_ns() - sAudioStart) * sAudioFrequency / 1000000000ULL * 4;
 }
 
+/* DKR_DUMP_AUDIO names a file that receives every buffer as raw 16 bit stereo PCM at the output frequency. */
+static void dump_audio(const s16 *samples, u32 numBytes) {
+    static FILE *sFile;
+    static int sOpened;
+    if (!sOpened) {
+        const char *path = getenv("DKR_DUMP_AUDIO");
+        sOpened = 1;
+        if (path != NULL) {
+            sFile = fopen(path, "wb");
+            if (sFile != NULL) {
+                fprintf(stderr, "Dumping audio at %u Hz to %s\n", sAudioFrequency, path);
+            }
+        }
+    }
+    if (sFile != NULL) {
+        fwrite(samples, 1, numBytes, sFile);
+        fflush(sFile);
+    }
+}
+
 void port_audio_output_queue(const s16 *samples, u32 numBytes) {
-    (void) samples;
+    dump_audio(samples, numBytes);
     if (sAudioStart == 0) {
         sAudioStart = plat_time_ns();
     }

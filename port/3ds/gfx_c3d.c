@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "gfx/gfx_backend.h"
+#include "plat/plat.h"
 #include "shader_shbin.h"
 
 #define DISPLAY_TRANSFER_FLAGS                                                                                         \
@@ -41,6 +42,8 @@ static C3DVertex *sVbo;
 static int sVboUsed;
 static C3D_Tex sWhiteTex;
 static int sFrameStarted;
+static int sDepthOnly;
+static int sFrameCount, sFrameTriangles;
 
 /* The N64 picture is 320 pixels wide; by default it is shown centred on the 400 pixel wide top screen. */
 static float sScreenScaleX = 320.0f / 400.0f;
@@ -122,6 +125,11 @@ void gfxb_start_frame(void) {
 
 void gfxb_end_frame(void) {
     int i;
+    if ((sFrameCount++ % 120) == 0) {
+        plat_log("frame %d: %d triangles", sFrameCount, sFrameTriangles);
+    }
+    sFrameTriangles = 0;
+    GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
     C3D_FrameEnd(0);
     sFrameStarted = 0;
     // The GPU has finished with the previous frame's textures once the next frame can begin, but C3D_FrameEnd
@@ -536,7 +544,9 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
             break;
     }
     C3D_AlphaTest(state->alphaTest, GPU_GEQUAL, state->alphaRef);
-    if (state->depthTest || state->depthWrite) {
+    if (sDepthOnly) {
+        C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_DEPTH);
+    } else if (state->depthTest || state->depthWrite) {
         C3D_DepthTest(true, state->depthTest ? GPU_GEQUAL : GPU_ALWAYS,
                       state->depthWrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
     } else {
@@ -564,6 +574,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     }
     C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, count);
     sVboUsed += count;
+    sFrameTriangles += numTriangles;
 }
 
 /* Draws a screen rectangle with a flat colour, optionally only writing depth. */
@@ -596,18 +607,19 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
         v[i].b = rgba >> 8;
         v[i].a = rgba;
     }
-    if (depthOnly) {
-        state.depthTest = 0;
-        state.depthWrite = 1;
-    }
+    sDepthOnly = depthOnly;
     gfxb_draw_triangles(&state, v, 2);
-    if (depthOnly) {
-        // gfxb_draw_triangles also wrote colour; depth clears must not.
-    }
+    sDepthOnly = 0;
+}
+
+/* A full clear can use the faster memory fill, but only before anything is drawn: fills are not ordered with draws. */
+static int is_full_clear(const short rect[4]) {
+    return sVboUsed == 0 && rect[0] <= 0 && rect[1] <= 0 && rect[2] >= GFX_SCREEN_WIDTH - 1 &&
+           rect[3] >= GFX_SCREEN_HEIGHT - 1;
 }
 
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
-    if (rect[0] <= 0 && rect[1] <= 0 && rect[2] >= GFX_SCREEN_WIDTH && rect[3] >= GFX_SCREEN_HEIGHT) {
+    if (is_full_clear(rect)) {
         C3D_FrameBufClear(&sTarget->frameBuf, C3D_CLEAR_COLOR, (r << 24) | (g << 16) | (b << 8) | a, 0);
         return;
     }
@@ -615,11 +627,9 @@ void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, uns
 }
 
 void gfxb_clear_depth(const short rect[4]) {
-    if (rect[0] <= 0 && rect[1] <= 0 && rect[2] >= GFX_SCREEN_WIDTH && rect[3] >= GFX_SCREEN_HEIGHT) {
+    if (is_full_clear(rect)) {
         C3D_FrameBufClear(&sTarget->frameBuf, C3D_CLEAR_DEPTH, 0, 0);
         return;
     }
-    C3D_ColorLogicOp(GPU_LOGICOP_NOOP);
     draw_clear_rect(rect, 0, 1);
-    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 }

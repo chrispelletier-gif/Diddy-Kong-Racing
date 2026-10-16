@@ -7847,7 +7847,13 @@ UNUSED void func_8001D248(UNUSED s32 arg0, UNUSED s32 arg1, UNUSED s32 arg2) {
  * Presumably intended for level geometry, which supports shading, but never uses it.
  */
 void set_world_shading(f32 ambient, f32 diffuse, s16 angleX, s16 angleY, s16 angleZ) {
+#ifdef AVOID_UB
+    // The original writes a whole ShadeProperties over the pointer and the variables that follow it.
+    static ShadeProperties sWorldShading;
+    set_shading_properties(&sWorldShading, ambient, diffuse, angleX, angleY, angleZ);
+#else
     set_shading_properties((ShadeProperties *) &gWorldShading, ambient, diffuse, angleX, angleY, angleZ);
+#endif
 }
 
 /**
