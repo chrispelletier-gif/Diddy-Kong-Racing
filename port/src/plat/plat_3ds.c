@@ -71,6 +71,11 @@ void plat_init(void) {
     // share of its time, made them take several times longer.)
     sAudioCore = sRcpCore;
     watchdog_start();
+    {
+        // citro3d is set up (and the GPU self test run) on the main thread, as in SM64's 3DS port.
+        extern void gfxb_init(void);
+        gfxb_init();
+    }
 }
 
 /*

@@ -3,7 +3,7 @@
 ifeq ($(TARGET),3ds)
 
 TOOLS_BIN   := $(DEVKITPRO)/tools/bin
-SHADER_SRC  := 3ds/shader.v.pica
+SHADER_SRC  := 3ds/shader.v.pica 3ds/shader_test.v.pica
 SHADER_BIN  := $(BUILD_DIR)/shader/shader.shbin
 SHADER_ASM  := $(BUILD_DIR)/shader/shader_shbin.s
 SHADER_HDR  := $(BUILD_DIR)/shader/shader_shbin.h
@@ -18,8 +18,8 @@ SYS_CFLAGS += -I$(BUILD_DIR)/shader
 
 $(SHADER_BIN): $(SHADER_SRC)
 	@mkdir -p $(dir $@)
-	@echo "PICASSO $<"
-	@$(TOOLS_BIN)/picasso -o $@ $<
+	@echo "PICASSO $^"
+	@$(TOOLS_BIN)/picasso -o $@ $^
 
 $(SHADER_ASM) $(SHADER_HDR): $(SHADER_BIN)
 	@cd $(dir $<) && $(TOOLS_BIN)/bin2s -a 4 -H shader_shbin.h shader.shbin > shader_shbin.s

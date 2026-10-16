@@ -134,6 +134,7 @@ static void gpu_test_end(const char *what) {
 static void gpu_self_test(void) {
     static const char *const sNames[] = {
         "empty frame",
+        "pass-through shader (as SM64)",
         "triangle, float colours",
         "triangle, byte colours",
         "+ texture unit 1",
@@ -158,8 +159,46 @@ static void gpu_self_test(void) {
     gpu_test_step(sNames[0]);
     gpu_test_end(sNames[0]);
 
-    // 2: one flat triangle with the simplest state, colours as floats (the layout SM64's 3DS port uses).
+    // 2: the SM64 3DS port's setup: a pass-through shader with three float attributes.
     gpu_test_step(sNames[1]);
+    {
+        static const float sTri[3][10] = {
+            { -0.5f, -0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f },
+            { 0.5f, -0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f },
+            { 0.0f, 0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f },
+        };
+        static shaderProgram_s sTestProgram;
+        C3D_AttrInfo *attr = C3D_GetAttrInfo();
+        C3D_BufInfo *buf = C3D_GetBufInfo();
+        memcpy(sVbo, sTri, sizeof(sTri));
+        shaderProgramInit(&sTestProgram);
+        shaderProgramSetVsh(&sTestProgram, &sShaderDvlb->DVLE[1]);
+        C3D_BindProgram(&sTestProgram);
+        AttrInfo_Init(attr);
+        AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
+        AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
+        AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 4);
+        BufInfo_Init(buf);
+        BufInfo_Add(buf, sVbo, 10 * sizeof(float), 3, 0x210);
+        C3D_TexBind(0, &sWhiteTex);
+        env = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        for (i = 1; i < 6; i++) {
+            C3D_TexEnvInit(C3D_GetTexEnv(i));
+        }
+        C3D_CullFace(GPU_CULL_NONE);
+        C3D_DepthMap(true, -1.0f, 0.0f);
+        C3D_DepthTest(false, GPU_LEQUAL, GPU_WRITE_ALL);
+        C3D_AlphaTest(true, GPU_GREATER, 0x00);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    }
+    gpu_test_end(sNames[1]);
+    C3D_BindProgram(&sProgram);
+
+    // 3: one flat triangle with the simplest state, colours as floats (the layout SM64's 3DS port uses).
+    gpu_test_step(sNames[2]);
     {
         float *fv = (float *) sVbo;
         C3DVertex tmp[3];
@@ -195,10 +234,10 @@ static void gpu_self_test(void) {
         set_projection();
         C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
     }
-    gpu_test_end(sNames[1]);
+    gpu_test_end(sNames[2]);
 
-    // 3: the same with the renderer's own vertex layout (colours as bytes).
-    gpu_test_step(sNames[2]);
+    // 4: the same with the renderer's own vertex layout (colours as bytes).
+    gpu_test_step(sNames[3]);
     {
         C3D_AttrInfo *attr = C3D_GetAttrInfo();
         C3D_BufInfo *buf = C3D_GetBufInfo();
@@ -212,33 +251,33 @@ static void gpu_self_test(void) {
         gpu_test_triangle(sVbo);
         C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
     }
-    gpu_test_end(sNames[2]);
-
-    // 4 to 9: add the renderer's features one at a time.
-    gpu_test_step(sNames[3]);
-    gpu_test_triangle(sVbo);
-    C3D_TexBind(1, &sWhiteTex);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
     gpu_test_end(sNames[3]);
 
+    // 5 to 10: add the renderer's features one at a time.
     gpu_test_step(sNames[4]);
     gpu_test_triangle(sVbo);
-    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_TexBind(1, &sWhiteTex);
     C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
     gpu_test_end(sNames[4]);
 
     gpu_test_step(sNames[5]);
     gpu_test_triangle(sVbo);
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, 40, 40, 400, 700);
+    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
     C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
     gpu_test_end(sNames[5]);
 
     gpu_test_step(sNames[6]);
     gpu_test_triangle(sVbo);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, 40, 40, 400, 700);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[6]);
+
+    gpu_test_step(sNames[7]);
+    gpu_test_triangle(sVbo);
     C3D_DepthTest(true, GPU_GEQUAL, GPU_WRITE_ALL);
     C3D_DepthMap(true, -1.0f, 0.0002f);
     C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
-    gpu_test_end(sNames[6]);
+    gpu_test_end(sNames[7]);
 
     memset(&state, 0, sizeof(state));
     state.combiner.numCycles = 1;
@@ -249,13 +288,13 @@ static void gpu_self_test(void) {
     state.combiner.alpha[0] = state.combiner.rgb[0];
     state.prim[0] = state.prim[1] = state.prim[2] = state.prim[3] = 255;
 
-    gpu_test_step(sNames[7]);
+    gpu_test_step(sNames[8]);
     gpu_test_triangle(sVbo);
     apply_combiner(&state);
     C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
-    gpu_test_end(sNames[7]);
+    gpu_test_end(sNames[8]);
 
-    gpu_test_step(sNames[8]);
+    gpu_test_step(sNames[9]);
     gpu_test_triangle(sVbo);
     state.fogEnabled = 1;
     state.fogMul = 256;
@@ -264,9 +303,9 @@ static void gpu_self_test(void) {
     C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
     state.fogEnabled = 0;
     apply_fog(&state);
-    gpu_test_end(sNames[8]);
+    gpu_test_end(sNames[9]);
 
-    gpu_test_step(sNames[9]);
+    gpu_test_step(sNames[10]);
     {
         static const short sFull[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
         sVboUsed = 0;
@@ -275,17 +314,23 @@ static void gpu_self_test(void) {
         sVboUsed = 0;
         sFrameTriangles = 0;
     }
-    gpu_test_end(sNames[9]);
+    gpu_test_end(sNames[10]);
 
     plat_status("GPU test passed");
 }
 
 void gfxb_init(void) {
+    static int sDone;
     C3D_AttrInfo *attr;
     C3D_BufInfo *buf;
     u32 white[64];
     int i;
 
+    // Called early from the main thread (plat_init), and again by the renderer thread.
+    if (sDone) {
+        return;
+    }
+    sDone = 1;
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
     {
         // Anti-aliasing is on unless DKR_AA=0. The doubled target needs 3MB of VRAM, so fall back if it does not fit.
