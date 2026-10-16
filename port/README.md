@@ -105,6 +105,15 @@ environment variables:
 `make -C port TARGET=host DEBUG=asan BUILD_DIR=build/asan` builds with AddressSanitizer, which is how the original
 memory bugs above were found.
 
+## Graphics
+
+The top screen is anti-aliased by default: frames are drawn at twice the resolution in each direction and
+downsampled when they are sent to the screen. It only costs GPU time (the CPU work is unchanged). To turn it off, put
+`DKR_AA=0` in `sdmc:/3ds/dkr/env.txt`.
+
+In Azahar you can also raise the internal resolution in the graphics settings; the port renders on the 3DS GPU, so
+that applies to it as well.
+
 ## Debug settings on the 3DS
 
 Create `sdmc:/3ds/dkr/debug` (an empty file) to log to `sdmc:/3ds/dkr/log.txt`. Settings go in

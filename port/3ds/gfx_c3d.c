@@ -13,10 +13,11 @@
 #include "plat/plat.h"
 #include "shader_shbin.h"
 
-#define DISPLAY_TRANSFER_FLAGS                                                                                         \
+/* The display transfer converts to the screen's format and, with anti-aliasing, averages each 2x2 block of pixels. */
+#define DISPLAY_TRANSFER_FLAGS(scaling)                                                                                \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |                                 \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |                    \
-     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+     GX_TRANSFER_SCALING(scaling))
 
 #define TOP_WIDTH 400
 #define TOP_HEIGHT 240
@@ -35,6 +36,8 @@ typedef struct C3DTexture {
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
+/* Render target size relative to the screen: 2 draws at twice the resolution and downsamples (anti-aliasing). */
+static int sRenderScale = 1;
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
 static int sLocProjection, sLocTexScale, sLocTexOffset;
@@ -78,8 +81,22 @@ void gfxb_init(void) {
     int i;
 
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
-    sTarget = C3D_RenderTargetCreate(TOP_HEIGHT, TOP_WIDTH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-    C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+    {
+        // Anti-aliasing is on unless DKR_AA=0. The doubled target needs 3MB of VRAM, so fall back if it does not fit.
+        const char *aa = plat_getenv("DKR_AA");
+        sTarget = NULL;
+        if (aa == NULL || atoi(aa) != 0) {
+            sTarget = C3D_RenderTargetCreate(TOP_HEIGHT * 2, TOP_WIDTH * 2, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+            sRenderScale = 2;
+        }
+        if (sTarget == NULL) {
+            sTarget = C3D_RenderTargetCreate(TOP_HEIGHT, TOP_WIDTH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+            sRenderScale = 1;
+        }
+        C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT,
+                                  DISPLAY_TRANSFER_FLAGS(sRenderScale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO));
+        plat_log("render scale %d", sRenderScale);
+    }
 
     sShaderDvlb = DVLB_ParseFile((u32 *) shader_shbin, shader_shbin_size);
     shaderProgramInit(&sProgram);
@@ -627,7 +644,8 @@ static void set_scissor(const short rect[4]) {
             return;
         }
     }
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, left, top, right, bottom);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, left * sRenderScale, top * sRenderScale, right * sRenderScale,
+                   bottom * sRenderScale);
 }
 
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
