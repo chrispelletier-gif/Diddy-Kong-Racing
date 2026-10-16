@@ -31,6 +31,10 @@ static unsigned long long sNextVblank;
 void plat_init(void) {
 }
 
+unsigned long long plat_idle_ns(void) {
+    return 0;
+}
+
 void plat_shutdown(void) {
 }
 

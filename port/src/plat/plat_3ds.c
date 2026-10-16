@@ -55,10 +55,6 @@ void plat_init(void) {
     LightLock_Init(&sIntLock);
 
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
-    // Let the application use part of the system core (core 1).
-    sAudioCore = (APT_SetAppCpuTimeLimit(30) == 0) ? 1 : 0;
-    plat_log("audio worker on core %d", sAudioCore);
-
     APT_CheckNew3DS(&isNew3DS);
     if (isNew3DS) {
         osSetSpeedupEnable(true);
@@ -66,6 +62,37 @@ void plat_init(void) {
     } else {
         sRcpCore = 0;
     }
+    // The scheduler cannot start the next frame while an audio task is running, so audio tasks must finish quickly:
+    // they run next to the renderer at the same high priority. (The system core, which only gives applications a
+    // share of its time, made them take several times longer.)
+    sAudioCore = sRcpCore;
+}
+
+/*
+ * With DKR_PROFILE set, a lowest priority thread on the application core measures how much time is left over.
+ * It spins in short slices and counts how long each slice took.
+ */
+static volatile unsigned long long sIdleNs;
+
+static void idle_meter(void *arg) {
+    (void) arg;
+    for (;;) {
+        unsigned long long start = plat_time_ns(), now;
+        do {
+            now = plat_time_ns();
+        } while (now - start < 200000ULL);
+        // A slice that took much longer than 0.2ms means higher priority threads ran in between.
+        sIdleNs += 200000ULL;
+    }
+}
+
+unsigned long long plat_idle_ns(void) {
+    static int sStarted;
+    if (!sStarted) {
+        sStarted = 1;
+        threadCreate(idle_meter, NULL, 4096, 0x3F, 0, true);
+    }
+    return sIdleNs;
 }
 
 void plat_shutdown(void) {
@@ -95,7 +122,6 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             stackSize = 128 * 1024;
             break;
         case PLAT_THREAD_AUDIO:
-            // The system core has time to spare (see plat_init), which is plenty for the audio mixing.
             prio = PRIO_RCP;
             core = sAudioCore;
             stackSize = 64 * 1024;

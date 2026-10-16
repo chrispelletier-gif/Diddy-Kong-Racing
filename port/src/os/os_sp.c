@@ -148,6 +148,7 @@ static unsigned long long sProfileTotals[PORT_PROFILE_COUNT];
 static unsigned long long sProfileStart;
 static s32 sProfileFrames;
 static s32 sProfileEnabled = -1;
+static unsigned long long sProfileIdleStart;
 
 void port_profile_add(s32 category, unsigned long long ns) {
     sProfileTotals[category] += ns;
@@ -165,11 +166,15 @@ void port_profile_frame(void) {
     }
     if (sProfileStart == 0) {
         sProfileStart = now;
+        sProfileIdleStart = plat_idle_ns();
     }
     if (++sProfileFrames == 120) {
         unsigned long long elapsed = now - sProfileStart;
-        port_log("profile: %.1f fps, gfx %.2f ms/frame, audio %.2f ms/frame", 120.0 * 1e9 / (double) elapsed,
-                 sProfileTotals[PORT_PROFILE_GFX] / 120.0 / 1e6, sProfileTotals[PORT_PROFILE_AUDIO] / 120.0 / 1e6);
+        unsigned long long idle = plat_idle_ns();
+        port_log("profile: %.1f fps, gfx %.2f ms/frame, audio %.2f ms/frame, core 0 idle %.0f%%",
+                 120.0 * 1e9 / (double) elapsed, sProfileTotals[PORT_PROFILE_GFX] / 120.0 / 1e6,
+                 sProfileTotals[PORT_PROFILE_AUDIO] / 120.0 / 1e6, 100.0 * (idle - sProfileIdleStart) / elapsed);
+        sProfileIdleStart = idle;
         for (i = 0; i < PORT_PROFILE_COUNT; i++) {
             sProfileTotals[i] = 0;
         }

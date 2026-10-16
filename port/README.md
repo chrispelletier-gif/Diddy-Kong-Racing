@@ -121,7 +121,10 @@ emulated DSP does not need the real firmware.
 ## Status
 
 - **Tested in Azahar:** the intro, attract mode and menus, the adventure hub and races.
-- **Untested:** real hardware. Performance there is unknown, especially on an original 3DS.
+- **Performance in Azahar:** races run at the game's 30 fps cap in both Old 3DS and New 3DS mode, with time to
+  spare (`DKR_PROFILE=1` in `env.txt` logs the frame rate, graphics and audio time, and idle time).
+- **Untested:** real hardware. Azahar does not model CPU timing exactly, so expect the real frame rate to be lower,
+  especially on an Old 3DS.
 - **Known gaps:**
   - Only the US 1.0 ROM is tested.
   - Rumble isn't supported.

@@ -6,6 +6,8 @@
  * are all native (see asset_swap.c), and only the compressed ADPCM bytes are big endian, which does not matter as
  * they are read one byte at a time.
  */
+#pragma GCC optimize("O3")
+
 #include <ultra64.h>
 #include <PR/abi.h>
 #include "types.h"
@@ -30,6 +32,12 @@ static s16 sResampleLut[64 * 4];
 static s32 sResampleLutLoaded;
 
 static inline s16 clamp_s16(s32 v) {
+#if defined(__arm__) && (__ARM_ARCH >= 6)
+    // A single saturating instruction; this is the hottest operation in the mixer.
+    s32 r;
+    __asm__("ssat %0, #16, %1" : "=r"(r) : "r"(v));
+    return (s16) r;
+#endif
     if (v < -0x8000) {
         return -0x8000;
     }

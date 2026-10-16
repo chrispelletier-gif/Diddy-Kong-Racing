@@ -49,9 +49,8 @@ static int sFrameCount, sFrameTriangles;
 static float sScreenScaleX = 320.0f / 400.0f;
 
 /* Textures freed during a frame are deleted once the GPU is done with it. */
-#define MAX_PENDING_FREES 256
-static C3DTexture *sPendingFrees[MAX_PENDING_FREES];
-static int sNumPendingFrees;
+static C3DTexture **sPendingFrees;
+static int sNumPendingFrees, sPendingFreesCapacity;
 
 /******************************** Setup ********************************/
 
@@ -114,8 +113,20 @@ void gfxb_init(void) {
 
 /******************************** Frames ********************************/
 
+static void process_pending_frees(void) {
+    int i;
+    for (i = 0; i < sNumPendingFrees; i++) {
+        C3D_TexDelete(&sPendingFrees[i]->tex);
+        free(sPendingFrees[i]);
+    }
+    sNumPendingFrees = 0;
+}
+
 void gfxb_start_frame(void) {
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    // No vblank throttling here: the emulated VI already paces the game. Beginning a frame still waits for the GPU
+    // to finish the previous one, after which its textures can be deleted and the vertex buffer reused.
+    C3D_FrameBegin(0);
+    process_pending_frees();
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_FrameDrawOn(sTarget);
     sVboUsed = 0;
@@ -199,7 +210,6 @@ static void draw_test_pattern(void) {
 }
 
 void gfxb_end_frame(void) {
-    int i;
     {
         static int sTest = -1;
         if (sTest < 0) {
@@ -218,16 +228,6 @@ void gfxb_end_frame(void) {
     GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
     C3D_FrameEnd(0);
     sFrameStarted = 0;
-    // The GPU has finished with the previous frame's textures once the next frame can begin, but C3D_FrameEnd
-    // already waited for this frame's commands to be queued. Wait for the GPU before deleting textures.
-    if (sNumPendingFrees > 0) {
-        C3D_FrameSync();
-        for (i = 0; i < sNumPendingFrees; i++) {
-            C3D_TexDelete(&sPendingFrees[i]->tex);
-            free(sPendingFrees[i]);
-        }
-        sNumPendingFrees = 0;
-    }
 }
 
 /******************************** Textures ********************************/
@@ -326,13 +326,19 @@ void gfxb_texture_free(GfxTexture *tex) {
         return;
     }
     tex->backendData = NULL;
-    if (sFrameStarted && sNumPendingFrees < MAX_PENDING_FREES) {
-        sPendingFrees[sNumPendingFrees++] = t;
-    } else {
-        C3D_FrameSync();
-        C3D_TexDelete(&t->tex);
-        free(t);
+    // The GPU may still be drawing with it: delete it once the next frame has begun.
+    if (sNumPendingFrees == sPendingFreesCapacity) {
+        int capacity = sPendingFreesCapacity ? sPendingFreesCapacity * 2 : 256;
+        C3DTexture **list = realloc(sPendingFrees, capacity * sizeof(C3DTexture *));
+        if (list == NULL) {
+            C3D_TexDelete(&t->tex); // Out of memory: delete now and risk a glitch.
+            free(t);
+            return;
+        }
+        sPendingFrees = list;
+        sPendingFreesCapacity = capacity;
     }
+    sPendingFrees[sNumPendingFrees++] = t;
 }
 
 /******************************** Combiner ********************************/

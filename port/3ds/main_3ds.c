@@ -1,10 +1,29 @@
 /* Nintendo 3DS frontend: system setup and the main (APT) loop. */
 #include <3ds.h>
+#include <stdio.h>
 #include <sys/stat.h>
 
 #include "plat/plat.h"
 
 void port_boot(void);
+
+/* The game only uses the top screen; the bottom one shows the controls. */
+static void show_bottom_screen_help(void) {
+    static PrintConsole sConsole;
+    consoleInit(GFX_BOTTOM, &sConsole);
+    printf("\n  Diddy Kong Racing\n");
+    printf("  Native 3DS port of the decomp\n\n");
+    printf("  Circle Pad   Steer\n");
+    printf("  A            Accelerate\n");
+    printf("  B            Brake / reverse\n");
+    printf("  L / ZL       Use item (Z)\n");
+    printf("  R / ZR       Hop / drift\n");
+    printf("  X / Y        C-Up / C-Left\n");
+    printf("  C-Stick      C buttons\n");
+    printf("  SELECT       N64 L button\n");
+    printf("  START        Pause\n\n");
+    printf("  Saves: sdmc:/3ds/dkr/\n");
+}
 
 int plat_main_loop_iteration(void) {
     if (!aptMainLoop()) {
@@ -24,6 +43,7 @@ int main(int argc, char **argv) {
     hidInit();
     mkdir("sdmc:/3ds", 0777);
     mkdir(plat_data_dir(), 0777);
+    show_bottom_screen_help();
 
     port_boot();
     while (plat_main_loop_iteration()) {
