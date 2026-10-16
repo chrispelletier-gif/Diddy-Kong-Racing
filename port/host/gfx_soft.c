@@ -384,8 +384,42 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
     }
 }
 
+static void log_combiner(const GfxDrawState *st) {
+    static unsigned int seen[512];
+    static int numSeen;
+    static FILE *f;
+    const GfxCombiner *c = &st->combiner;
+    unsigned int key = 0;
+    int i;
+    if (getenv("DKR_LOG_COMBINERS") == NULL) {
+        return;
+    }
+    for (i = 0; i < (int) sizeof(GfxCombiner); i++) {
+        key = key * 31 + ((const unsigned char *) c)[i];
+    }
+    key = key * 31 + st->fogEnabled * 7 + st->blend * 3 + (st->textures[0] != NULL) + (st->textures[1] != NULL) * 2;
+    for (i = 0; i < numSeen; i++) {
+        if (seen[i] == key) {
+            return;
+        }
+    }
+    if (numSeen < 512) {
+        seen[numSeen++] = key;
+    }
+    if (f == NULL) {
+        f = fopen(getenv("DKR_LOG_COMBINERS"), "w");
+    }
+    fprintf(f, "cyc%d rgb0(%d,%d,%d,%d) a0(%d,%d,%d,%d) rgb1(%d,%d,%d,%d) a1(%d,%d,%d,%d) fog%d blend%d tex%d%d at%d\n",
+            c->numCycles, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d, c->alpha[0].a, c->alpha[0].b,
+            c->alpha[0].c, c->alpha[0].d, c->rgb[1].a, c->rgb[1].b, c->rgb[1].c, c->rgb[1].d, c->alpha[1].a,
+            c->alpha[1].b, c->alpha[1].c, c->alpha[1].d, st->fogEnabled, st->blend, st->textures[0] != NULL,
+            st->textures[1] != NULL, st->alphaTest);
+    fflush(f);
+}
+
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
     int t, i, n;
+    log_combiner(state);
     for (t = 0; t < numTriangles; t++) {
         ClipVert in[3], clipped[8];
         ScreenVert s[8];

@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /*
  * All emulated N64 threads run on the application core so that, like on the N64, only one of them executes

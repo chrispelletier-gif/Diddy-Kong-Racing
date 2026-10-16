@@ -22,10 +22,6 @@ static unsigned long long sAudioStart;
 static unsigned long long sAudioQueuedBytes;
 static unsigned int sAudioFrequency = 22050;
 
-void port_audio_run_task(void *task) {
-    (void) task;
-}
-
 void port_audio_output_init(u32 frequency) {
     sAudioFrequency = frequency;
 }

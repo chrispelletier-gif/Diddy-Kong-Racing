@@ -57,6 +57,8 @@ endif
 GAME_DEFINES := -DTARGET_PORT=1 -DNON_MATCHING=1 -DAVOID_UB=1 -D_LANGUAGE_C -D_FINALROM -DNDEBUG -DF3DDKR_GBI \
                 -DVERSION_$(REGION)_$(VERSION) -DBUILD_VERSION=VERSION_G -DBUILD_VERSION_STRING=\"2.0G\" \
                 -D_MIPS_SZLONG=32
+# libultra names that clash with libctru/newlib symbols.
+GAME_DEFINES += -DosGetTime=n64_osGetTime -D__assert=n64___assert
 
 GAME_INCLUDES := -I$(ROOT) -I$(ROOT)/include -I$(ROOT)/include/libc -I$(ROOT)/include/PR -I$(ROOT)/include/sys \
                  -I$(ROOT)/src -I$(ROOT)/libultra -I$(ROOT)/libultra/src/gu -I$(ROOT)/libultra/src/libc \

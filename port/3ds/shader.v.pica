@@ -1,0 +1,36 @@
+; Vertex shader for the 3DS renderer.
+; Positions arrive in clip space for the N64 screen (see port/src/gfx/gfx_backend.h).
+; "projection" scales them into the top screen, remaps depth and rotates for the 3DS display.
+
+; Uniforms
+.fvec projection[4]
+.fvec texScale  ; xy = scale for texture 0, zw = scale for texture 1
+.fvec texOffset ; xy = offset for texture 0, zw = offset for texture 1
+
+; Outputs
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+; Inputs
+.alias inpos v0
+.alias intc0 v1
+.alias intc1 v2
+.alias inclr v3
+
+.proc main
+	dp4 outpos.x, projection[0], inpos
+	dp4 outpos.y, projection[1], inpos
+	dp4 outpos.z, projection[2], inpos
+	dp4 outpos.w, projection[3], inpos
+
+	; Texture coordinates are scaled for padded textures and flipped vertically (the GPU's origin is the bottom).
+	mul r0.xy, texScale.xy, intc0.xy
+	add outtc0.xy, texOffset.xy, r0.xy
+	mul r1.xy, texScale.zw, intc1.xy
+	add outtc1.xy, texOffset.zw, r1.xy
+
+	mov outclr, inclr
+	end
+.end
