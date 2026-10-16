@@ -358,7 +358,11 @@ void port_audio_run_task(void *taskPtr) {
                 cmd_envmixer(w0, w1);
                 break;
             case A_LOADBUFF:
-                bcopy(ram(w1 & ~3), dmem_u8(sAudio.in & ~3), (sAudio.count + 3) & ~3);
+                count = (sAudio.count + 3) & ~3;
+                bcopy(ram(w1 & ~3), dmem_u8(sAudio.in & ~3), count);
+                if ((w0 >> 16) & PORT_A_SWAP16) {
+                    port_swap16_array(dmem_u8(sAudio.in & ~3), count / 2);
+                }
                 break;
             case A_RESAMPLE:
                 cmd_resample(w0, w1);

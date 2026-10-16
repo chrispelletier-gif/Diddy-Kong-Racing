@@ -30,6 +30,19 @@ typedef union
 	float		f;
 } fu;
 
+#ifdef TARGET_PORT
+/* The du initialisers list the high word first, which only matches the double's layout on big endian machines. */
+static inline double du_value(du v)
+{
+	union { unsigned long long u; double d; } c;
+	c.u = ((unsigned long long) v.word.hi << 32) | v.word.lo;
+	return c.d;
+}
+#define DU_D(v) du_value(v)
+#else
+#define DU_D(v) ((v).d)
+#endif
+
 #ifndef __GL_GL_H__
 
 typedef	float	Matrix[4][4];

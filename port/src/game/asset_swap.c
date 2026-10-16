@@ -642,7 +642,9 @@ void port_swap_object_header(ObjectHeader *header) {
     s32 i;
 
     port_swap32_array(base, 12);         // 0x00 - 0x2F
-    port_swap16_array(base + 0x30, 17); // 0x30 - 0x51
+    port_swap16_array(base + 0x30, 5);  // 0x30 - 0x39
+    // 0x3A - 0x3D are the shading colour and intensity bytes.
+    port_swap16_array(base + 0x3E, 10); // 0x3E - 0x51
     port_swap32_array(base + (s32) header->modelIds, header->numberOfModelIds);
     port_swap32_array(base + (s32) header->vehiclePartIds, header->attachPointCount);
     // Particle entries are read as two words that get split with shifts.

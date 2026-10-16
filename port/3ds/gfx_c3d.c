@@ -123,8 +123,61 @@ void gfxb_start_frame(void) {
     set_projection();
 }
 
+/* DKR_GFX_TEST draws a reference quad: a 16x16 texture, red on top, blue at the bottom, with a green left column. */
+static void draw_test_pattern(void) {
+    static GfxTexture sTex;
+    static unsigned int sPixels[16 * 16];
+    GfxDrawState state;
+    GfxVertex v[6];
+    static const float xs[6] = { -0.9f, -0.9f, -0.1f, -0.1f, -0.9f, -0.1f };
+    static const float ys[6] = { 0.9f, 0.1f, 0.9f, 0.9f, 0.1f, 0.1f };
+    int i;
+
+    if (sTex.width == 0) {
+        for (i = 0; i < 16 * 16; i++) {
+            int x = i % 16, y = i / 16;
+            sPixels[i] = (x < 2) ? 0xFF00FF00 : (0xFF000000 | (y * 16 + 15));
+        }
+        sTex.width = 16;
+        sTex.height = 16;
+        sTex.pixels = sPixels;
+        sTex.filter = GFX_FILTER_POINT;
+        gfxb_texture_upload(&sTex);
+    }
+    memset(&state, 0, sizeof(state));
+    state.combiner.numCycles = 1;
+    state.combiner.rgb[0].a = GFX_CC_ZERO;
+    state.combiner.rgb[0].b = GFX_CC_ZERO;
+    state.combiner.rgb[0].c = GFX_CC_ZERO;
+    state.combiner.rgb[0].d = GFX_CC_TEXEL0;
+    state.combiner.alpha[0] = state.combiner.rgb[0];
+    state.textures[0] = &sTex;
+    state.scissor[2] = GFX_SCREEN_WIDTH;
+    state.scissor[3] = GFX_SCREEN_HEIGHT;
+    for (i = 0; i < 6; i++) {
+        memset(&v[i], 0, sizeof(v[i]));
+        v[i].x = xs[i];
+        v[i].y = ys[i];
+        v[i].z = 0.0f;
+        v[i].w = 1.0f;
+        v[i].u0 = (xs[i] + 0.9f) / 0.8f;
+        v[i].v0 = (0.9f - ys[i]) / 0.8f;
+        v[i].r = v[i].g = v[i].b = v[i].a = 255;
+    }
+    gfxb_draw_triangles(&state, v, 2);
+}
+
 void gfxb_end_frame(void) {
     int i;
+    {
+        static int sTest = -1;
+        if (sTest < 0) {
+            sTest = plat_getenv("DKR_GFX_TEST") != NULL;
+        }
+        if (sTest) {
+            draw_test_pattern();
+        }
+    }
     if ((sFrameCount++ % 120) == 0) {
         plat_log("frame %d: %d triangles", sFrameCount, sFrameTriangles);
     }
@@ -191,7 +244,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
     if (data == NULL) {
         return;
     }
-    // Swizzle into 8x8 tiles, bottom row first. Wrapping textures that aren't a power of two are stretched to fit,
+    // Swizzle into 8x8 tiles, top row first (the GPU samples t = 0 from the start of the data). Wrapping textures that aren't a power of two are stretched to fit,
     // others are padded (repeating their edge texels) and their coordinates scaled.
     for (ty = 0; ty < ph; ty += 8) {
         for (tx = 0; tx < pw; tx += 8) {
@@ -199,7 +252,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
             for (i = 0; i < 64; i++) {
                 unsigned int px = tx + (i & 7);
                 unsigned int py = ty + (i >> 3);
-                unsigned int imageRow = ph - 1 - py;
+                unsigned int imageRow = py;
                 unsigned int sx, sy;
                 u32 c;
                 if (resample) {
@@ -515,6 +568,16 @@ static void set_scissor(const short rect[4]) {
     if (top < 0) top = 0;
     if (right > TOP_HEIGHT) right = TOP_HEIGHT;
     if (bottom > TOP_WIDTH) bottom = TOP_WIDTH;
+    {
+        static int sNoScissor = -1;
+        if (sNoScissor < 0) {
+            sNoScissor = plat_getenv("DKR_NO_SCISSOR") != NULL;
+        }
+        if (sNoScissor) {
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+            return;
+        }
+    }
     C3D_SetScissor(GPU_SCISSOR_NORMAL, left, top, right, bottom);
 }
 
@@ -525,6 +588,23 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
 
     if (sVboUsed + count > VBO_VERTICES) {
         return;
+    }
+    {
+        static int sLogFrame = -2;
+        if (sLogFrame == -2) {
+            const char *env = plat_getenv("DKR_LOG_DRAWS");
+            sLogFrame = env != NULL ? atoi(env) : -1;
+        }
+        if (sFrameCount == sLogFrame) {
+            const GfxCombiner *c = &state->combiner;
+            plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "
+                     "tex %p v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d",
+                     numTriangles, state->blend, state->alphaTest, state->alphaRef, state->depthTest, state->depthWrite,
+                     state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d,
+                     c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles, (void *) state->textures[0],
+                     verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0, verts[0].v0, verts[0].r, verts[0].g,
+                     verts[0].b, verts[0].a);
+        }
     }
     bind_texture(0, state->textures[0], &su0, &sv0);
     bind_texture(1, state->textures[1], &su1, &sv1);
@@ -553,7 +633,15 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
     }
     C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f : 0.0f);
-    C3D_CullFace(state->cullMode == 1 ? GPU_CULL_BACK_CCW : state->cullMode == 2 ? GPU_CULL_FRONT_CCW : GPU_CULL_NONE);
+    {
+        static int sNoCull = -1;
+        if (sNoCull < 0) {
+            sNoCull = plat_getenv("DKR_NO_CULL") != NULL;
+        }
+        C3D_CullFace((sNoCull || state->cullMode == 0) ? GPU_CULL_NONE
+                     : state->cullMode == 1                ? GPU_CULL_BACK_CCW
+                                                           : GPU_CULL_FRONT_CCW);
+    }
     set_scissor(state->scissor);
 
     out = &sVbo[sVboUsed];

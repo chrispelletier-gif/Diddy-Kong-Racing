@@ -10,50 +10,78 @@
 
 #define RCP_QUEUE_SIZE 8
 
+/*
+ * Two workers stand in for the RCP. Graphics tasks go to the "RDP" worker; since the RSP's share of a graphics task
+ * is quick on the N64, the SP interrupt is raised as soon as the worker picks the task up and only the DP interrupt waits
+ * for the frame to be drawn. That leaves the scheduler free to start audio tasks while a frame renders, which run on
+ * the second worker, so a slow frame never starves the audio.
+ */
+typedef struct RcpWorker {
+    OSTask *queue[RCP_QUEUE_SIZE];
+    volatile u32 read;
+    volatile u32 write;
+    PlatSem *sem;
+} RcpWorker;
+
 static OSTask *sLoadedTask;
-static OSTask *sTaskQueue[RCP_QUEUE_SIZE];
-static volatile u32 sTaskQueueRead;
-static volatile u32 sTaskQueueWrite;
-static PlatSem *sTaskSem;
+static RcpWorker sGfxWorker;
+static RcpWorker sAudioWorker;
 static s32 sRcpStarted;
 static volatile s32 sGfxTasksPending;
 
-static void rcp_thread(void *arg) {
+static OSTask *worker_next(RcpWorker *worker) {
+    OSTask *task;
+    plat_sem_wait(worker->sem);
+    task = worker->queue[worker->read % RCP_QUEUE_SIZE];
+    worker->read++;
+    return task;
+}
+
+static void worker_push(RcpWorker *worker, OSTask *task) {
+    worker->queue[worker->write % RCP_QUEUE_SIZE] = task;
+    worker->write++;
+    plat_sem_post(worker->sem);
+}
+
+static void gfx_thread(void *arg) {
     OSTask *task;
 
     (void) arg;
     port_int_thread_init();
     port_gfx_init();
     for (;;) {
-        plat_sem_wait(sTaskSem);
-        task = sTaskQueue[sTaskQueueRead % RCP_QUEUE_SIZE];
-        sTaskQueueRead++;
-        switch (task->t.type) {
-            case M_GFXTASK:
-                port_gfx_run_task(task);
-                plat_klock();
-                sGfxTasksPending--;
-                plat_kbroadcast();
-                plat_kunlock();
-                port_raise_event(OS_EVENT_SP);
-                port_raise_event(OS_EVENT_DP);
-                break;
-            case M_AUDTASK:
-                port_audio_run_task(task);
-                port_raise_event(OS_EVENT_SP);
-                break;
-            default:
-                port_raise_event(OS_EVENT_SP);
-                break;
+        task = worker_next(&sGfxWorker);
+        port_raise_event(OS_EVENT_SP);
+        port_gfx_run_task(task);
+        plat_klock();
+        sGfxTasksPending--;
+        plat_kbroadcast();
+        plat_kunlock();
+        port_raise_event(OS_EVENT_DP);
+    }
+}
+
+static void audio_thread(void *arg) {
+    OSTask *task;
+
+    (void) arg;
+    port_int_thread_init();
+    for (;;) {
+        task = worker_next(&sAudioWorker);
+        if (task->t.type == M_AUDTASK) {
+            port_audio_run_task(task);
         }
+        port_raise_event(OS_EVENT_SP);
     }
 }
 
 void port_rcp_init(void) {
     if (!sRcpStarted) {
         sRcpStarted = TRUE;
-        sTaskSem = plat_sem_create(0);
-        plat_thread_create(rcp_thread, NULL, 0, PLAT_THREAD_RCP, "rcp");
+        sGfxWorker.sem = plat_sem_create(0);
+        sAudioWorker.sem = plat_sem_create(0);
+        plat_thread_create(gfx_thread, NULL, 0, PLAT_THREAD_RCP, "rdp");
+        plat_thread_create(audio_thread, NULL, 0, PLAT_THREAD_RCP, "rsp");
     }
 }
 
@@ -66,9 +94,11 @@ void osSpTaskStartGo(OSTask *task) {
         task = sLoadedTask;
     }
     port_rcp_init();
-    sTaskQueue[sTaskQueueWrite % RCP_QUEUE_SIZE] = task;
-    sTaskQueueWrite++;
-    plat_sem_post(sTaskSem);
+    if (task->t.type == M_GFXTASK) {
+        worker_push(&sGfxWorker, task);
+    } else {
+        worker_push(&sAudioWorker, task);
+    }
 }
 
 void osSpTaskYield(void) {

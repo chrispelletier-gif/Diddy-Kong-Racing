@@ -65,6 +65,9 @@
 #define A_NOAUX			0x00
 #define A_MAIN			0x00
 #define A_MIX			0x10
+#ifdef TARGET_PORT
+#define PORT_A_SWAP16		0x80	/* A_LOADBUFF: byte swap the loaded 16 bit samples (port only) */
+#endif
 
 /*
  * BEGIN C-specific section: (typedef's)

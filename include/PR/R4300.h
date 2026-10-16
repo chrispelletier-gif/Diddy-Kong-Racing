@@ -58,6 +58,17 @@
 #define	PHYS_TO_K0(x)	((x)|0x80000000)	/* physical to kseg0 */
 #define	PHYS_TO_K1(x)	((x)|0xA0000000)	/* physical to kseg1 */
 
+#elif defined(TARGET_PORT)
+
+/* Native ports have no address segments, so pointers pass through unchanged. */
+#define	K0_TO_K1(x)	((u32)(x))
+#define	K1_TO_K0(x)	((u32)(x))
+#define	K0_TO_PHYS(x)	((u32)(x))
+#define	K1_TO_PHYS(x)	((u32)(x))
+#define	KDM_TO_PHYS(x)	((u32)(x))
+#define	PHYS_TO_K0(x)	((u32)(x))
+#define	PHYS_TO_K1(x)	((u32)(x))
+
 #else /* _LANGUAGE_C */
 
 #define	K0_TO_K1(x)	((u32)(x)|0xA0000000)	/* kseg0 to kseg1 */

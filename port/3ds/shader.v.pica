@@ -25,7 +25,7 @@
 	dp4 outpos.z, projection[2], inpos
 	dp4 outpos.w, projection[3], inpos
 
-	; Texture coordinates are scaled for padded textures and flipped vertically (the GPU's origin is the bottom).
+	; Texture coordinates are scaled (and offset) for padded textures.
 	mul r0.xy, texScale.xy, intc0.xy
 	add outtc0.xy, texOffset.xy, r0.xy
 	mul r1.xy, texScale.zw, intc1.xy

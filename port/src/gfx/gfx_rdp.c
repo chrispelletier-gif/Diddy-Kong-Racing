@@ -541,7 +541,10 @@ static void trace_state(const GfxDrawState *st, s32 count) {
 static void flush_batch(void) {
     if (sBatchCount > 0) {
         if (sFrameCount == sTraceFrame) {
+            const GfxVertex *v = &sBatchVerts[0];
             trace_state(&sBatchState, sBatchCount);
+            plat_log("    v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d", v->x, v->y, v->z, v->w, v->u0, v->v0,
+                     v->r, v->g, v->b, v->a);
         }
         gfxb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount);
         sBatchCount = 0;
