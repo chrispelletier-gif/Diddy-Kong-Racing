@@ -106,6 +106,8 @@ enum PlatCounter {
     PLAT_COUNTER_GFX_DONE,   /* Display lists the renderer has finished. */
     PLAT_COUNTER_AUDIO,      /* Audio tasks run. */
     PLAT_COUNTER_MAIN,       /* Main (system) loop iterations. */
+    PLAT_COUNTER_AUDIO_UNDERRUN, /* Sound buffers queued after the output had run dry (a gap in the sound). */
+    PLAT_COUNTER_AUDIO_DROPPED,  /* Sound buffers dropped because the output was full. */
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];

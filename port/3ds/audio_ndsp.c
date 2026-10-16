@@ -10,6 +10,8 @@
 
 #include "plat/plat.h"
 
+u32 port_audio_output_remaining_bytes(void);
+
 #define NUM_WAVEBUFS 8
 #define WAVEBUF_BYTES 8192
 
@@ -104,7 +106,11 @@ void port_audio_output_queue(const s16 *samples, u32 numBytes) {
     wb = &sWaveBufs[sNextBuf];
     if (wb->status == NDSP_WBUF_QUEUED || wb->status == NDSP_WBUF_PLAYING) {
         // Every buffer is still in flight: the game is producing faster than the DSP plays. Drop this one.
+        gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED]++;
         return;
+    }
+    if (ndspChnIsPlaying(0) == false || port_audio_output_remaining_bytes() == 0) {
+        gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN]++;
     }
     if (numBytes > WAVEBUF_BYTES) {
         numBytes = WAVEBUF_BYTES;

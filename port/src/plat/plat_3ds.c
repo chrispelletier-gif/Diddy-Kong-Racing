@@ -67,7 +67,7 @@ void plat_init(void) {
     sRcpCore = (isNew3DS && plat_getenv("DKR_SINGLE_CORE") == NULL) ? 2 : 0;
     plat_status("%s, renderer on core %d", isNew3DS ? "New 3DS" : "Old 3DS", sRcpCore);
     // The scheduler cannot start the next frame while an audio task is running, so audio tasks must finish quickly:
-    // they run next to the renderer at the same high priority. (The system core, which only gives applications a
+    // they run next to the renderer, at a higher priority. (The system core, which only gives applications a
     // share of its time, made them take several times longer.)
     sAudioCore = sRcpCore;
     watchdog_start();
@@ -132,7 +132,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             stackSize = 128 * 1024;
             break;
         case PLAT_THREAD_AUDIO:
-            prio = PRIO_RCP;
+            // Above the renderer: 3DS threads of equal priority never preempt each other, so an audio task that
+            // arrives while a frame is being drawn would otherwise wait for the whole frame and the sound would
+            // run dry.
+            prio = PRIO_HARDWARE;
             core = sAudioCore;
             stackSize = 64 * 1024;
             break;
@@ -344,7 +347,8 @@ static void watchdog(void *arg) {
                  (int) (now[PLAT_COUNTER_VI] - last[PLAT_COUNTER_VI]), now[PLAT_COUNTER_GFX_QUEUED],
                  now[PLAT_COUNTER_GFX_DONE], (int) (now[PLAT_COUNTER_AUDIO] - last[PLAT_COUNTER_AUDIO]),
                  (int) (now[PLAT_COUNTER_MAIN] - last[PLAT_COUNTER_MAIN]));
-        snprintf(line[1], sizeof(line[1]), "rdp: %.34s", gPlatGfxStage);
+        snprintf(line[1], sizeof(line[1]), "rdp: %.20s gap %u drop %u", gPlatGfxStage,
+                 now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED]);
         memcpy(last, now, sizeof(last));
 
         // Two fixed rows at the bottom; the cursor is put back for the start-up lines.
