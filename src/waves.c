@@ -101,8 +101,14 @@ s32 gWaveTileCountZ;    // used in mempool_alloc_safe size calculation
 s32 gNumberOfLevelSegments;
 s32 D_8012A0E8[64];
 s16 gWaveBlockIDs[512]; // used to index gWaveModel and as arg0 for func_800B92F4 and func_800B97A8
+#ifdef AVOID_UB
+// The code indexes D_8012A5E8 past its end into D_8012A600, so keep them as one array.
+unk8012A5E8 D_8012A5E8[2 + 24];
+#define D_8012A600 (*(unk8012A5E8(*)[24]) & D_8012A5E8[2])
+#else
 unk8012A5E8 D_8012A5E8[2];
 unk8012A5E8 D_8012A600[24];
+#endif
 f32 gWavePowerBase;
 f32 gWaveMagnitude;
 s32 gWavePowerDivisor;

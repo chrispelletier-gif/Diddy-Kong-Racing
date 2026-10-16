@@ -28,7 +28,7 @@ extern s32 gNumCollisionCandidates;
  * Then, terrain segments overlapping this rectangle are identified, and eligible triangles within them are selected.
  * Triangle batches are filtered based on visibility, surface type, and collision flags.
  */
-void generate_collision_candidates(s32 numPoints, Vec3f *origins, Vec3f *targets, s32 vehicleID) {
+s32 generate_collision_candidates(s32 numPoints, Vec3f *origins, Vec3f *targets, s32 vehicleID) {
     s32 minX, maxX, minZ, maxZ;
     s32 counter;
     LevelModelSegment *segments[10];
@@ -123,7 +123,7 @@ void generate_collision_candidates(s32 numPoints, Vec3f *origins, Vec3f *targets
         LevelModelSegment *seg = segments[i];
 
         // Insert the segment pointer encoded with MSB = 0 to differentiate from collision facets
-        gCollisionCandidates[j] = (s32) K0_TO_PHYS(seg);
+        gCollisionCandidates[j] = COLLISION_SEGMENT_ENTRY(seg);
         j++;
 
         for (batchIndex = 0; batchIndex < seg->numberOfBatches; batchIndex++) {
@@ -163,7 +163,7 @@ void generate_collision_candidates(s32 numPoints, Vec3f *origins, Vec3f *targets
                     continue;
                 }
 
-                gCollisionCandidates[j] = (s32) facet;
+                gCollisionCandidates[j] = COLLISION_FACET_ENTRY(facet);
                 gCollisionSurfaces[j] = surface;
                 j++;
 
@@ -176,6 +176,7 @@ void generate_collision_candidates(s32 numPoints, Vec3f *origins, Vec3f *targets
 
 out:
     gNumCollisionCandidates = j;
+    return 0;
 }
 #else
 GLOBAL_ASM("asm/collision/generate_collision_candidates.s")
@@ -313,9 +314,9 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
 
             for (i = 0; i < gNumCollisionCandidates; i++) {
                 if (gCollisionCandidates[i] >= 0) {
-                    collisionPlanes = ((LevelModelSegment *) (PHYS_TO_K0(gCollisionCandidates[i])))->collisionPlanes;
+                    collisionPlanes = COLLISION_SEGMENT_PTR(gCollisionCandidates[i])->collisionPlanes;
                 } else {
-                    facet = (CollisionFacetPlanes *) gCollisionCandidates[i];
+                    facet = (CollisionFacetPlanes *) COLLISION_FACET_PTR(gCollisionCandidates[i]);
                     A = collisionPlanes[facet->basePlaneIndex * 4 + 0];
                     B = collisionPlanes[facet->basePlaneIndex * 4 + 1];
                     C = collisionPlanes[facet->basePlaneIndex * 4 + 2];
@@ -433,9 +434,9 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
 
             for (i = 0; i < gNumCollisionCandidates; i++) {
                 if (gCollisionCandidates[i] >= 0) {
-                    collisionPlanes = ((LevelModelSegment *) (PHYS_TO_K0(gCollisionCandidates[i])))->collisionPlanes;
+                    collisionPlanes = COLLISION_SEGMENT_PTR(gCollisionCandidates[i])->collisionPlanes;
                 } else {
-                    facet = (CollisionFacetPlanes *) gCollisionCandidates[i];
+                    facet = (CollisionFacetPlanes *) COLLISION_FACET_PTR(gCollisionCandidates[i]);
                     A = collisionPlanes[facet->basePlaneIndex * 4 + 0];
                     B = collisionPlanes[facet->basePlaneIndex * 4 + 1];
                     C = collisionPlanes[facet->basePlaneIndex * 4 + 2];

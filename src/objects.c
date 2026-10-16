@@ -496,9 +496,9 @@ void func_8000B38C(Vertex *vertices, Triangle *triangles, ObjectTransform *trans
     tri = (s32 *) triangles;
     for (i = 0; i < 8; i++) {
         *tri++ = DKR_TRIANGLE(BACKFACE_CULL, 0, i + 1, ((i + 1) & 7) + 1);
-        *tri++ = ((width & 0xFFFF) << 16) | (height & 0xFFFF);
-        *tri++ = sp80[i];
-        *tri++ = sp80[(i + 1) & 7];
+        *tri++ = TEXCOORDS_WORD(((width & 0xFFFF) << 16) | (height & 0xFFFF));
+        *tri++ = TEXCOORDS_WORD(sp80[i]);
+        *tri++ = TEXCOORDS_WORD(sp80[(i + 1) & 7]);
     }
 }
 
@@ -760,6 +760,9 @@ void allocate_object_pools(void) {
         &gAssetsMiscSection[gAssetsMiscTable[ASSET_MISC_MAGIC_CODES]],
         (gAssetsMiscTable[ASSET_MISC_TITLE_SCREEN_DEMO_IDS] - gAssetsMiscTable[ASSET_MISC_MAGIC_CODES]) *
             sizeof(s32 *));
+#ifdef TARGET_PORT
+    port_swap_misc_assets(gAssetsMiscSection, gAssetsMiscTable, gAssetsMiscTableLength);
+#endif
     gObjPtrList = mempool_alloc_safe(sizeof(uintptr_t) * OBJECT_SLOT_COUNT, COLOUR_TAG_BLUE);
     gFirstTimeFinish = 0;
     gTimeTrialEnabled = 0;
@@ -902,6 +905,9 @@ ObjectHeader *load_object_header(s32 index) {
     address = mempool_alloc_pool((MemoryPoolSlot *) gObjectMemoryPool, size);
     if (address != NULL) {
         asset_load(ASSET_OBJECTS, (u32) address, assetOffset, size);
+#ifdef TARGET_PORT
+        port_swap_object_header(address);
+#endif
         address->unk24 = (ObjectHeader24 *) ((uintptr_t) address + (uintptr_t) address->unk24);
         address->objectParticles =
             (ObjHeaderParticleEntry *) ((uintptr_t) address + (uintptr_t) address->objectParticles);
@@ -995,6 +1001,9 @@ void track_spawn_objects(s32 mapID, s32 index) {
             ((compressedAsset + gzip_size_uncompressed(ASSET_LEVEL_OBJECT_MAPS, assetOffset)) - (0, assetSize)) + 0x20;
         asset_load(ASSET_LEVEL_OBJECT_MAPS, (u32) compressedAsset, assetOffset, assetSize);
         gzip_inflate(compressedAsset, (u8 *) mem);
+#ifdef TARGET_PORT
+        port_swap_object_map(mem);
+#endif
         mempool_free(objMapTable);
         gObjectMapSpawnList[index] = (u8 *) (gObjectMap[index] + sizeof(uintptr_t));
         gObjectMapSize[index] = *mem;
@@ -7838,7 +7847,13 @@ UNUSED void func_8001D248(UNUSED s32 arg0, UNUSED s32 arg1, UNUSED s32 arg2) {
  * Presumably intended for level geometry, which supports shading, but never uses it.
  */
 void set_world_shading(f32 ambient, f32 diffuse, s16 angleX, s16 angleY, s16 angleZ) {
+#ifdef AVOID_UB
+    // The original writes a whole ShadeProperties over the pointer and the variables that follow it.
+    static ShadeProperties sWorldShading;
+    set_shading_properties(&sWorldShading, ambient, diffuse, angleX, angleY, angleZ);
+#else
     set_shading_properties((ShadeProperties *) &gWorldShading, ambient, diffuse, angleX, angleY, angleZ);
+#endif
 }
 
 /**

@@ -837,6 +837,13 @@ void update_vehicle_particles(Object *racerObj, s32 updateRate) {
                             }
                             opacity = descriptor->colour.a;
                             gParticleOverrideColor[0].word |= opacity + (((*alphaPtr - opacity) * var_t1) >> 8);
+#ifdef TARGET_PORT
+                            {
+                                // The colour was assembled as a big endian word; store it byte by byte.
+                                u32 word = gParticleOverrideColor[0].word;
+                                COLOUR_SET_WORD(gParticleOverrideColor[0], word);
+                            }
+#endif
                         }
                     } else {
                         // Tire marks

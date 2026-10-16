@@ -96,7 +96,7 @@ int	ix, xpt;
 
 			xsq = dx*dx;
 
-			poly = ((P[4].d*xsq + P[3].d)*xsq + P[2].d)*xsq + P[1].d;
+			poly = ((DU_D(P[4])*xsq + DU_D(P[3]))*xsq + DU_D(P[2]))*xsq + DU_D(P[1]);
 
 			result = dx + (dx*xsq)*poly;
 
@@ -114,20 +114,20 @@ int	ix, xpt;
 
 		/*  reduce argument to +/- pi/2  */
 
-		dn = dx*rpi.d;
+		dn = dx*DU_D(rpi);
 
 		n = ROUND(dn);
 		dn = n;
 
-		dx = dx - dn*pihi.d;
-		dx = dx - dn*pilo.d;	/* dx = x - n*pi */
+		dx = dx - dn*DU_D(pihi);
+		dx = dx - dn*DU_D(pilo);	/* dx = x - n*pi */
 
 		/* compute sin(dx) as before, negating result if n is odd
 		*/
 
 		xsq = dx*dx;
 
-		poly = ((P[4].d*xsq + P[3].d)*xsq + P[2].d)*xsq + P[1].d;
+		poly = ((DU_D(P[4])*xsq + DU_D(P[3]))*xsq + DU_D(P[2]))*xsq + DU_D(P[1]);
 
 		result = dx + (dx*xsq)*poly;
 

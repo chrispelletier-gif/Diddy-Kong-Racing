@@ -1123,9 +1123,15 @@ s32 func_80027568(void) {
         flipSide = gCollisionCandidates[var_t4];
         if (flipSide > 0) {
             // this is segment Entry
+#ifdef TARGET_PORT
+            segment = COLLISION_SEGMENT_PTR(flipSide);
+        } else {
+            colNode = (CollisionNode *) COLLISION_FACET_PTR(flipSide);
+#else
             segment = (LevelModelSegment *) PHYS_TO_K0(flipSide);
         } else {
             colNode = (CollisionNode *) flipSide;
+#endif
             curViewport = colNode->colPlaneIndex << 2;
             planes = &segment->collisionPlanes[curViewport];
             A = planes[0];
@@ -1478,8 +1484,8 @@ void trackbg_render_flashy(void) {
 
     var_a3 = COLOUR_RGBA32(255, 255, 255, 0);
     if (var_t2 != NULL) {
-        var_a2 = var_t2->rgba.word;
-        var_a3 = levelHeader->rgba.word & (~0xFF);
+        var_a2 = COLOUR_WORD(var_t2->rgba);
+        var_a3 = COLOUR_WORD(levelHeader->rgba) & (~0xFF);
     }
 
     gfx_init_basic_xlu(&gTrackDL, 1, var_a2, var_a3);
@@ -2858,6 +2864,9 @@ void generate_track(s32 modelId) {
 
     asset_load(ASSET_LEVEL_MODELS, temp, mdl, temp_s4);
     gzip_inflate((u8 *) temp, (u8 *) gCurrentLevelModel);
+#ifdef TARGET_PORT
+    port_swap_level_model(gCurrentLevelModel);
+#endif
     mempool_free(gLevelModelTable); // Done with the level models table, so free it.
 
     mdl = (s32) gCurrentLevelModel;
@@ -3874,9 +3883,16 @@ void func_8002F440(void) {
     Triangle *tri;
     Vertex *vert;
     s32 alpha;
+#ifdef AVOID_UB
+    // A clipped polygon can have up to 8 vertices (unk8011C238.unk2).
+    s16 sp90[8];
+    s32 var_s2;
+    s16 sp80[8];
+#else
     s16 sp90[6];
     s32 var_s2;
     s16 sp80[6];
+#endif
     f32 temp_f18;
     f32 yRotCos;
     f32 yRotSin;

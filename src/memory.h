@@ -19,8 +19,16 @@ typedef enum MempoolFlags {
     SLOT_SAFEGUARD = (1 << 2)  // The slot is used, and marks the stopping point of a global pool clear.
 } MempoolFlags;
 
+#ifdef TARGET_PORT
+// On native ports the "RAM" the game manages is a static buffer, see port/src/port_main.c.
+#define PORT_MAIN_POOL_SIZE (8 * 1024 * 1024)
+extern u8 gPortMainPool[];
+#define RAM_END ((s32) (gPortMainPool + PORT_MAIN_POOL_SIZE))
+#define EXPANSION_RAM_END RAM_END
+#else
 #define RAM_END 0x80400000
 #define EXPANSION_RAM_END 0x80800000
+#endif
 #define MAIN_POOL_SLOT_COUNT 1600
 #define FREE_QUEUE_SIZE 256
 #define MEMSLOT_NONE -1
@@ -89,7 +97,11 @@ typedef struct StackInfo {
 // This variable doesn't truly exist in memory.
 // It's just defined as the end of BSS, and it's 
 // symbol needs to be in the undefined syms place.
+#ifdef TARGET_PORT
+#define gMainMemoryPool (*(MemoryPoolSlot *) gPortMainPool)
+#else
 extern MemoryPoolSlot gMainMemoryPool;
+#endif
 
 void mempool_init_main(void);
 MemoryPoolSlot *mempool_new_sub(s32 poolDataSize, s32 numSlots);

@@ -2160,7 +2160,10 @@ char *string_to_font_codes(char *inString, char *outString, s32 stringLength) {
         outString++;
     }
 
+#ifndef AVOID_UB
+    // Writes one byte past the fixed length font code buffer, which the callers' stack padding absorbs on N64.
     *outString = 0;
+#endif
     return ret;
 }
 

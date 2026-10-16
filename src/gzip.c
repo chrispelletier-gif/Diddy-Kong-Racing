@@ -57,6 +57,11 @@ s32 gzip_size_uncompressed(s32 assetIndex, s32 assetOffset) {
  * Official name: rzipUncompress
  */
 u8 *gzip_inflate(u8 *compressedInput, u8 *decompressedOutput) {
+#ifdef TARGET_PORT
+    s32 port_inflate(const u8 *in, u8 *out);
+    port_inflate(compressedInput + 5, decompressedOutput); // The compression header is 5 bytes.
+    return decompressedOutput;
+#endif
     gzip_inflate_input = compressedInput + 5; // The compression header is 5 bytes.
     gzip_inflate_output = decompressedOutput;
     gzip_num_bits = 0;

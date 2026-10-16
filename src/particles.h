@@ -118,11 +118,25 @@ typedef struct ParticleDescriptor {
     /* 0x08 */ s16 lifeTime;
     union {
         /* 0x0A */ s16 lifeTimeRange; // Used by general particle
+#ifdef TARGET_PORT
+        // Little endian compilers allocate bitfields from the lowest bit, so declare them in reverse to keep the
+        // N64's bit positions (the halfword itself is byte swapped on load).
+        struct {
+            u16 line_unused_pad : 4;
+            /* 0x0A */ u16 line_unused_B : 6; // (Not) Used by line particle
+            /* 0x0A */ u16 lineOrientation : 6; // Used by line particle
+        };
+        struct {
+            u16 point_unused_pad : 10;
+            /* 0x0A */ u16 unused_point_field : 6; // (Not) Used by point particle
+        };
+#else
         struct {
             /* 0x0A */ u16 lineOrientation : 6; // Used by line particle
             /* 0x0A */ u16 line_unused_B : 6; // (Not) Used by line particle
         };
         /* 0x0A */ u16 unused_point_field : 6; // (Not) Used by point particle
+#endif
     };
     /* 0x0C */ u8 opacity;
     /* 0x0D */ u8 opacityVel;

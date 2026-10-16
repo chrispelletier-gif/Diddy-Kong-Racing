@@ -95,9 +95,16 @@ s32 gSurfaceFlagTable4P[20] = {
 s8 gRacerAIBalloonActionTable[NUM_WEAPON_TYPES] = { 1, 1, 2, 2, 4, 3, 0, 6, 4, 3, 2, 2, 5, 5, 5, 0 };
 
 // Unused?
+#ifdef AVOID_UB
+// Indexed by race position (1 - 8), so the last read goes one past the end, into D_800DCDA8[0].
+s8 D_800DCDA0[9] = {
+    0, 0, 0, 1, 1, 2, 2, 2, 1,
+};
+#else
 s8 D_800DCDA0[8] = {
     0, 0, 0, 1, 1, 2, 2, 2,
 };
+#endif
 
 s8 D_800DCDA8[8] = {
     1, 1, 1, 2, 3, 2, 3, 2,

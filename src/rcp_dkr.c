@@ -198,6 +198,9 @@ s32 gfxtask_run_xbus(Gfx *dlBegin, Gfx *dlEnd, UNUSED s32 recvMesg) {
     dkrtask->unused60 = COLOUR_TAG_BLACK;
     dkrtask->unused64 = COLOUR_TAG_BLACK;
     osWritebackDCacheAll();
+#ifdef TARGET_PORT
+    port_rcp_gfx_submitted();
+#endif
     osSendMesg(osScInterruptQ, dkrtask, OS_MESG_BLOCK);
     return 0;
 }

@@ -96,18 +96,18 @@ int	ix, xpt;
 
 		dx = absx;
 
-		dn = dx*rpi.d + 0.5;
+		dn = dx*DU_D(rpi) + 0.5;
 		n = ROUND(dn);
 		dn = n;
 
 		dn -= 0.5;
 
-		dx = dx - dn*pihi.d;
-		dx = dx - dn*pilo.d;	/* dx = x - (n - 0.5)*pi */
+		dx = dx - dn*DU_D(pihi);
+		dx = dx - dn*DU_D(pilo);	/* dx = x - (n - 0.5)*pi */
 
 		xsq = dx*dx;
 
-		poly = ((P[4].d*xsq + P[3].d)*xsq + P[2].d)*xsq + P[1].d;
+		poly = ((DU_D(P[4])*xsq + DU_D(P[3]))*xsq + DU_D(P[2]))*xsq + DU_D(P[1]);
 
 		result = dx + (dx*xsq)*poly;
 

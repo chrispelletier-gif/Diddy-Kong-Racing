@@ -143,8 +143,14 @@ void amCreateAudioMgr(ALSynConfig *c, OSPri pri, OSSched *audSched) {
         assetSize = assetAudioTable[ASSET_AUDIO_9] - assetAudioTable[ASSET_AUDIO_8];
         asset8 = mempool_alloc_safe(assetSize, COLOUR_TAG_CYAN);
         asset_load(ASSET_AUDIO, (u32) asset8, assetAudioTable[ASSET_AUDIO_8], assetSize);
+#ifdef TARGET_PORT
+        port_swap32_array(asset8, assetSize / 4);
+#endif
         c->params = asset8;
+#ifndef TARGET_PORT
+        //!@bug Writes past the end of the config struct, which lives on the caller's stack.
         c[1].maxVVoices = 0;
+#endif
         alInit(&__am.g, c);
         //!@bug: Forgot to free assetAudioTable
         mempool_free(asset8);

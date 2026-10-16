@@ -37,6 +37,13 @@ extern u32 cnt_index, adpcm_num, adpcm_cnt, adpcm_max, adpcm_min, lastCnt[];
 static
 Acmd *_decodeChunk(Acmd *ptr, ALLoadFilter *f, s32 tsam, s32 nbytes, s16 outp, s16 inp, u32 flags);
 
+#ifdef TARGET_PORT
+/* Uncompressed samples are big endian in the ROM; this flag asks the port's audio microcode to swap them on load. */
+#define PORT_RAW16_LOAD(ptr) (((Acmd *) (ptr))[-1].words.w0 |= (PORT_A_SWAP16 << 16))
+#else
+#define PORT_RAW16_LOAD(ptr)
+#endif
+
 Acmd *alAdpcmPull(void *filter, s16 *outp, s32 outCount, s32 sampleOffset, Acmd *p) 
 {
     Acmd        *ptr = p;
@@ -239,6 +246,7 @@ Acmd *alRaw16Pull(void *filter, s16 *outp, s32 outCount, s32 sampleOffset, Acmd 
             nbytes += dramAlign;
             aSetBuffer(ptr++, 0, *outp, 0, nbytes + 8 - (nbytes & 0x7));
             aLoadBuffer(ptr++, dramLoc - dramAlign);
+            PORT_RAW16_LOAD(ptr);
         } else 
             dramAlign = 0; 
             
@@ -285,6 +293,7 @@ Acmd *alRaw16Pull(void *filter, s16 *outp, s32 outCount, s32 sampleOffset, Acmd 
 
             aSetBuffer(ptr++, 0, op + dmemAlign, 0, nbytes + 8 - (nbytes & 0x7));
             aLoadBuffer(ptr++, dramLoc - dramAlign);
+            PORT_RAW16_LOAD(ptr);
 
             /*
              * Merge the two sections in DMEM.
@@ -327,6 +336,7 @@ Acmd *alRaw16Pull(void *filter, s16 *outp, s32 outCount, s32 sampleOffset, Acmd 
             nbytes += dramAlign;
             aSetBuffer(ptr++, 0, *outp, 0, nbytes + 8 - (nbytes & 0x7));
             aLoadBuffer(ptr++, dramLoc - dramAlign);
+            PORT_RAW16_LOAD(ptr);
         } else      
             dramAlign = 0; 
         *outp += dramAlign;

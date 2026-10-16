@@ -1,4 +1,7 @@
 #include "menu.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 #include "asset_enums.h"
 #include "asset_loading.h"
 #include "audio.h"
@@ -183,10 +186,17 @@ unk80126878 D_80126878[8];
 f32 D_801268D8;
 UNUSED s32 D_801268DC; // Set to 0 during the title screen, never read.
 s32 gOpeningNameID;
+#ifdef AVOID_UB
+// Track select reads and writes a fifth row (Future Fun Land) that runs into the variables after the array; its
+// first entry is gFFLUnlocked.
+s16 gTrackSelectIDs[5][6];
+#define gFFLUnlocked gTrackSelectIDs[4][0]
+#else
 s16 gTrackSelectIDs[4][6]; // Track Select values?
 s16 gFFLUnlocked;
 UNUSED s32 D_80128464;
 UNUSED s32 D_80128468;
+#endif
 s32 gTrackSelectVertsFlip;
 UNUSED s32 D_80126928; // Set to 64, but never used.
 UNUSED s32 D_8012692C; // Set to 32, but never used.
@@ -397,10 +407,17 @@ f32 D_801268D8;
 UNUSED s32 D_801268DC; // Set to 0 during the title screen, never read.
 s32 gOpeningNameID;
 UNUSED s32 D_801268E4;
+#ifdef AVOID_UB
+// Track select reads and writes a fifth row (Future Fun Land) that runs into the variables after the array; its
+// first entry is gFFLUnlocked.
+s16 gTrackSelectIDs[5][6];
+#define gFFLUnlocked gTrackSelectIDs[4][0]
+#else
 s16 gTrackSelectIDs[4][6]; // Track Select values?
 s16 gFFLUnlocked;
 UNUSED s32 D_8012691C;
 UNUSED s32 D_80126920;
+#endif
 s32 gTrackSelectVertsFlip;
 UNUSED s32 D_80126928; // Set to 64, but never used.
 UNUSED s32 D_8012692C; // Set to 32, but never used.
@@ -1393,7 +1410,13 @@ MenuElement gRecordTimesMenuElements[9] = {
 // The length of the array must be a power of two.
 u8 gFileNameValidChars[32] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ.?    ";
 
+#ifdef AVOID_UB
+// Drawn as a one character string, which needs a terminator after it.
+char gCurFilenameCharBeingDrawnStr[2] = { '\0', '\0' };
+#define gCurFilenameCharBeingDrawn gCurFilenameCharBeingDrawnStr[0]
+#else
 char gCurFilenameCharBeingDrawn = '\0';
+#endif
 s32 gEnterInitalsY = 192;
 s32 gFilenameX = 160;
 s32 gFilenameY = 120;
@@ -1975,6 +1998,10 @@ void load_menu_text(s32 language) {
     }
 
     asset_load(ASSET_MENU_TEXT, (u32) temp, langIndex, size);
+#ifdef TARGET_PORT
+    // A table of string offsets, followed by the strings.
+    port_swap32_array(temp, gMenuTextLangTable[0]);
+#endif
 
     // TODO: Find a way to clean up the ugly hacks.
     // Fill up the lookup table with proper RAM addresses
@@ -3363,7 +3390,16 @@ void menu_title_screen_init(void) {
         numberOfPlayers = 0;
         gTitleDemoTimer = 600;
     }
+#ifdef TARGET_PORT
+    {
+        // Test play-throughs can replace the demo levels (DKR_WARP).
+        s32 cutscene = sTitleScreenDemoIds[DEMO_CUTSCENE_ID];
+        s32 level = port_warp_next(sTitleScreenDemoIds[DEMO_LEVEL_ID], &cutscene, &gTitleDemoTimer);
+        load_level_for_menu(level, numberOfPlayers, cutscene);
+    }
+#else
     load_level_for_menu(sTitleScreenDemoIds[DEMO_LEVEL_ID], numberOfPlayers, sTitleScreenDemoIds[DEMO_CUTSCENE_ID]);
+#endif
     D_801268D8 = 0;
     gOpeningNameID = 0;
     D_801268DC = 0;
@@ -3440,7 +3476,11 @@ s32 menu_title_screen_loop(s32 updateRate) {
     } else {
         updateRateF = (f32) updateRate / 60.0f;
     }
+#ifdef TARGET_PORT
+    if (gMenuDelay < 20 && !port_warp_active()) {
+#else
     if (gMenuDelay < 20) {
+#endif
         render_title_screen(updateRate, updateRateF);
     }
     if (gMenuDelay) {
@@ -3480,7 +3520,15 @@ s32 menu_title_screen_loop(s32 updateRate) {
             playerCount = 0;
             gTitleDemoTimer = 1500;
         }
+#ifdef TARGET_PORT
+        {
+            s32 cutscene = demo[DEMO_CUTSCENE_ID];
+            s32 level = port_warp_next(demo[DEMO_LEVEL_ID], &cutscene, &gTitleDemoTimer);
+            load_level_for_menu(level, playerCount, cutscene);
+        }
+#else
         load_level_for_menu(demo[DEMO_LEVEL_ID], playerCount, demo[DEMO_CUTSCENE_ID]);
+#endif
         if (sTitleScreenDemoIds[gTitleDemoIndex] == sTitleScreenDemoIds[DEMO_LEVEL_ID]) {
             D_801268D8 = 0.0f;
             gOpeningNameID = 0;
@@ -6685,7 +6733,7 @@ void cheatmenu_checksum(void) {
         numBytes = 0x1000;
         size = 0x5000;
         blockOffs = 0x1000;
-        numLeft = (s32) &__ROM_END;
+        numLeft = ROM_END_OFFSET;
         numLeft -= 0x1000;
         tempBuffer = mempool_alloc_safe(size, COLOUR_TAG_BLACK);
 
@@ -6709,7 +6757,7 @@ void cheatmenu_checksum(void) {
 
     set_render_printf_background_colour(0, 0, 0, 128);
     set_render_printf_position(32, 136);
-    numLeft = (s32) &__ROM_END;
+    numLeft = ROM_END_OFFSET;
     render_printf("ROM checksum %08X,%d\n", cksum, numLeft);
 }
 
@@ -7594,7 +7642,12 @@ void fileselect_render(UNUSED s32 updateRate) {
     u32 colour;
     s32 i;
     UNUSED s32 pad[3];
+#ifdef AVOID_UB
+    // filename_trim writes whole names such as "GAMEA" here.
+    char trimmedFilename[32];
+#else
     char trimmedFilename[4];
+#endif
 
     if (osTvType == OS_TV_TYPE_PAL) {
         yPos = 12;
@@ -8133,6 +8186,11 @@ s32 menu_file_select_loop(s32 updateRate) {
         music_change_on();
         init_racer_headers();
         gTrophyRaceWorldId = 0;
+#ifdef TARGET_PORT
+        if (port_apply_test_save(settings)) { // DKR_TEST_SAVE
+            force_mark_write_save_file(gSaveFileIndex); // Store the progress so the file keeps it without the setting.
+        }
+#endif
         if (settings->newGame) {
             if (gIsInAdventureTwo) {
                 settings->cutsceneFlags |= CUTSCENE_ADVENTURE_TWO;
