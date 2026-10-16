@@ -4,6 +4,8 @@
  * game's audio pacing still works.
  */
 #include <3ds.h>
+#include <dirent.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "plat/plat.h"
@@ -22,6 +24,31 @@ static u32 sFrequency = 22050;
 static unsigned long long sFakeStart;
 static unsigned long long sFakeQueued;
 
+/* Tells the player on the bottom screen why there is no sound, spotting a misnamed firmware file if there is one. */
+static void explain_missing_dsp_firmware(void) {
+    DIR *dir;
+    struct dirent *entry;
+    char misnamed[256] = "";
+
+    dir = opendir("sdmc:/3ds");
+    if (dir != NULL) {
+        while ((entry = readdir(dir)) != NULL) {
+            if (strncasecmp(entry->d_name, "dspfirm", 7) == 0 && strcmp(entry->d_name, "dspfirm.cdc") != 0) {
+                snprintf(misnamed, sizeof(misnamed), "%s", entry->d_name);
+                break;
+            }
+        }
+        closedir(dir);
+    }
+    printf("\n  \x1b[31mNo sound:\x1b[0m DSP firmware not found.\n");
+    if (misnamed[0] != '\0') {
+        printf("  Found sdmc:/3ds/%s\n  Rename it to exactly dspfirm.cdc\n", misnamed);
+        printf("  (Windows may be hiding an extension)\n");
+    } else {
+        printf("  Put dspfirm.cdc in sdmc:/3ds/\n");
+    }
+}
+
 void port_audio_output_init(u32 frequency) {
     float mix[12];
     int i;
@@ -29,6 +56,7 @@ void port_audio_output_init(u32 frequency) {
     sFrequency = frequency;
     if (ndspInit() != 0) {
         plat_log("ndspInit failed, audio disabled");
+        explain_missing_dsp_firmware();
         return;
     }
     sSampleData = linearAlloc(NUM_WAVEBUFS * WAVEBUF_BYTES);
