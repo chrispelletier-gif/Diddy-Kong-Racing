@@ -79,6 +79,207 @@ static void set_projection(void) {
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sLocProjection, &m);
 }
 
+/*
+ * GPU self test, for finding what hangs a real 3DS when an emulator copes. Before the game starts, a few frames are
+ * drawn that each add one feature of the renderer to the one before, and the bottom screen says which one never
+ * finished. Skipped with DKR_NO_GPU_TEST=1.
+ */
+static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
+static void apply_combiner(const GfxDrawState *state);
+static void apply_fog(const GfxDrawState *state);
+
+static int sGpuTestStep;
+
+static void gpu_test_wait(const char *what) {
+    unsigned long long start = plat_time_ns();
+    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        if (plat_time_ns() - start > 2000000000ULL) {
+            plat_status("GPU test %d HUNG: %s", sGpuTestStep, what);
+            gPlatGfxStage = "GPU test hung";
+            for (;;) {
+                plat_sleep_ns(1000000000ULL);
+            }
+        }
+        plat_sleep_ns(250000);
+    }
+    C3D_FrameEnd(0); // Nothing in it: only used to wait for the GPU.
+}
+
+static void gpu_test_triangle(C3DVertex *v) {
+    static const float xs[3] = { -0.5f, 0.5f, 0.0f }, ys[3] = { -0.5f, -0.5f, 0.5f };
+    int i;
+    for (i = 0; i < 3; i++) {
+        memset(&v[i], 0, sizeof(v[i]));
+        v[i].pos[0] = xs[i];
+        v[i].pos[1] = ys[i];
+        v[i].pos[3] = 1.0f;
+        v[i].color[0] = v[i].color[1] = v[i].color[2] = v[i].color[3] = 255;
+    }
+}
+
+static void gpu_test_step(const char *what) {
+    sGpuTestStep++;
+    plat_log("GPU test %d: %s", sGpuTestStep, what);
+    gpu_test_wait(what);
+    C3D_FrameBegin(0);
+    C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+    C3D_FrameDrawOn(sTarget);
+}
+
+static void gpu_test_end(const char *what) {
+    C3D_FrameEnd(0);
+    gpu_test_wait(what);
+}
+
+static void gpu_self_test(void) {
+    static const char *const sNames[] = {
+        "empty frame",
+        "triangle, float colours",
+        "triangle, byte colours",
+        "+ texture unit 1",
+        "+ fog unit off",
+        "+ scissor",
+        "+ depth test",
+        "+ game combiner",
+        "+ fog table",
+        "game clear rectangles",
+    };
+    GfxDrawState state;
+    C3D_TexEnv *env;
+    int i;
+
+    if (plat_getenv("DKR_NO_GPU_TEST") != NULL) {
+        return;
+    }
+    plat_status("GPU test...");
+    gPlatGfxStage = "GPU test";
+
+    // 1: an empty frame, like the game's first one.
+    gpu_test_step(sNames[0]);
+    gpu_test_end(sNames[0]);
+
+    // 2: one flat triangle with the simplest state, colours as floats (the layout SM64's 3DS port uses).
+    gpu_test_step(sNames[1]);
+    {
+        float *fv = (float *) sVbo;
+        C3DVertex tmp[3];
+        C3D_AttrInfo *attr = C3D_GetAttrInfo();
+        C3D_BufInfo *buf = C3D_GetBufInfo();
+        gpu_test_triangle(tmp);
+        for (i = 0; i < 3; i++) {
+            memcpy(&fv[i * 12], tmp[i].pos, 8 * sizeof(float));
+            fv[i * 12 + 8] = fv[i * 12 + 9] = fv[i * 12 + 10] = fv[i * 12 + 11] = 255.0f;
+        }
+        AttrInfo_Init(attr);
+        AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
+        AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
+        AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
+        AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 4);
+        BufInfo_Init(buf);
+        BufInfo_Add(buf, sVbo, 12 * sizeof(float), 4, 0x3210);
+        C3D_TexBind(0, &sWhiteTex);
+        env = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        for (i = 1; i < 6; i++) {
+            C3D_TexEnvInit(C3D_GetTexEnv(i));
+        }
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexScale, 1.0f, -1.0f, 1.0f, -1.0f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexOffset, 0.0f, 1.0f, 0.0f, 1.0f);
+        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+        C3D_AlphaTest(false, GPU_ALWAYS, 0);
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        C3D_CullFace(GPU_CULL_NONE);
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+        set_projection();
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    }
+    gpu_test_end(sNames[1]);
+
+    // 3: the same with the renderer's own vertex layout (colours as bytes).
+    gpu_test_step(sNames[2]);
+    {
+        C3D_AttrInfo *attr = C3D_GetAttrInfo();
+        C3D_BufInfo *buf = C3D_GetBufInfo();
+        AttrInfo_Init(attr);
+        AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
+        AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
+        AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
+        AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4);
+        BufInfo_Init(buf);
+        BufInfo_Add(buf, sVbo, sizeof(C3DVertex), 4, 0x3210);
+        gpu_test_triangle(sVbo);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    }
+    gpu_test_end(sNames[2]);
+
+    // 4 to 9: add the renderer's features one at a time.
+    gpu_test_step(sNames[3]);
+    gpu_test_triangle(sVbo);
+    C3D_TexBind(1, &sWhiteTex);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[3]);
+
+    gpu_test_step(sNames[4]);
+    gpu_test_triangle(sVbo);
+    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[4]);
+
+    gpu_test_step(sNames[5]);
+    gpu_test_triangle(sVbo);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, 40, 40, 400, 700);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[5]);
+
+    gpu_test_step(sNames[6]);
+    gpu_test_triangle(sVbo);
+    C3D_DepthTest(true, GPU_GEQUAL, GPU_WRITE_ALL);
+    C3D_DepthMap(true, -1.0f, 0.0002f);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[6]);
+
+    memset(&state, 0, sizeof(state));
+    state.combiner.numCycles = 1;
+    state.combiner.rgb[0].a = GFX_CC_TEXEL0;
+    state.combiner.rgb[0].b = GFX_CC_ZERO;
+    state.combiner.rgb[0].c = GFX_CC_SHADE;
+    state.combiner.rgb[0].d = GFX_CC_ZERO;
+    state.combiner.alpha[0] = state.combiner.rgb[0];
+    state.prim[0] = state.prim[1] = state.prim[2] = state.prim[3] = 255;
+
+    gpu_test_step(sNames[7]);
+    gpu_test_triangle(sVbo);
+    apply_combiner(&state);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[7]);
+
+    gpu_test_step(sNames[8]);
+    gpu_test_triangle(sVbo);
+    state.fogEnabled = 1;
+    state.fogMul = 256;
+    state.fogOffset = -100;
+    apply_fog(&state);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    state.fogEnabled = 0;
+    apply_fog(&state);
+    gpu_test_end(sNames[8]);
+
+    gpu_test_step(sNames[9]);
+    {
+        static const short sFull[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
+        sVboUsed = 0;
+        draw_clear_rect(sFull, 0x204080FF, 0);
+        draw_clear_rect(sFull, 0, 1);
+        sVboUsed = 0;
+        sFrameTriangles = 0;
+    }
+    gpu_test_end(sNames[9]);
+
+    plat_status("GPU test passed");
+}
+
 void gfxb_init(void) {
     C3D_AttrInfo *attr;
     C3D_BufInfo *buf;
@@ -131,6 +332,7 @@ void gfxb_init(void) {
 
     set_projection();
     C3D_DepthMap(true, -1.0f, 0.0f);
+    gpu_self_test();
 }
 
 /******************************** Frames ********************************/
