@@ -48,6 +48,11 @@ void gfxb_end_frame(void) {
     }
 }
 
+/* Writes the current frame (320x240) to a PNG file. */
+void gfxb_soft_save_png(const char *path) {
+    stbi_write_png(path, W, H, 4, sColor, W * 4);
+}
+
 static void clip_rect(const int16_t in[4], int *x0, int *y0, int *x1, int *y1) {
     *x0 = in[0] < 0 ? 0 : in[0];
     *y0 = in[1] < 0 ? 0 : in[1];
@@ -115,7 +120,7 @@ static inline int wrap_coord(int c, int size, int mode) {
 }
 
 static void sample(const GfxTexture *tex, float u, float v, float out[4]) {
-    const uint32_t *px = tex->pixels;
+    const unsigned int *px = tex->pixels;
     int w = tex->width, h = tex->height;
     if (tex->filter == GFX_FILTER_POINT) {
         int x = wrap_coord((int) floorf(u * w), w, tex->wrapS);
@@ -352,7 +357,19 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
             }
             dst = &sColor[(y * W + x) * 4];
             if (st->fogEnabled) {
-                fogAmount = in.shade[3];
+                // Per pixel, from depth, like the 3DS renderer: interpolating the per vertex factor goes wrong for
+                // triangles that cross the near plane (DKR_VERTEX_FOG=1 uses the vertex factor anyway).
+                static int sVertexFog = -1;
+                if (sVertexFog < 0) {
+                    sVertexFog = getenv("DKR_VERTEX_FOG") != NULL;
+                }
+                if (sVertexFog) {
+                    fogAmount = in.shade[3];
+                } else {
+                    float zw = (w0 * v0->z + w1 * v1->z + w2 * v2->z) * 2.0f - 1.0f;
+                    float f = zw * st->fogMul + st->fogOffset;
+                    fogAmount = ((f < 0.0f) ? 0.0f : (f > 255.0f) ? 255.0f : f) / 255.0f;
+                }
                 for (k = 0; k < 3; k++) {
                     out[k] = out[k] + (st->fog[k] / 255.0f - out[k]) * fogAmount;
                 }

@@ -105,6 +105,12 @@ enum { PORT_PROFILE_GFX, PORT_PROFILE_AUDIO, PORT_PROFILE_COUNT };
 void port_profile_add(s32 category, unsigned long long ns);
 void port_profile_frame(void);
 
+/* Test helpers (port/src/game/port_test.c). */
+s32 port_warp_next(s32 levelId, s32 *cutsceneId, s16 *timer);
+s32 port_warp_active(void);
+s32 port_gfx_frame_count(void);
+s32 port_apply_test_save(void *settings);
+
 /* Logging. */
 void port_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void port_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));

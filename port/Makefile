@@ -87,7 +87,7 @@ ifeq ($(TARGET),3ds)
   CC        := $(PREFIX)gcc
   ARCH      := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
   # The ARM EABI default of variable sized enums would change the layout of the game's structs.
-  GAME_ARCH_FLAGS := -fno-short-enums
+  GAME_ARCH_FLAGS := -fno-short-enums -DPORT_GFX_REFERENCE
   CTRULIB   := $(DEVKITPRO)/libctru
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -Iinclude -Isrc
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)

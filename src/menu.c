@@ -1,4 +1,7 @@
 #include "menu.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 #include "asset_enums.h"
 #include "asset_loading.h"
 #include "audio.h"
@@ -3387,7 +3390,16 @@ void menu_title_screen_init(void) {
         numberOfPlayers = 0;
         gTitleDemoTimer = 600;
     }
+#ifdef TARGET_PORT
+    {
+        // Test play-throughs can replace the demo levels (DKR_WARP).
+        s32 cutscene = sTitleScreenDemoIds[DEMO_CUTSCENE_ID];
+        s32 level = port_warp_next(sTitleScreenDemoIds[DEMO_LEVEL_ID], &cutscene, &gTitleDemoTimer);
+        load_level_for_menu(level, numberOfPlayers, cutscene);
+    }
+#else
     load_level_for_menu(sTitleScreenDemoIds[DEMO_LEVEL_ID], numberOfPlayers, sTitleScreenDemoIds[DEMO_CUTSCENE_ID]);
+#endif
     D_801268D8 = 0;
     gOpeningNameID = 0;
     D_801268DC = 0;
@@ -3464,7 +3476,11 @@ s32 menu_title_screen_loop(s32 updateRate) {
     } else {
         updateRateF = (f32) updateRate / 60.0f;
     }
+#ifdef TARGET_PORT
+    if (gMenuDelay < 20 && !port_warp_active()) {
+#else
     if (gMenuDelay < 20) {
+#endif
         render_title_screen(updateRate, updateRateF);
     }
     if (gMenuDelay) {
@@ -3504,7 +3520,15 @@ s32 menu_title_screen_loop(s32 updateRate) {
             playerCount = 0;
             gTitleDemoTimer = 1500;
         }
+#ifdef TARGET_PORT
+        {
+            s32 cutscene = demo[DEMO_CUTSCENE_ID];
+            s32 level = port_warp_next(demo[DEMO_LEVEL_ID], &cutscene, &gTitleDemoTimer);
+            load_level_for_menu(level, playerCount, cutscene);
+        }
+#else
         load_level_for_menu(demo[DEMO_LEVEL_ID], playerCount, demo[DEMO_CUTSCENE_ID]);
+#endif
         if (sTitleScreenDemoIds[gTitleDemoIndex] == sTitleScreenDemoIds[DEMO_LEVEL_ID]) {
             D_801268D8 = 0.0f;
             gOpeningNameID = 0;
@@ -8162,6 +8186,11 @@ s32 menu_file_select_loop(s32 updateRate) {
         music_change_on();
         init_racer_headers();
         gTrophyRaceWorldId = 0;
+#ifdef TARGET_PORT
+        if (port_apply_test_save(settings)) { // DKR_TEST_SAVE
+            safe_mark_write_save_file(gSaveFileIndex); // Store the progress so the file keeps it without the setting.
+        }
+#endif
         if (settings->newGame) {
             if (gIsInAdventureTwo) {
                 settings->cutsceneFlags |= CUTSCENE_ADVENTURE_TWO;

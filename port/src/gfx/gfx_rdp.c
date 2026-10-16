@@ -79,6 +79,32 @@ static struct {
 } g;
 
 static s32 sTraceFrame = -1;
+
+/*
+ * Differential testing (DKR_DIFF_EVERY=n, 3DS build): every nth frame is also drawn by the software reference renderer
+ * (3ds/gfx_ref.c) and both results are saved to the data directory, as diff_NNNNN_ref.png and diff_NNNNN_gpu.bin,
+ * for port/tools/diff_frames.py to compare.
+ */
+#ifdef PORT_GFX_REFERENCE
+void refb_init(void);
+void refb_start_frame(void);
+void refb_end_frame(void);
+void refb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a);
+void refb_clear_depth(const short rect[4]);
+void refb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
+void refb_save_png(const char *path);
+void gfxb_capture_frame(const char *path);
+static s32 sDiffEvery;
+static s32 sRefActive;
+#define REF_CALL(call)                                                                                                 \
+    do {                                                                                                               \
+        if (sRefActive) {                                                                                              \
+            call;                                                                                                      \
+        }                                                                                                              \
+    } while (0)
+#else
+#define REF_CALL(call)
+#endif
 #define TRACE(...)                        \
     if (sFrameCount == sTraceFrame) {     \
         plat_log(__VA_ARGS__);            \
@@ -549,6 +575,7 @@ static void flush_batch(void) {
                      v->r, v->g, v->b, v->a);
         }
         gfxb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount);
+        REF_CALL(refb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount));
         sBatchCount = 0;
     }
 }
@@ -793,9 +820,11 @@ static void fill_rectangle(u32 w0, u32 w1) {
         flush_batch();
         if (g.colorImage == g.depthImage) {
             gfxb_clear_depth(rect);
+            REF_CALL(refb_clear_depth(rect));
         } else {
             u32 c = rgba5551_to_8888(g.fillColor >> 16);
             gfxb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255);
+            REF_CALL(refb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255));
         }
         return;
     }
@@ -1101,6 +1130,15 @@ void port_gfx_init(void) {
         sGfxInitialised = TRUE;
         sTraceFrame = (trace != NULL) ? port_atoi(trace) : -1;
         gfxb_init();
+#ifdef PORT_GFX_REFERENCE
+        {
+            const char *diff = plat_getenv("DKR_DIFF_EVERY");
+            sDiffEvery = (diff != NULL) ? port_atoi(diff) : 0;
+            if (sDiffEvery > 0) {
+                refb_init();
+            }
+        }
+#endif
     }
 }
 
@@ -1109,7 +1147,11 @@ void port_gfx_run_task(void *taskPtr) {
     port_gfx_init();
     sFrameCount++;
     port_profile_frame();
+#ifdef PORT_GFX_REFERENCE
+    sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
+#endif
     gfxb_start_frame();
+    REF_CALL(refb_start_frame());
     g.vertexIndex = 0;
     g.billboard = 0;
     if (g.scissor[2] == 0) {
@@ -1119,4 +1161,20 @@ void port_gfx_run_task(void *taskPtr) {
     run_dl((const Gfx *) task->t.data_ptr, -1);
     flush_batch();
     gfxb_end_frame();
+#ifdef PORT_GFX_REFERENCE
+    if (sRefActive) {
+        char path[256];
+        refb_end_frame();
+        plat_snprintf(path, sizeof(path), "%s/diff_%05d_ref.png", plat_data_dir(), (int) sFrameCount);
+        refb_save_png(path);
+        plat_snprintf(path, sizeof(path), "%s/diff_%05d_gpu.bin", plat_data_dir(), (int) sFrameCount);
+        gfxb_capture_frame(path);
+        sRefActive = FALSE;
+    }
+#endif
+}
+
+/* The number of frames drawn so far, for logs that need to line up with frame dumps. */
+s32 port_gfx_frame_count(void) {
+    return sFrameCount;
 }

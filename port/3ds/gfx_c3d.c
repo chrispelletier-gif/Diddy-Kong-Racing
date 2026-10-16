@@ -6,6 +6,7 @@
  */
 #include <3ds.h>
 #include <citro3d.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -130,6 +131,48 @@ void gfxb_init(void) {
 
 /******************************** Frames ********************************/
 
+/*
+ * Frame capture for differential testing: the render target is copied to a
+ * linear buffer once the GPU has finished the frame, just before the next one begins, and written out raw: a header
+ * of width and height (u32 each) then RGBA8 rows, still in the framebuffer's rotated orientation.
+ */
+static char sCapturePath[256];
+
+void gfxb_capture_frame(const char *path) {
+    snprintf(sCapturePath, sizeof(sCapturePath), "%s", path);
+}
+
+static void capture_pending_frame(void) {
+    // The framebuffer is rotated (240 wide, 400 tall, times the render scale). It is copied at full resolution; the
+    // comparison tool downsamples anti-aliased captures itself.
+    const u32 w = TOP_HEIGHT * sRenderScale, h = TOP_WIDTH * sRenderScale;
+    u32 *pixels;
+    FILE *file;
+
+    if (sCapturePath[0] == '\0') {
+        return;
+    }
+    pixels = linearAlloc(w * h * 4);
+    if (pixels != NULL) {
+        GSPGPU_FlushDataCache(pixels, w * h * 4);
+        C3D_SyncDisplayTransfer((u32 *) sTarget->frameBuf.colorBuf, GX_BUFFER_DIM(w, h), pixels, GX_BUFFER_DIM(w, h),
+                                GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+        GSPGPU_InvalidateDataCache(pixels, w * h * 4);
+        file = fopen(sCapturePath, "wb");
+        if (file != NULL) {
+            fwrite(&w, 4, 1, file);
+            fwrite(&h, 4, 1, file);
+            fwrite(pixels, 4, w * h, file);
+            fclose(file);
+        }
+        linearFree(pixels);
+    }
+    sCapturePath[0] = '\0';
+}
+
 static void process_pending_frees(void) {
     int i;
     for (i = 0; i < sNumPendingFrees; i++) {
@@ -142,6 +185,7 @@ static void process_pending_frees(void) {
 void gfxb_start_frame(void) {
     // No vblank throttling here: the emulated VI already paces the game. Beginning a frame still waits for the GPU
     // to finish the previous one, after which its textures can be deleted and the vertex buffer reused.
+    capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
     C3D_FrameBegin(0);
     process_pending_frees();
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
