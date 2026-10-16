@@ -7,6 +7,10 @@
 .fvec texScale  ; xy = scale for texture 0, zw = scale for texture 1
 .fvec texOffset ; xy = offset for texture 0, zw = offset for texture 1
 
+; Constants
+.constf zeros(0.0, 0.0, 0.0, 0.0)
+.constf colourScale(0.00392156862, 0.00392156862, 0.00392156862, 0.00392156862)
+
 ; Outputs
 .out outpos position
 .out outtc0 texcoord0
@@ -22,7 +26,9 @@
 .proc main
 	dp4 outpos.x, projection[0], inpos
 	dp4 outpos.y, projection[1], inpos
-	dp4 outpos.z, projection[2], inpos
+	; The N64 has no far plane, so geometry beyond it is pinned to the farthest depth instead of being clipped.
+	dp4 r2.z, projection[2], inpos
+	min outpos.z, zeros.z, r2.z
 	dp4 outpos.w, projection[3], inpos
 
 	; Texture coordinates are scaled (and offset) for padded textures.
@@ -31,6 +37,7 @@
 	mul r1.xy, texScale.zw, intc1.xy
 	add outtc1.xy, texOffset.zw, r1.xy
 
-	mov outclr, inclr
+	; Colours arrive as unnormalised bytes (0 - 255).
+	mul outclr, colourScale, inclr
 	end
 .end

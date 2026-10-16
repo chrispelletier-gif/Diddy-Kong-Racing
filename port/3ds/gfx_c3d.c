@@ -179,7 +179,7 @@ void gfxb_end_frame(void) {
         }
     }
     if ((sFrameCount++ % 120) == 0) {
-        plat_log("frame %d: %d triangles", sFrameCount, sFrameTriangles);
+        plat_log("frame %d: %d triangles at %llu ms", sFrameCount, sFrameTriangles, plat_time_ns() / 1000000ULL);
     }
     sFrameTriangles = 0;
     GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
@@ -235,6 +235,11 @@ void gfxb_texture_upload(GfxTexture *tex) {
     if (t == NULL) {
         t = calloc(1, sizeof(C3DTexture));
         if (t == NULL || !C3D_TexInit(&t->tex, pw, ph, GPU_RGBA8)) {
+            static int sFailures;
+            if ((sFailures++ % 50) == 0) {
+                plat_log("texture %ux%u allocation failed (%d failures, linear free %lu)", pw, ph, sFailures,
+                         (unsigned long) linearSpaceFree());
+            }
             free(t);
             return;
         }
@@ -478,7 +483,11 @@ static void compile_combiner(const GfxDrawState *state, TevProgram *prog) {
         compile_equation(st, &state->combiner.alpha[cycle], 1, prev == GPU_CONSTANT ? GPU_CONSTANT : GPU_PREVIOUS);
         prog->numStages++;
     }
-    if (state->fogEnabled) {
+    static int sNoFog = -1;
+    if (sNoFog < 0) {
+        sNoFog = plat_getenv("DKR_NO_FOG") != NULL;
+    }
+    if (state->fogEnabled && !sNoFog) {
         // Blend towards the fog colour by the vertex alpha, keeping the combined alpha.
         TevStage *st = &prog->stages[prog->numStages++];
         init_stage(st);
@@ -707,10 +716,7 @@ static int is_full_clear(const short rect[4]) {
 }
 
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
-    if (is_full_clear(rect)) {
-        C3D_FrameBufClear(&sTarget->frameBuf, C3D_CLEAR_COLOR, (r << 24) | (g << 16) | (b << 8) | a, 0);
-        return;
-    }
+    // Colour fills are drawn so that they cover only the game's part of the screen, leaving black bars at the sides.
     draw_clear_rect(rect, (r << 24) | (g << 16) | (b << 8) | a, 0);
 }
 
