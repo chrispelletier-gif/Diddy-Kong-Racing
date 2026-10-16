@@ -33,6 +33,18 @@ void *plat_load_file(const char *path, unsigned int *size) {
     return data;
 }
 
+int plat_load_file_start(const char *path, void *data, unsigned int size) {
+    FILE *f = fopen(path, "rb");
+    size_t got;
+
+    if (f == NULL) {
+        return -1;
+    }
+    got = fread(data, 1, size, f);
+    fclose(f);
+    return (int) got;
+}
+
 int plat_save_file(const char *path, const void *data, unsigned int size) {
     FILE *f = fopen(path, "wb");
     size_t written;

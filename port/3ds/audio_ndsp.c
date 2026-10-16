@@ -79,6 +79,7 @@ void port_audio_output_init(u32 frequency) {
         sWaveBufs[i].status = NDSP_WBUF_DONE;
     }
     sDspAvailable = 1;
+    plat_status("Sound started");
 }
 
 static unsigned long long fake_played_bytes(void) {

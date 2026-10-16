@@ -55,13 +55,13 @@ void plat_init(void) {
     LightLock_Init(&sIntLock);
 
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
+    // DKR_SINGLE_CORE=1 keeps everything on the application core, as on an Old 3DS.
     APT_CheckNew3DS(&isNew3DS);
     if (isNew3DS) {
         osSetSpeedupEnable(true);
-        sRcpCore = 2;
-    } else {
-        sRcpCore = 0;
     }
+    sRcpCore = (isNew3DS && plat_getenv("DKR_SINGLE_CORE") == NULL) ? 2 : 0;
+    plat_status("%s, renderer on core %d", isNew3DS ? "New 3DS" : "Old 3DS", sRcpCore);
     // The scheduler cannot start the next frame while an audio task is running, so audio tasks must finish quickly:
     // they run next to the renderer at the same high priority. (The system core, which only gives applications a
     // share of its time, made them take several times longer.)
@@ -133,8 +133,11 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
     }
     thread->handle = threadCreate(thread_entry, thread, stackSize, prio, core, true);
     if (thread->handle == NULL && core != 0) {
+        plat_log("thread %s: core %d unavailable, using core 0", name, core);
+        core = 0;
         thread->handle = threadCreate(thread_entry, thread, stackSize, prio, 0, true);
     }
+    plat_log("thread %s: priority 0x%X, core %d", name, prio, core);
     if (thread->handle == NULL) {
         plat_fatal("Could not create thread %s", name);
     }
@@ -225,7 +228,16 @@ const char *plat_data_dir(void) {
     return "sdmc:/3ds/dkr";
 }
 
-/* Creating sdmc:/3ds/dkr/debug turns on logging to sdmc:/3ds/dkr/log.txt. */
+/*
+ * The start-up is always logged to sdmc:/3ds/dkr/log.txt (the first LOG_BOOT_LINES lines), so there is something to
+ * look at if the game does not start. Creating sdmc:/3ds/dkr/debug keeps logging after that.
+ */
+#define LOG_BOOT_LINES 200
+
+static LightLock sLogLock;
+static int sLogLines;
+static int sLogDebug;
+
 static FILE *log_file(void) {
     static int sChecked;
     static FILE *sFile;
@@ -234,28 +246,56 @@ static FILE *log_file(void) {
         sChecked = 1;
         if (flag != NULL) {
             fclose(flag);
-            sFile = fopen("sdmc:/3ds/dkr/log.txt", "w");
+            sLogDebug = 1;
         }
+        sFile = fopen("sdmc:/3ds/dkr/log.txt", "w");
+    }
+    if (!sLogDebug && sLogLines >= LOG_BOOT_LINES) {
+        return NULL;
     }
     return sFile;
 }
 
+static void log_line(const char *prefix, const char *text) {
+    static int sLockReady;
+    FILE *file;
+    if (!sLockReady) {
+        // The first line is logged from the main thread before any other thread exists.
+        LightLock_Init(&sLogLock);
+        sLockReady = 1;
+    }
+    LightLock_Lock(&sLogLock);
+    file = log_file();
+    if (file != NULL) {
+        fprintf(file, "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+        fflush(file);
+        sLogLines++;
+    }
+    LightLock_Unlock(&sLogLock);
+}
+
 void plat_log(const char *fmt, ...) {
     char buffer[256];
-    FILE *file;
     va_list args;
     va_start(args, fmt);
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     svcOutputDebugString(buffer, strlen(buffer));
-    file = log_file();
-    if (file != NULL) {
-        fprintf(file, "%s\n", buffer);
-        fflush(file);
-    }
+    log_line("", buffer);
 #ifdef PORT_DEBUG_CONSOLE
     printf("%s\n", buffer);
 #endif
+}
+
+/* The bottom screen console is the current one (see main_3ds.c). */
+void plat_status(const char *fmt, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    log_line("", buffer);
+    printf("  %s\n", buffer);
 }
 
 void plat_fatal(const char *fmt, ...) {
@@ -267,13 +307,7 @@ void plat_fatal(const char *fmt, ...) {
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     svcOutputDebugString(buffer, strlen(buffer));
-    {
-        FILE *file = log_file();
-        if (file != NULL) {
-            fprintf(file, "FATAL: %s\n", buffer);
-            fflush(file);
-        }
-    }
+    log_line("FATAL: ", buffer);
 
     // Shown as text on the top screen (the system error dialog does not appear in every emulator).
     consoleInit(GFX_TOP, &sTopConsole);

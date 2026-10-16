@@ -41,6 +41,13 @@ int plat_main_loop_iteration(void) {
     }
     // The game runs on its own threads; the main thread only has to keep servicing APT (home menu, sleep).
     svcSleepThread(16 * 1000 * 1000);
+    {
+        // For the start-up log: shows whether the main thread still gets to run (it is the lowest priority one).
+        static int sIterations;
+        if (++sIterations % 120 == 0 && sIterations <= 120 * 15) {
+            plat_log("main thread alive");
+        }
+    }
     return 1;
 }
 

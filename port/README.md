@@ -116,7 +116,9 @@ that applies to it as well.
 
 ## Debug settings on the 3DS
 
-Create `sdmc:/3ds/dkr/debug` (an empty file) to log to `sdmc:/3ds/dkr/log.txt`. Settings go in
+The start-up is always logged to `sdmc:/3ds/dkr/log.txt`, and its progress is shown on the bottom screen, so if
+the game does not start, the last line says how far it got. Create `sdmc:/3ds/dkr/debug` (an empty file) to keep
+logging after start-up. Settings go in
 `sdmc:/3ds/dkr/env.txt` as `NAME=VALUE` lines. `DKR_TRACE_FRAME` and `DKR_INPUT` (which replaces the real
 controls) work there, as do these renderer switches:
 - `DKR_NO_CULL=1`
@@ -124,6 +126,7 @@ controls) work there, as do these renderer switches:
 - `DKR_NO_FOG=1`
 - `DKR_VERTEX_FOG=1` (the old per vertex fog, for comparison)
 - `DKR_GFX_TEST=1` (draws a reference quad)
+- `DKR_SINGLE_CORE=1` (on a New 3DS, keeps the renderer on the main core as on an Old 3DS)
 
 ## Automated testing
 

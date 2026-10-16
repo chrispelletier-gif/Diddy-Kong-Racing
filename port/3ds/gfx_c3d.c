@@ -96,7 +96,7 @@ void gfxb_init(void) {
         }
         C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT,
                                   DISPLAY_TRANSFER_FLAGS(sRenderScale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO));
-        plat_log("render scale %d", sRenderScale);
+        plat_status("Graphics started%s", sRenderScale == 2 ? " (anti-aliased)" : "");
     }
 
     sShaderDvlb = DVLB_ParseFile((u32 *) shader_shbin, shader_shbin_size);
@@ -186,7 +186,16 @@ void gfxb_start_frame(void) {
     // No vblank throttling here: the emulated VI already paces the game. Beginning a frame still waits for the GPU
     // to finish the previous one, after which its textures can be deleted and the vertex buffer reused.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
+    if (sFrameCount < 3) {
+        plat_log("frame %d: waiting for the GPU", sFrameCount);
+    }
     C3D_FrameBegin(0);
+    if (sFrameCount < 3) {
+        plat_log("frame %d: GPU ready", sFrameCount);
+    }
+    if (sFrameCount == 1) {
+        plat_status("First frame drawn");
+    }
     process_pending_frees();
     // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
     // draws nothing (while a level loads) must not show up as a black flash.
@@ -284,8 +293,16 @@ void gfxb_end_frame(void) {
             draw_test_pattern();
         }
     }
-    if ((sFrameCount++ % 120) == 0) {
-        plat_log("frame %d: %d triangles at %llu ms", sFrameCount, sFrameTriangles, plat_time_ns() / 1000000ULL);
+    {
+        static float sMaxUsage;
+        float usage = C3D_GetCmdBufUsage();
+        if (usage > sMaxUsage) {
+            sMaxUsage = usage;
+        }
+        if ((sFrameCount++ % 120) == 0) {
+            plat_log("frame %d: %d triangles at %llu ms, command buffer %.0f%% (max %.0f%%)", sFrameCount,
+                     sFrameTriangles, plat_time_ns() / 1000000ULL, usage * 100.0f, sMaxUsage * 100.0f);
+        }
     }
     sFrameTriangles = 0;
     GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));

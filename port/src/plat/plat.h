@@ -70,6 +70,8 @@ int plat_main_loop_iteration(void);
 /* Whole file helpers. plat_load_file returns a malloc'd buffer (or NULL) and writes the size to *size. */
 void *plat_load_file(const char *path, unsigned int *size);
 int plat_save_file(const char *path, const void *data, unsigned int size);
+/* Reads up to size bytes from the start of a file. Returns the number read, or -1 if it cannot be opened. */
+int plat_load_file_start(const char *path, void *data, unsigned int size);
 void *plat_malloc(size_t size);
 void plat_free(void *ptr);
 int plat_snprintf(char *buf, size_t size, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
@@ -90,6 +92,8 @@ const char *const *plat_rom_search_dirs(void);
 const char *plat_data_dir(void);
 
 void plat_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* A start-up progress line: shown on the bottom screen on the 3DS, and logged. */
+void plat_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void plat_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 
 #ifdef __cplusplus
