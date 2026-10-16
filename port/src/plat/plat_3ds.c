@@ -32,6 +32,7 @@ static CondVar sKernelCond;
 static LightLock sIntLock;
 static __thread void *sCurrentOsThread;
 static int sRcpCore;
+static int sAudioCore;
 
 static int prio_from_n64(int n64Priority) {
     int prio;
@@ -54,6 +55,10 @@ void plat_init(void) {
     LightLock_Init(&sIntLock);
 
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
+    // Let the application use part of the system core (core 1).
+    sAudioCore = (APT_SetAppCpuTimeLimit(30) == 0) ? 1 : 0;
+    plat_log("audio worker on core %d", sAudioCore);
+
     APT_CheckNew3DS(&isNew3DS);
     if (isNew3DS) {
         osSetSpeedupEnable(true);
@@ -88,6 +93,12 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             prio = PRIO_RCP;
             core = sRcpCore;
             stackSize = 128 * 1024;
+            break;
+        case PLAT_THREAD_AUDIO:
+            // The system core has time to spare (see plat_init), which is plenty for the audio mixing.
+            prio = PRIO_RCP;
+            core = sAudioCore;
+            stackSize = 64 * 1024;
             break;
         default:
             prio = prio_from_n64(n64Priority);

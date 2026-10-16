@@ -20,7 +20,8 @@ typedef void (*PlatThreadFunc)(void *arg);
 enum PlatThreadKind {
     PLAT_THREAD_GAME,     /* An emulated N64 thread. Priority follows the N64 priority. */
     PLAT_THREAD_HARDWARE, /* Emulated hardware (VI retrace, PI). Always above every game thread. */
-    PLAT_THREAD_RCP,      /* Emulated RSP/RDP. May run on a different core. */
+    PLAT_THREAD_RCP,      /* Emulated RDP (graphics). May run on a different core. */
+    PLAT_THREAD_AUDIO,    /* Emulated RSP audio. May run on a different core. */
 };
 
 void plat_init(void);

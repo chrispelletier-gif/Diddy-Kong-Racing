@@ -418,7 +418,14 @@ static void log_combiner(const GfxDrawState *st) {
 }
 
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
+    static int sNullRender = -1;
     int t, i, n;
+    if (sNullRender < 0) {
+        sNullRender = getenv("DKR_NULL_RENDER") != NULL; // Skip rasterising, for profiling everything else.
+    }
+    if (sNullRender) {
+        return;
+    }
     log_combiner(state);
     for (t = 0; t < numTriangles; t++) {
         ClipVert in[3], clipped[8];

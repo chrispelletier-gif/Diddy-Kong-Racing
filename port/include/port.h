@@ -98,6 +98,11 @@ static inline s32 port_atoi(const char *s) {
     return neg ? -v : v;
 }
 
+/* Simple profiling: accumulated time per category, logged periodically by port_profile_frame(). */
+enum { PORT_PROFILE_GFX, PORT_PROFILE_AUDIO, PORT_PROFILE_COUNT };
+void port_profile_add(s32 category, unsigned long long ns);
+void port_profile_frame(void);
+
 /* Logging. */
 void port_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void port_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));

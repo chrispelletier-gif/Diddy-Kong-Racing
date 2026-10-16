@@ -1106,6 +1106,7 @@ void port_gfx_run_task(void *taskPtr) {
     OSTask *task = (OSTask *) taskPtr;
     port_gfx_init();
     sFrameCount++;
+    port_profile_frame();
     gfxb_start_frame();
     g.vertexIndex = 0;
     g.billboard = 0;
