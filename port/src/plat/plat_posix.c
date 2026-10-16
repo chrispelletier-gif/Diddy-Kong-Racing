@@ -170,6 +170,13 @@ void plat_wait_vblank(void) {
     }
 }
 
+const char *const *plat_rom_search_dirs(void) {
+    static const char *sDirs[2];
+    sDirs[0] = plat_data_dir();
+    sDirs[1] = NULL;
+    return sDirs;
+}
+
 const char *plat_data_dir(void) {
     const char *dir = getenv("DKR_DATA_DIR");
     return dir != NULL ? dir : ".";

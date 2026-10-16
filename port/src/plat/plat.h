@@ -80,6 +80,12 @@ const char *plat_getenv(const char *name);
 /* Scripted input (DKR_INPUT) for automated tests. Returns nonzero when a script is set. */
 int plat_input_script(int poll, unsigned short *buttons, signed char *stickX, signed char *stickY);
 
+/* Lists the entries of a directory into names (maxNames entries of nameSize bytes). Returns the count. */
+int plat_list_dir(const char *dir, char *names, int nameSize, int maxNames);
+
+/* NULL terminated list of directories to search for a ROM with any name. */
+const char *const *plat_rom_search_dirs(void);
+
 /* Directory where the ROM and save files live. */
 const char *plat_data_dir(void);
 

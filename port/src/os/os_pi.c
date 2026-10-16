@@ -29,12 +29,15 @@ static u32 sAssetsLutEnd;
 #endif
 
 /* Converts .v64 (byte swapped) and .n64 (little endian) dumps to the native .z64 byte order. */
-static void normalise_rom_byte_order(u8 *rom, u32 size) {
+static s32 normalise_rom_byte_order(u8 *rom, u32 size) {
     u32 i;
     u8 tmp;
 
+    if (size < 0x1000) {
+        return FALSE;
+    }
     if (rom[0] == 0x80 && rom[1] == 0x37) {
-        return; // .z64
+        return TRUE; // .z64
     }
     if (rom[0] == 0x37 && rom[1] == 0x80) {
         for (i = 0; i + 1 < size; i += 2) {
@@ -42,7 +45,7 @@ static void normalise_rom_byte_order(u8 *rom, u32 size) {
             rom[i] = rom[i + 1];
             rom[i + 1] = tmp;
         }
-        return;
+        return TRUE;
     }
     if (rom[0] == 0x40 && rom[1] == 0x12) {
         for (i = 0; i + 3 < size; i += 4) {
@@ -53,33 +56,46 @@ static void normalise_rom_byte_order(u8 *rom, u32 size) {
             rom[i + 1] = rom[i + 2];
             rom[i + 2] = tmp;
         }
-        return;
+        return TRUE;
     }
-    port_fatal("The ROM file is not a Nintendo 64 ROM.");
+    return FALSE;
 }
 
 s32 port_rom_load(const char *path) {
     unsigned int size;
-    u32 count;
+    u32 count, lutStart, lutEnd;
+    u8 *data;
 
-    sRomData = plat_load_file(path, &size);
-    if (sRomData == NULL) {
-        return FALSE;
+    data = plat_load_file(path, &size);
+    if (data == NULL) {
+        return PORT_ROM_NOT_FOUND;
     }
-    sRomSize = size;
-    normalise_rom_byte_order(sRomData, sRomSize);
-
-    sAssetsLutStart = ASSETS_LUT_ROM_OFFSET;
-    if (sAssetsLutStart + 4 > sRomSize) {
-        port_fatal("The ROM is too small. Is it the right version?");
+    if (!normalise_rom_byte_order(data, size)) {
+        plat_free(data);
+        return PORT_ROM_NOT_N64;
+    }
+    // The internal name in the header.
+    if (bcmp(data + 0x20, "Diddy Kong Racing", 17) != 0) {
+        plat_free(data);
+        return PORT_ROM_NOT_DKR;
     }
     // The table starts with the number of sections and is followed by (count + 1) offsets.
-    count = port_read_be32(sRomData + sAssetsLutStart);
-    sAssetsLutEnd = sAssetsLutStart + (count + 2) * 4;
-    if (count < 40 || count > 64 || port_read_be32(sRomData + sAssetsLutEnd - 4) + sAssetsLutEnd > sRomSize) {
-        port_fatal("The ROM does not match the version this port was built for. Check that you supplied the correct ROM.");
+    lutStart = ASSETS_LUT_ROM_OFFSET;
+    if (lutStart + 4 > size) {
+        plat_free(data);
+        return PORT_ROM_WRONG_VERSION;
     }
-    return TRUE;
+    count = port_read_be32(data + lutStart);
+    lutEnd = lutStart + (count + 2) * 4;
+    if (count < 40 || count > 64 || lutEnd > size || port_read_be32(data + lutEnd - 4) + lutEnd > size) {
+        plat_free(data);
+        return PORT_ROM_WRONG_VERSION;
+    }
+    sRomData = data;
+    sRomSize = size;
+    sAssetsLutStart = lutStart;
+    sAssetsLutEnd = lutEnd;
+    return PORT_ROM_OK;
 }
 
 const u8 *port_rom_data(void) {

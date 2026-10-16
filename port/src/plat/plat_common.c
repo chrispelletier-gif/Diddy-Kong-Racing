@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 
 void *plat_load_file(const char *path, unsigned int *size) {
     FILE *f = fopen(path, "rb");
@@ -120,3 +121,22 @@ const char *plat_getenv(const char *name) {
     return getenv(name);
 }
 #endif
+
+int plat_list_dir(const char *dir, char *names, int nameSize, int maxNames) {
+    DIR *d = opendir(dir);
+    struct dirent *entry;
+    int count = 0;
+
+    if (d == NULL) {
+        return 0;
+    }
+    while (count < maxNames && (entry = readdir(d)) != NULL) {
+        if (entry->d_name[0] == '.' || (int) strlen(entry->d_name) >= nameSize) {
+            continue;
+        }
+        strcpy(names + count * nameSize, entry->d_name);
+        count++;
+    }
+    closedir(d);
+    return count;
+}

@@ -216,6 +216,11 @@ void plat_wait_vblank(void) {
     gspWaitForVBlank();
 }
 
+const char *const *plat_rom_search_dirs(void) {
+    static const char *const sDirs[] = { "sdmc:/3ds/dkr", "sdmc:/3ds", "sdmc:", NULL };
+    return sDirs;
+}
+
 const char *plat_data_dir(void) {
     return "sdmc:/3ds/dkr";
 }
@@ -254,19 +259,41 @@ void plat_log(const char *fmt, ...) {
 }
 
 void plat_fatal(const char *fmt, ...) {
+    static PrintConsole sTopConsole;
     char buffer[512];
     va_list args;
-    errorConf err;
 
     va_start(args, fmt);
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     svcOutputDebugString(buffer, strlen(buffer));
-
-    errorInit(&err, ERROR_TEXT, CFG_LANGUAGE_EN);
-    errorText(&err, buffer);
-    errorDisp(&err);
-    for (;;) {
-        svcSleepThread(1000000000LL);
+    {
+        FILE *file = log_file();
+        if (file != NULL) {
+            fprintf(file, "FATAL: %s\n", buffer);
+            fflush(file);
+        }
     }
+
+    // Shown as text on the top screen (the system error dialog does not appear in every emulator).
+    consoleInit(GFX_TOP, &sTopConsole);
+    printf("\x1b[2J\x1b[2;1H\x1b[31mDiddy Kong Racing could not start\x1b[0m\n\n%s\n\n\nPress START to exit.\n", buffer);
+
+    if (threadGetCurrent() != NULL) {
+        // Not the main thread: the main loop keeps the application responsive.
+        for (;;) {
+            svcSleepThread(1000000000LL);
+        }
+    }
+    while (aptMainLoop()) {
+        hidScanInput();
+        if (hidKeysDown() & KEY_START) {
+            break;
+        }
+        gfxFlushBuffers();
+        gfxSwapBuffers();
+        gspWaitForVBlank();
+    }
+    gfxExit();
+    exit(1);
 }

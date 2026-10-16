@@ -42,7 +42,9 @@ Copy these to the SD card:
 | `port/build/3ds/dkr.3dsx`     | `sdmc:/3ds/dkr.3dsx`            |
 | your ROM                      | `sdmc:/3ds/dkr/baserom.z64`     |
 
-Then start it from the Homebrew Launcher. Saves go to `sdmc:/3ds/dkr/`:
+Then start it from the Homebrew Launcher. The ROM may have any name: the port also looks for any `.z64`, `.n64` or
+`.v64` file in `sdmc:/3ds/dkr/`, `sdmc:/3ds/` and the root of the SD card. If it cannot find one it says so on the
+top screen. Saves go to `sdmc:/3ds/dkr/`:
 - `eeprom.bin` holds the game's own save.
 - `controllerpak.bin` is a virtual Controller Pak for ghosts and copied saves.
 
@@ -115,8 +117,15 @@ controls) work there, as do these renderer switches:
 
 ## Testing in Azahar
 
-The port runs in the Azahar emulator. For sound in Azahar, put any file at `sdmc:/3ds/dspfirm.cdc`; Azahar's
-emulated DSP does not need the real firmware.
+The port runs in the Azahar emulator.
+
+1. Open the emulator's SD card folder with *File > Open Azahar Folder*, then go into `sdmc`. It is usually
+   `%APPDATA%\Azahar\sdmc` on Windows, `~/.local/share/azahar-emu/sdmc` on Linux or
+   `~/Library/Application Support/Azahar/sdmc` on macOS.
+2. Put the ROM in `3ds/dkr/` inside that folder.
+3. Load `dkr.3dsx` with *File > Load File*.
+
+For sound in Azahar, put any file at `sdmc/3ds/dspfirm.cdc`; Azahar's emulated DSP does not need the real firmware.
 
 ## Status
 
