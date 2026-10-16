@@ -188,7 +188,9 @@ void gfxb_start_frame(void) {
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
     C3D_FrameBegin(0);
     process_pending_frees();
-    C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+    // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
+    // draws nothing (while a level loads) must not show up as a black flash.
+    C3D_RenderTargetClear(sTarget, sFrameStarted < 0 ? C3D_CLEAR_DEPTH : C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_FrameDrawOn(sTarget);
     sVboUsed = 0;
     sFrameStarted = 1;
@@ -288,7 +290,7 @@ void gfxb_end_frame(void) {
     sFrameTriangles = 0;
     GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
     C3D_FrameEnd(0);
-    sFrameStarted = 0;
+    sFrameStarted = -1; // A frame has been drawn, so the target holds an image.
 }
 
 /******************************** Textures ********************************/
