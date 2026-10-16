@@ -543,6 +543,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
         t = calloc(1, sizeof(C3DTexture));
         if (t == NULL || !C3D_TexInit(&t->tex, pw, ph, GPU_RGBA8)) {
             static int sFailures;
+            gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
             if ((sFailures++ % 50) == 0) {
                 plat_log("texture %ux%u allocation failed (%d failures, linear free %lu)", pw, ph, sFailures,
                          (unsigned long) linearSpaceFree());

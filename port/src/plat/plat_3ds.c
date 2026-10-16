@@ -347,8 +347,10 @@ static void watchdog(void *arg) {
                  (int) (now[PLAT_COUNTER_VI] - last[PLAT_COUNTER_VI]), now[PLAT_COUNTER_GFX_QUEUED],
                  now[PLAT_COUNTER_GFX_DONE], (int) (now[PLAT_COUNTER_AUDIO] - last[PLAT_COUNTER_AUDIO]),
                  (int) (now[PLAT_COUNTER_MAIN] - last[PLAT_COUNTER_MAIN]));
-        snprintf(line[1], sizeof(line[1]), "rdp: %.20s gap %u drop %u", gPlatGfxStage,
-                 now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED]);
+        // Sound gaps and drops, textures without memory, free GPU (linear) memory.
+        snprintf(line[1], sizeof(line[1]), "gap %u drop %u tex %u free %luK", now[PLAT_COUNTER_AUDIO_UNDERRUN],
+                 now[PLAT_COUNTER_AUDIO_DROPPED], now[PLAT_COUNTER_TEXTURE_FAILED],
+                 (unsigned long) (linearSpaceFree() / 1024));
         memcpy(last, now, sizeof(last));
 
         // Two fixed rows at the bottom; the cursor is put back for the start-up lines.

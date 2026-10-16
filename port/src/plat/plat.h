@@ -108,6 +108,7 @@ enum PlatCounter {
     PLAT_COUNTER_MAIN,       /* Main (system) loop iterations. */
     PLAT_COUNTER_AUDIO_UNDERRUN, /* Sound buffers queued after the output had run dry (a gap in the sound). */
     PLAT_COUNTER_AUDIO_DROPPED,  /* Sound buffers dropped because the output was full. */
+    PLAT_COUNTER_TEXTURE_FAILED, /* Textures the GPU had no memory for (drawn white instead). */
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
