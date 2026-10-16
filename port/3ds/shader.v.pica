@@ -1,15 +1,7 @@
 ; Vertex shader for the 3DS renderer.
-; Positions arrive in clip space for the N64 screen (see port/src/gfx/gfx_backend.h).
-; "projection" scales them into the top screen, remaps depth and rotates for the 3DS display.
-
-; Uniforms
-.fvec projection[4]
-.fvec texScale  ; xy = scale for texture 0, zw = scale for texture 1
-.fvec texOffset ; xy = offset for texture 0, zw = offset for texture 1
-
-; Constants
-.constf zeros(0.0, 0.0, 0.0, 0.0)
-.constf colourScale(0.00392156862, 0.00392156862, 0.00392156862, 0.00392156862)
+; Everything is computed on the CPU (gfx_c3d.c, gfxb_draw_triangles), so the shader only passes the vertex through,
+; like the SM64 3DS port's. The previous shader, which transformed positions and texture coordinates with uniforms,
+; hung the GPU of a real New 3DS on the first triangle (emulators ran it fine).
 
 ; Outputs
 .out outpos position
@@ -24,20 +16,9 @@
 .alias inclr v3
 
 .proc main
-	dp4 outpos.x, projection[0], inpos
-	dp4 outpos.y, projection[1], inpos
-	; The N64 has no far plane, so geometry beyond it is pinned to the farthest depth instead of being clipped.
-	dp4 r2.z, projection[2], inpos
-	min outpos.z, zeros.z, r2.z
-	dp4 outpos.w, projection[3], inpos
-
-	; Texture coordinates are scaled (and offset) for padded textures.
-	mul r0.xy, texScale.xy, intc0.xy
-	add outtc0.xy, texOffset.xy, r0.xy
-	mul r1.xy, texScale.zw, intc1.xy
-	add outtc1.xy, texOffset.zw, r1.xy
-
-	; Colours arrive as unnormalised bytes (0 - 255).
-	mul outclr, colourScale, inclr
+	mov outpos, inpos
+	mov outtc0, intc0
+	mov outtc1, intc1
+	mov outclr, inclr
 	end
 .end

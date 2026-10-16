@@ -24,11 +24,12 @@
 #define TOP_HEIGHT 240
 #define VBO_VERTICES (3 * 24 * 1024)
 
+/* What the vertex shader receives: positions already in the 3DS screen's clip space, colours from 0 to 1. */
 typedef struct C3DVertex {
     float pos[4];
     float tc0[2];
     float tc1[2];
-    unsigned char color[4];
+    float color[4];
 } C3DVertex;
 
 typedef struct C3DTexture {
@@ -41,7 +42,6 @@ static C3D_RenderTarget *sTarget;
 static int sRenderScale = 1;
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
-static int sLocProjection, sLocTexScale, sLocTexOffset;
 static C3DVertex *sVbo;
 static int sVboUsed;
 static C3D_Tex sWhiteTex;
@@ -62,21 +62,19 @@ static int sNumPendingFrees, sPendingFreesCapacity;
 
 /******************************** Setup ********************************/
 
-static void set_projection(void) {
-    C3D_Mtx m;
-    /*
-     * Rows of the matrix applied to the clip space position (x, y, z, w):
-     *  - x is scaled into the middle of the screen,
-     *  - z is remapped from [-w, w] (near to far) to [-w, 0] with depth = -z / w, so nearer is larger,
-     *  - then everything is rotated a quarter turn for the 3DS screen: x' = y, y' = -x.
-     */
-    Mtx_Zeros(&m);
-    m.r[0].y = 1.0f;          // x' = y
-    m.r[1].x = -sScreenScaleX; // y' = -x * scale
-    m.r[2].z = 0.5f;          // z' = (z - w) / 2
-    m.r[2].w = -0.5f;
-    m.r[3].w = 1.0f;
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sLocProjection, &m);
+/*
+ * Vertices arrive in clip space for the N64 screen. To fit them to the 3DS top screen (in gfxb_draw_triangles):
+ *  - x is scaled into the middle of the screen,
+ *  - z is remapped from [-w, w] (near to far) to [-w, 0] with depth = -z / w, so nearer is larger; the N64 has no far
+ *    plane, so anything beyond it is pinned to the farthest depth instead of being clipped,
+ *  - then everything is rotated a quarter turn for the 3DS screen: x' = y, y' = -x.
+ */
+static void to_screen(const GfxVertex *v, C3DVertex *out) {
+    float z = 0.5f * (v->z - v->w);
+    out->pos[0] = v->y;
+    out->pos[1] = -v->x * sScreenScaleX;
+    out->pos[2] = z < 0.0f ? z : 0.0f;
+    out->pos[3] = v->w;
 }
 
 /*
@@ -113,7 +111,7 @@ static void gpu_test_triangle(C3DVertex *v) {
         v[i].pos[0] = xs[i];
         v[i].pos[1] = ys[i];
         v[i].pos[3] = 1.0f;
-        v[i].color[0] = v[i].color[1] = v[i].color[2] = v[i].color[3] = 255;
+        v[i].color[0] = v[i].color[1] = v[i].color[2] = v[i].color[3] = 1.0f;
     }
 }
 
@@ -134,9 +132,7 @@ static void gpu_test_end(const char *what) {
 static void gpu_self_test(void) {
     static const char *const sNames[] = {
         "empty frame",
-        "pass-through shader (as SM64)",
-        "triangle, float colours",
-        "triangle, byte colours",
+        "triangle",
         "+ texture unit 1",
         "+ fog unit off",
         "+ scissor",
@@ -159,125 +155,50 @@ static void gpu_self_test(void) {
     gpu_test_step(sNames[0]);
     gpu_test_end(sNames[0]);
 
-    // 2: the SM64 3DS port's setup: a pass-through shader with three float attributes.
+    // 2: one flat triangle with the simplest state.
     gpu_test_step(sNames[1]);
-    {
-        static const float sTri[3][10] = {
-            { -0.5f, -0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f },
-            { 0.5f, -0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f },
-            { 0.0f, 0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f },
-        };
-        static shaderProgram_s sTestProgram;
-        C3D_AttrInfo *attr = C3D_GetAttrInfo();
-        C3D_BufInfo *buf = C3D_GetBufInfo();
-        memcpy(sVbo, sTri, sizeof(sTri));
-        shaderProgramInit(&sTestProgram);
-        shaderProgramSetVsh(&sTestProgram, &sShaderDvlb->DVLE[1]);
-        C3D_BindProgram(&sTestProgram);
-        AttrInfo_Init(attr);
-        AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
-        AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
-        AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 4);
-        BufInfo_Init(buf);
-        BufInfo_Add(buf, sVbo, 10 * sizeof(float), 3, 0x210);
-        C3D_TexBind(0, &sWhiteTex);
-        env = C3D_GetTexEnv(0);
-        C3D_TexEnvInit(env);
-        C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-        for (i = 1; i < 6; i++) {
-            C3D_TexEnvInit(C3D_GetTexEnv(i));
-        }
-        C3D_CullFace(GPU_CULL_NONE);
-        C3D_DepthMap(true, -1.0f, 0.0f);
-        C3D_DepthTest(false, GPU_LEQUAL, GPU_WRITE_ALL);
-        C3D_AlphaTest(true, GPU_GREATER, 0x00);
-        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_triangle(sVbo);
+    C3D_TexBind(0, &sWhiteTex);
+    env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    for (i = 1; i < 6; i++) {
+        C3D_TexEnvInit(C3D_GetTexEnv(i));
     }
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
     gpu_test_end(sNames[1]);
-    C3D_BindProgram(&sProgram);
 
-    // 3: one flat triangle with the simplest state, colours as floats (the layout SM64's 3DS port uses).
+    // 3 to 8: add the renderer's features one at a time.
     gpu_test_step(sNames[2]);
-    {
-        float *fv = (float *) sVbo;
-        C3DVertex tmp[3];
-        C3D_AttrInfo *attr = C3D_GetAttrInfo();
-        C3D_BufInfo *buf = C3D_GetBufInfo();
-        gpu_test_triangle(tmp);
-        for (i = 0; i < 3; i++) {
-            memcpy(&fv[i * 12], tmp[i].pos, 8 * sizeof(float));
-            fv[i * 12 + 8] = fv[i * 12 + 9] = fv[i * 12 + 10] = fv[i * 12 + 11] = 255.0f;
-        }
-        AttrInfo_Init(attr);
-        AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
-        AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
-        AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
-        AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 4);
-        BufInfo_Init(buf);
-        BufInfo_Add(buf, sVbo, 12 * sizeof(float), 4, 0x3210);
-        C3D_TexBind(0, &sWhiteTex);
-        env = C3D_GetTexEnv(0);
-        C3D_TexEnvInit(env);
-        C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-        for (i = 1; i < 6; i++) {
-            C3D_TexEnvInit(C3D_GetTexEnv(i));
-        }
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexScale, 1.0f, -1.0f, 1.0f, -1.0f);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexOffset, 0.0f, 1.0f, 0.0f, 1.0f);
-        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
-        C3D_AlphaTest(false, GPU_ALWAYS, 0);
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-        C3D_CullFace(GPU_CULL_NONE);
-        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-        set_projection();
-        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
-    }
-    gpu_test_end(sNames[2]);
-
-    // 4: the same with the renderer's own vertex layout (colours as bytes).
-    gpu_test_step(sNames[3]);
-    {
-        C3D_AttrInfo *attr = C3D_GetAttrInfo();
-        C3D_BufInfo *buf = C3D_GetBufInfo();
-        AttrInfo_Init(attr);
-        AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
-        AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
-        AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
-        AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4);
-        BufInfo_Init(buf);
-        BufInfo_Add(buf, sVbo, sizeof(C3DVertex), 4, 0x3210);
-        gpu_test_triangle(sVbo);
-        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
-    }
-    gpu_test_end(sNames[3]);
-
-    // 5 to 10: add the renderer's features one at a time.
-    gpu_test_step(sNames[4]);
     gpu_test_triangle(sVbo);
     C3D_TexBind(1, &sWhiteTex);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[2]);
+
+    gpu_test_step(sNames[3]);
+    gpu_test_triangle(sVbo);
+    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[3]);
+
+    gpu_test_step(sNames[4]);
+    gpu_test_triangle(sVbo);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, 40, 40, 200, 360);
     C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
     gpu_test_end(sNames[4]);
 
     gpu_test_step(sNames[5]);
     gpu_test_triangle(sVbo);
-    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
-    gpu_test_end(sNames[5]);
-
-    gpu_test_step(sNames[6]);
-    gpu_test_triangle(sVbo);
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, 40, 40, 400, 700);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
-    gpu_test_end(sNames[6]);
-
-    gpu_test_step(sNames[7]);
-    gpu_test_triangle(sVbo);
     C3D_DepthTest(true, GPU_GEQUAL, GPU_WRITE_ALL);
     C3D_DepthMap(true, -1.0f, 0.0002f);
     C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
-    gpu_test_end(sNames[7]);
+    gpu_test_end(sNames[5]);
 
     memset(&state, 0, sizeof(state));
     state.combiner.numCycles = 1;
@@ -288,13 +209,13 @@ static void gpu_self_test(void) {
     state.combiner.alpha[0] = state.combiner.rgb[0];
     state.prim[0] = state.prim[1] = state.prim[2] = state.prim[3] = 255;
 
-    gpu_test_step(sNames[8]);
+    gpu_test_step(sNames[6]);
     gpu_test_triangle(sVbo);
     apply_combiner(&state);
     C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
-    gpu_test_end(sNames[8]);
+    gpu_test_end(sNames[6]);
 
-    gpu_test_step(sNames[9]);
+    gpu_test_step(sNames[7]);
     gpu_test_triangle(sVbo);
     state.fogEnabled = 1;
     state.fogMul = 256;
@@ -303,9 +224,9 @@ static void gpu_self_test(void) {
     C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
     state.fogEnabled = 0;
     apply_fog(&state);
-    gpu_test_end(sNames[9]);
+    gpu_test_end(sNames[7]);
 
-    gpu_test_step(sNames[10]);
+    gpu_test_step(sNames[8]);
     {
         static const short sFull[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
         sVboUsed = 0;
@@ -314,7 +235,7 @@ static void gpu_self_test(void) {
         sVboUsed = 0;
         sFrameTriangles = 0;
     }
-    gpu_test_end(sNames[10]);
+    gpu_test_end(sNames[8]);
 
     plat_status("GPU test passed");
 }
@@ -353,16 +274,13 @@ void gfxb_init(void) {
     shaderProgramInit(&sProgram);
     shaderProgramSetVsh(&sProgram, &sShaderDvlb->DVLE[0]);
     C3D_BindProgram(&sProgram);
-    sLocProjection = shaderInstanceGetUniformLocation(sProgram.vertexShader, "projection");
-    sLocTexScale = shaderInstanceGetUniformLocation(sProgram.vertexShader, "texScale");
-    sLocTexOffset = shaderInstanceGetUniformLocation(sProgram.vertexShader, "texOffset");
 
     attr = C3D_GetAttrInfo();
     AttrInfo_Init(attr);
     AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
     AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
     AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4);
+    AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 4);
 
     sVbo = linearAlloc(sizeof(C3DVertex) * VBO_VERTICES);
     buf = C3D_GetBufInfo();
@@ -375,7 +293,6 @@ void gfxb_init(void) {
     C3D_TexInit(&sWhiteTex, 8, 8, GPU_RGBA8);
     C3D_TexUpload(&sWhiteTex, white);
 
-    set_projection();
     C3D_DepthMap(true, -1.0f, 0.0f);
     gpu_self_test();
 }
@@ -474,7 +391,6 @@ void gfxb_start_frame(void) {
     }
     C3D_FrameDrawOn(sTarget);
     sVboUsed = 0;
-    set_projection();
     if (sFrameStarted < 0) {
         static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
         draw_clear_rect(sFullScreen, 0, 1);
@@ -879,7 +795,7 @@ static void apply_fog(const GfxDrawState *state) {
     if (on && (state->fogMul != sLutMul || state->fogOffset != sLutOffset)) {
         float data[256];
         int i;
-        // Depth d runs from 1 at the near plane to 0 at the far plane, and z / w = 1 - 2d (see set_projection).
+        // Depth d runs from 1 at the near plane to 0 at the far plane, and z / w = 1 - 2d (see to_screen).
         for (i = 0; i <= 128; i++) {
             float zw = 1.0f - 2.0f * (i / 128.0f);
             float fog = zw * state->fogMul + state->fogOffset;
@@ -1075,8 +991,6 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     }
     bind_texture(0, state->textures[0], &su0, &sv0);
     bind_texture(1, state->textures[1], &su1, &sv1);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexScale, su0, -sv0, su1, -sv1);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexOffset, 0.0f, 1.0f, 0.0f, 1.0f);
     apply_combiner(state);
     apply_fog(state);
 
@@ -1115,18 +1029,16 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     out = &sVbo[sVboUsed];
     for (i = 0; i < count; i++) {
         const GfxVertex *v = &verts[i];
-        out[i].pos[0] = v->x;
-        out[i].pos[1] = v->y;
-        out[i].pos[2] = v->z;
-        out[i].pos[3] = v->w;
-        out[i].tc0[0] = v->u0;
-        out[i].tc0[1] = v->v0;
-        out[i].tc1[0] = v->u1;
-        out[i].tc1[1] = v->v1;
-        out[i].color[0] = v->r;
-        out[i].color[1] = v->g;
-        out[i].color[2] = v->b;
-        out[i].color[3] = v->a;
+        to_screen(v, &out[i]);
+        // Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
+        out[i].tc0[0] = v->u0 * su0;
+        out[i].tc0[1] = 1.0f - v->v0 * sv0;
+        out[i].tc1[0] = v->u1 * su1;
+        out[i].tc1[1] = 1.0f - v->v1 * sv1;
+        out[i].color[0] = v->r * (1.0f / 255.0f);
+        out[i].color[1] = v->g * (1.0f / 255.0f);
+        out[i].color[2] = v->b * (1.0f / 255.0f);
+        out[i].color[3] = v->a * (1.0f / 255.0f);
     }
     C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, count);
     sVboUsed += count;
