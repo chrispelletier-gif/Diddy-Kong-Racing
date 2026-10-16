@@ -9,6 +9,7 @@
 
 volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
 const char *volatile gPlatGfxStage = "not started";
+volatile int gPlatSnapshotRequested;
 
 void *plat_load_file(const char *path, unsigned int *size) {
     FILE *f = fopen(path, "rb");

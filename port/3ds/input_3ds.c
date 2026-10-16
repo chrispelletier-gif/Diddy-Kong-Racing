@@ -69,6 +69,9 @@ void port_input_poll(PortControllerState *state, s32 maxControllers) {
 
     hidScanInput();
     held = hidKeysHeld();
+    if (hidKeysDown() & KEY_TOUCH) {
+        gPlatSnapshotRequested = 1;
+    }
     hidCircleRead(&pad);
 
     state[0].connected = 1;

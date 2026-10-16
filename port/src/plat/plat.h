@@ -95,6 +95,11 @@ void plat_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* A start-up progress line: shown on the bottom screen on the 3DS, and logged. */
 void plat_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void plat_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
+/* Keeps logging after the start-up lines, which the 3DS otherwise stops at to spare the SD card. */
+void plat_log_keep(void);
+
+/* Set when the player asks for a snapshot of the next frame (3DS: by touching the bottom screen). */
+extern volatile int gPlatSnapshotRequested;
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that

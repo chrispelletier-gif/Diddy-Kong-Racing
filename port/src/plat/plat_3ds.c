@@ -287,6 +287,10 @@ static void log_line(const char *prefix, const char *text) {
     LightLock_Unlock(&sLogLock);
 }
 
+void plat_log_keep(void) {
+    sLogDebug = 1;
+}
+
 void plat_log(const char *fmt, ...) {
     char buffer[256];
     va_list args;

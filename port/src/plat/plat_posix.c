@@ -190,6 +190,9 @@ void plat_log(const char *fmt, ...) {
     fputc('\n', stderr);
 }
 
+void plat_log_keep(void) {
+}
+
 void plat_status(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);

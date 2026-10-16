@@ -955,6 +955,13 @@ static void set_scissor(const short rect[4]) {
                    bottom * sRenderScale);
 }
 
+static int sLogFrame = -2; // Frame whose draws are logged (DKR_LOG_DRAWS, or a snapshot)
+
+/* Logs every draw of the current frame. */
+void gfxb_log_draws(void) {
+    sLogFrame = sFrameCount;
+}
+
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
     C3DVertex *out;
     float su0, sv0, su1, sv1;
@@ -973,22 +980,22 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         GSPGPU_FlushDataCache((void *) __ctru_linear_heap, __ctru_linear_heap_size);
         C3D_FrameSplit(GX_CMDLIST_FLUSH);
     }
-    {
-        static int sLogFrame = -2;
-        if (sLogFrame == -2) {
-            const char *env = plat_getenv("DKR_LOG_DRAWS");
-            sLogFrame = env != NULL ? atoi(env) : -1;
-        }
-        if (sFrameCount == sLogFrame) {
-            const GfxCombiner *c = &state->combiner;
-            plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "
-                     "tex %p v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d",
-                     numTriangles, state->blend, state->alphaTest, state->alphaRef, state->depthTest, state->depthWrite,
-                     state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d,
-                     c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles, (void *) state->textures[0],
-                     verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0, verts[0].v0, verts[0].r, verts[0].g,
-                     verts[0].b, verts[0].a);
-        }
+    if (sLogFrame == -2) {
+        const char *env = plat_getenv("DKR_LOG_DRAWS");
+        sLogFrame = env != NULL ? atoi(env) : -1;
+    }
+    if (sFrameCount == sLogFrame) {
+        const GfxCombiner *c = &state->combiner;
+        const GfxTexture *tex = state->textures[0];
+        const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
+        plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "
+                 "tex %p (%dx%d gpu %dx%d) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d",
+                 numTriangles, state->blend, state->alphaTest, state->alphaRef, state->depthTest, state->depthWrite,
+                 state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d,
+                 c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles, (void *) tex,
+                 tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0, t != NULL ? t->tex.width : 0,
+                 t != NULL ? t->tex.height : 0, verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
+                 verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a);
     }
     bind_texture(0, state->textures[0], &su0, &sv0);
     bind_texture(1, state->textures[1], &su1, &sv1);
