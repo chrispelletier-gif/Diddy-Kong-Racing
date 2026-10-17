@@ -35,6 +35,7 @@ typedef struct C3DVertex {
 typedef struct C3DTexture {
     C3D_Tex tex;
     float scaleU, scaleV;
+    int resample;
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
@@ -530,13 +531,34 @@ static GPU_TEXTURE_WRAP_PARAM wrap_param(unsigned char mode) {
     }
 }
 
+/*
+ * The GPU texel at (px, py) of the power of two sized texture. Wrapping textures that aren't a power of two are
+ * stretched to fit, others are padded (repeating their edge texels) and their coordinates scaled.
+ */
+static u32 gpu_texel(const GfxTexture *tex, unsigned int pw, unsigned int ph, int resample, unsigned int px,
+                     unsigned int py) {
+    unsigned int w = tex->width, h = tex->height;
+    unsigned int sx, sy;
+    u32 c;
+    if (resample) {
+        sx = px * w / pw;
+        sy = py * h / ph;
+    } else {
+        sx = (px < w) ? px : w - 1;
+        sy = (py < h) ? py : h - 1;
+    }
+    c = tex->pixels[sy * w + sx];
+    // RGBA8888 with R in the low byte -> the GPU's RGBA8 (R in the high byte).
+    return ((c & 0xFF) << 24) | ((c & 0xFF00) << 8) | ((c >> 8) & 0xFF00) | (c >> 24);
+}
+
 void gfxb_texture_upload(GfxTexture *tex) {
     C3DTexture *t = (C3DTexture *) tex->backendData;
     unsigned int w = tex->width, h = tex->height;
     unsigned int pw = next_pot(w), ph = next_pot(h);
     int resample = (tex->wrapS != GFX_WRAP_CLAMP && pw != w) || (tex->wrapT != GFX_WRAP_CLAMP && ph != h);
     u32 *data;
-    unsigned int x, y, tx, ty;
+    unsigned int tx, ty;
     int i;
 
     if (t == NULL) {
@@ -553,38 +575,19 @@ void gfxb_texture_upload(GfxTexture *tex) {
         }
         tex->backendData = t;
     }
-    data = malloc(pw * ph * 4);
-    if (data == NULL) {
-        return;
-    }
-    // Swizzle into 8x8 tiles, top row first (the GPU samples t = 0 from the start of the data). Wrapping textures that aren't a power of two are stretched to fit,
-    // others are padded (repeating their edge texels) and their coordinates scaled.
+    // Swizzled straight into the texture's memory in 8x8 tiles, top row first (the GPU samples t = 0 from the start
+    // of the data). No temporary buffer: when the heap was short, skipping the upload left whatever the memory held
+    // before, such as an old solid black texture. The data reaches the GPU with the frame's cache flush.
+    data = (u32 *) t->tex.data;
     for (ty = 0; ty < ph; ty += 8) {
         for (tx = 0; tx < pw; tx += 8) {
             u32 *tile = &data[(ty / 8) * (pw / 8) * 64 + (tx / 8) * 64];
             for (i = 0; i < 64; i++) {
-                unsigned int px = tx + (i & 7);
-                unsigned int py = ty + (i >> 3);
-                unsigned int imageRow = py;
-                unsigned int sx, sy;
-                u32 c;
-                if (resample) {
-                    sx = px * w / pw;
-                    sy = imageRow * h / ph;
-                } else {
-                    sx = (px < w) ? px : w - 1;
-                    sy = (imageRow < h) ? imageRow : h - 1;
-                }
-                c = tex->pixels[sy * w + sx];
-                // RGBA8888 with R in the low byte -> the GPU's RGBA8 (R in the high byte).
-                tile[sTileOrder[i]] = ((c & 0xFF) << 24) | ((c & 0xFF00) << 8) | ((c >> 8) & 0xFF00) | (c >> 24);
+                tile[sTileOrder[i]] = gpu_texel(tex, pw, ph, resample, tx + (i & 7), ty + (i >> 3));
             }
         }
     }
-    (void) x;
-    (void) y;
-    C3D_TexUpload(&t->tex, data);
-    free(data);
+    t->resample = resample;
     t->scaleU = resample ? 1.0f : (float) w / pw;
     t->scaleV = resample ? 1.0f : (float) h / ph;
     if (tex->filter == GFX_FILTER_POINT) {
@@ -593,6 +596,46 @@ void gfxb_texture_upload(GfxTexture *tex) {
         C3D_TexSetFilter(&t->tex, GPU_LINEAR, GPU_LINEAR);
     }
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
+}
+
+/* For snapshots: logs a texture whose memory no longer holds what was uploaded. */
+static void verify_texture(const GfxTexture *tex) {
+    const C3DTexture *t = (const C3DTexture *) tex->backendData;
+    unsigned int pw, ph, tx, ty, wrong = 0, firstAt = 0;
+    u32 firstGot = 0, firstWant = 0;
+    const u32 *data;
+    int i;
+
+    if (t == NULL) {
+        plat_log("  texture %p %dx%d has no GPU copy", (const void *) tex, tex->width, tex->height);
+        return;
+    }
+    pw = t->tex.width;
+    ph = t->tex.height;
+    data = (const u32 *) t->tex.data;
+    // Read what is in memory, not what the CPU cache holds.
+    GSPGPU_FlushDataCache(data, pw * ph * 4);
+    GSPGPU_InvalidateDataCache(data, pw * ph * 4);
+    for (ty = 0; ty < ph; ty += 8) {
+        for (tx = 0; tx < pw; tx += 8) {
+            const u32 *tile = &data[(ty / 8) * (pw / 8) * 64 + (tx / 8) * 64];
+            for (i = 0; i < 64; i++) {
+                u32 want = gpu_texel(tex, pw, ph, t->resample, tx + (i & 7), ty + (i >> 3));
+                if (tile[sTileOrder[i]] != want) {
+                    if (wrong++ == 0) {
+                        firstAt = (ty + (i >> 3)) * pw + tx + (i & 7);
+                        firstGot = tile[sTileOrder[i]];
+                        firstWant = want;
+                    }
+                }
+            }
+        }
+    }
+    if (wrong > 0) {
+        plat_log("  texture %p %dx%d at %p: %u of %u texels changed, first at %u: %08lX instead of %08lX",
+                 (const void *) tex, tex->width, tex->height, (const void *) data, wrong, pw * ph, firstAt,
+                 (unsigned long) firstGot, (unsigned long) firstWant);
+    }
 }
 
 void gfxb_texture_free(GfxTexture *tex) {
@@ -986,6 +1029,9 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     }
     if (sFrameCount == sLogFrame) {
         const GfxCombiner *c = &state->combiner;
+        if (state->textures[0] != NULL) {
+            verify_texture(state->textures[0]);
+        }
         const GfxTexture *tex = state->textures[0];
         const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
         plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "

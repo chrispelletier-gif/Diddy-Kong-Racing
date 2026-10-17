@@ -2,10 +2,13 @@
 #include "plat.h"
 
 #include <3ds.h>
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+extern u32 __ctru_heap_size;
 
 /*
  * All emulated N64 threads run on the application core so that, like on the N64, only one of them executes
@@ -351,10 +354,15 @@ static void watchdog(void *arg) {
                  (int) (now[PLAT_COUNTER_VI] - last[PLAT_COUNTER_VI]), now[PLAT_COUNTER_GFX_QUEUED],
                  now[PLAT_COUNTER_GFX_DONE], (int) (now[PLAT_COUNTER_AUDIO] - last[PLAT_COUNTER_AUDIO]),
                  (int) (now[PLAT_COUNTER_MAIN] - last[PLAT_COUNTER_MAIN]));
-        // Sound gaps and drops, textures without memory, free GPU (linear) memory.
-        snprintf(line[1], sizeof(line[1]), "gap %u drop %u tex %u free %luK", now[PLAT_COUNTER_AUDIO_UNDERRUN],
-                 now[PLAT_COUNTER_AUDIO_DROPPED], now[PLAT_COUNTER_TEXTURE_FAILED],
-                 (unsigned long) (linearSpaceFree() / 1024));
+        // Sound gaps and drops, textures without memory, free GPU (linear) and CPU (heap) memory in tenths of a MB.
+        {
+            struct mallinfo info = mallinfo();
+            unsigned long gpuFree = linearSpaceFree() / (1024 * 1024 / 10);
+            unsigned long heapFree = (info.fordblks + (__ctru_heap_size - info.arena)) / (1024 * 1024 / 10);
+            snprintf(line[1], sizeof(line[1]), "gap %u drop %u tex %u gpu %lu.%luM heap %lu.%luM",
+                     now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED],
+                     now[PLAT_COUNTER_TEXTURE_FAILED], gpuFree / 10, gpuFree % 10, heapFree / 10, heapFree % 10);
+        }
         memcpy(last, now, sizeof(last));
 
         // Two fixed rows at the bottom; the cursor is put back for the start-up lines.

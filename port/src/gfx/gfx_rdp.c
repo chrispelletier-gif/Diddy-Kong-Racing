@@ -358,6 +358,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     }
     pixels = plat_malloc(width * height * 4);
     if (pixels == NULL) {
+        gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
         e->used = FALSE;
         return NULL;
     }
