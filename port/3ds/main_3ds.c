@@ -68,6 +68,5 @@ int main(int argc, char **argv) {
     while (plat_main_loop_iteration()) {
     }
     port_si_flush();
-    gfxExit();
-    return 0;
+    plat_3ds_exit();
 }

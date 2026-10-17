@@ -344,6 +344,88 @@ static void capture_pending_frame(void) {
 
 static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
 
+static int sLogFrame = -2; // Frame whose draws are logged (DKR_LOG_DRAWS, or a snapshot)
+static int sSnapshotFrame = -1;
+
+/*
+ * Snapshots also check that the textures the frame used still hold the same data once the GPU has drawn it (they are
+ * checked when drawn too), and save the frame's GPU command list, to see exactly what the GPU was told.
+ */
+#define MAX_CHECKED_TEXTURES 512
+static struct {
+    const C3DTexture *tex;
+    const void *data;
+    u32 hash;
+} sChecked[MAX_CHECKED_TEXTURES];
+static int sNumChecked;
+
+static u32 texture_hash(const C3DTexture *t) {
+    const u32 *data = (const u32 *) t->tex.data;
+    u32 n = t->tex.width * t->tex.height, i, hash = 2166136261u;
+    // Read the memory the GPU reads (flushing first, so nothing the CPU wrote is thrown away).
+    GSPGPU_FlushDataCache(data, n * 4);
+    GSPGPU_InvalidateDataCache(data, n * 4);
+    for (i = 0; i < n; i++) {
+        hash = (hash ^ data[i]) * 16777619u;
+    }
+    return hash;
+}
+
+static void remember_texture(const C3DTexture *t) {
+    int i;
+    for (i = 0; i < sNumChecked; i++) {
+        if (sChecked[i].tex == t) {
+            return;
+        }
+    }
+    if (sNumChecked < MAX_CHECKED_TEXTURES) {
+        sChecked[sNumChecked].tex = t;
+        sChecked[sNumChecked].data = t->tex.data;
+        sChecked[sNumChecked].hash = texture_hash(t);
+        sNumChecked++;
+    }
+}
+
+/* Once the GPU has finished the snapshot frame, and before any texture is deleted. */
+static void check_textures_after_frame(void) {
+    int i, changed = 0;
+    for (i = 0; i < sNumChecked; i++) {
+        const C3DTexture *t = sChecked[i].tex;
+        if (t->tex.data != sChecked[i].data || texture_hash(t) != sChecked[i].hash) {
+            plat_log("after the GPU: texture memory at %p (%dx%d) changed", sChecked[i].data, t->tex.width,
+                     t->tex.height);
+            changed++;
+        }
+    }
+    plat_log("after the GPU: %d of %d textures changed", changed, sNumChecked);
+    sNumChecked = 0;
+}
+
+static void save_command_list(void) {
+    char path[256];
+    FILE *f;
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_cmd.bin", plat_data_dir(), sSnapshotFrame);
+    f = fopen(path, "wb");
+    if (f != NULL) {
+        fwrite(gpuCmdBuf, 4, gpuCmdBufOffset, f);
+        fclose(f);
+    }
+    plat_log("command list: %lu words at %p saved to %s", (unsigned long) gpuCmdBufOffset, (void *) gpuCmdBuf,
+             f != NULL ? path : "nowhere (could not open the file)");
+}
+
+/* Logs every draw of the current frame. */
+void gfxb_log_draws(int snapshotFrame) {
+    sLogFrame = sFrameCount;
+    sSnapshotFrame = snapshotFrame;
+    sNumChecked = 0;
+}
+
+/* Called on the main thread when the application closes, once the renderer has stopped with the GPU idle. */
+void gfxb_3ds_shutdown(void) {
+    C3D_Fini();
+}
+
 static void process_pending_frees(void) {
     int i;
     for (i = 0; i < sNumPendingFrees; i++) {
@@ -372,10 +454,16 @@ void gfxb_start_frame(void) {
                 plat_status("GPU stuck after frame %d (%d triangles, cmd buffer %.0f%%)", sFrameCount - 1,
                             sLastFrameTriangles, sLastFrameUsage * 100.0f);
             }
+            plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_BUSY);
             plat_sleep_ns(250000);
         }
     }
+    // The application is closing: stop here, with the GPU idle and no frame being built, so it can be shut down.
+    plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
     gPlatGfxStage = "drawing";
+    if (sNumChecked > 0) {
+        check_textures_after_frame();
+    }
     if (sFrameCount < 3) {
         plat_log("frame %d: GPU ready", sFrameCount);
     }
@@ -485,6 +573,9 @@ void gfxb_end_frame(void) {
         if (sTest) {
             draw_test_pattern();
         }
+    }
+    if (sFrameCount == sLogFrame && sSnapshotFrame >= 0) {
+        save_command_list();
     }
     {
         static float sMaxUsage;
@@ -998,13 +1089,6 @@ static void set_scissor(const short rect[4]) {
                    bottom * sRenderScale);
 }
 
-static int sLogFrame = -2; // Frame whose draws are logged (DKR_LOG_DRAWS, or a snapshot)
-
-/* Logs every draw of the current frame. */
-void gfxb_log_draws(void) {
-    sLogFrame = sFrameCount;
-}
-
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
     C3DVertex *out;
     float su0, sv0, su1, sv1;
@@ -1031,18 +1115,22 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         const GfxCombiner *c = &state->combiner;
         if (state->textures[0] != NULL) {
             verify_texture(state->textures[0]);
+            if (state->textures[0]->backendData != NULL) {
+                remember_texture((const C3DTexture *) state->textures[0]->backendData);
+            }
         }
         const GfxTexture *tex = state->textures[0];
         const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
         plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "
-                 "tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d",
+                 "tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d "
+                 "cmd %lu",
                  numTriangles, state->blend, state->alphaTest, state->alphaRef, state->depthTest, state->depthWrite,
                  state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d,
                  c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles, (void *) tex,
                  tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0, t != NULL ? t->tex.width : 0,
                  t != NULL ? t->tex.height : 0, t != NULL ? t->tex.data : NULL,
                  (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
-                 verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a);
+                 verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
     }
     bind_texture(0, state->textures[0], &su0, &sv0);
     bind_texture(1, state->textures[1], &su1, &sv1);

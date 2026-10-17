@@ -111,6 +111,48 @@ unsigned long long plat_idle_ns(void) {
 void plat_shutdown(void) {
 }
 
+static volatile int sQuitting;
+static volatile int sRendererParked;
+
+/* Parks the calling thread for good once the application is closing (see plat_3ds_exit). */
+void plat_3ds_quit_point(int parkedState) {
+    if (!sQuitting) {
+        return;
+    }
+    sRendererParked = parkedState;
+    for (;;) {
+        svcSleepThread(1000000000LL);
+    }
+}
+
+void port_audio_output_exit(void);
+void gfxb_3ds_shutdown(void);
+
+/*
+ * Ends the application. Returning from main would unmap the heap while the game's threads still run on it (their
+ * stacks live there too), which crashed the whole system on exit. Instead the renderer is stopped, the sound and the
+ * GPU are shut down, APT is told the application is done, and the process ends, which stops every thread at once.
+ */
+void plat_3ds_exit(void) {
+    unsigned long long start = plat_time_ns();
+
+    sQuitting = 1;
+    while (sRendererParked == 0 && plat_time_ns() - start < 1000000000ULL) {
+        svcSleepThread(1000000);
+    }
+    port_audio_output_exit();
+    // Nothing may use the bottom screen console once the screens are gone: hold its lock for good.
+    LightLock_Lock(&sConsoleLock);
+    if (sRendererParked == PLAT_3DS_PARKED_GPU_IDLE) {
+        gfxb_3ds_shutdown();
+    }
+    if (sRendererParked != 0) {
+        gfxExit();
+    }
+    aptExit();
+    svcExitProcess();
+}
+
 static void thread_entry(void *arg) {
     PlatThread *thread = (PlatThread *) arg;
     thread->func(thread->arg);
