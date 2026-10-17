@@ -1,0 +1,627 @@
+/*
+ * Bug reports straight from the console, as GitHub issues (src/plat/bugreport.c does the sending).
+ *
+ * - Holding SELECT and touching the bottom screen takes a snapshot and sends it with the log.
+ * - A crash writes sdmc:/3ds/dkr/crash.txt (registers, stack, recent log) and ends the program.
+ * - If the last run did not end normally (a crash, a freeze that needed the power button), the next start offers to
+ *   send its log and crash.txt.
+ *
+ * Sending needs sdmc:/3ds/dkr/bugreport.txt with a line "token=<GitHub token>" (see the README).
+ */
+#include <3ds.h>
+#include <curl/curl.h>
+#include <malloc.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+
+#include "plat/bugreport.h"
+#include "plat/plat.h"
+#include "github_ca.h"
+
+#ifndef PORT_BUILD_VERSION
+#define PORT_BUILD_VERSION "unknown"
+#endif
+
+#define DATA_DIR "sdmc:/3ds/dkr"
+#define CONFIG_PATH DATA_DIR "/bugreport.txt"
+#define RUNNING_PATH DATA_DIR "/running"
+#define DEFAULT_REPO "chrispelletier-gif/Diddy-Kong-Racing"
+#define REPORT_LABEL "3ds-bug-report"
+/* Compressed size of all the files of one report; each 45 KB is one comment on the issue. */
+#define MAX_ATTACHMENT_BYTES (900 * 1024)
+#define MAX_FILES 8
+
+extern u32 __ctru_heap_size;
+int port_gfx_frame_count(void);
+
+enum ReportKind {
+    REPORT_BUTTON,       /* SELECT + touch during the game. */
+    REPORT_LAST_CRASHED, /* The last run crashed (crash.txt). */
+    REPORT_LAST_UNENDED, /* The last run never reached its normal exit. */
+};
+
+typedef struct ReportConfig {
+    char token[256];
+    char repo[128];
+    char apiUrl[128];
+} ReportConfig;
+
+/* "name=value" lines; '#' starts a comment. Returns nonzero if there is a token. */
+static int load_config(ReportConfig *config) {
+    unsigned int size;
+    char *text = plat_load_file(CONFIG_PATH, &size), *line, *next;
+
+    memset(config, 0, sizeof(*config));
+    snprintf(config->repo, sizeof(config->repo), "%s", DEFAULT_REPO);
+    snprintf(config->apiUrl, sizeof(config->apiUrl), "%s", "https://api.github.com");
+    if (text == NULL) {
+        return 0;
+    }
+    text = realloc(text, size + 1);
+    text[size] = '\0';
+    for (line = text; line != NULL && *line; line = next) {
+        char *value, *end;
+        next = strpbrk(line, "\r\n");
+        if (next != NULL) {
+            *next++ = '\0';
+        }
+        while (*line == ' ' || *line == '\t') {
+            line++;
+        }
+        value = strchr(line, '=');
+        if (*line == '#' || value == NULL) {
+            continue;
+        }
+        *value++ = '\0';
+        while (*value == ' ' || *value == '\t') {
+            value++;
+        }
+        end = value + strlen(value);
+        while (end > value && (end[-1] == ' ' || end[-1] == '\t')) {
+            *--end = '\0';
+        }
+        for (end = line + strlen(line); end > line && (end[-1] == ' ' || end[-1] == '\t');) {
+            *--end = '\0';
+        }
+        if (strcmp(line, "token") == 0) {
+            snprintf(config->token, sizeof(config->token), "%s", value);
+        } else if (strcmp(line, "repo") == 0) {
+            snprintf(config->repo, sizeof(config->repo), "%s", value);
+        } else if (strcmp(line, "api") == 0) {
+            snprintf(config->apiUrl, sizeof(config->apiUrl), "%s", value);
+        }
+    }
+    free(text);
+    return config->token[0] != '\0';
+}
+
+static int file_exists(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static void move_file(const char *from, const char *to) {
+    remove(to);
+    rename(from, to);
+}
+
+/*
+ * Crashes. The handler runs on the crashed thread with a stack of its own. It cannot trust the C library's locks or
+ * the heap (the crash may have been inside malloc), so it formats into a static buffer and writes with the FS
+ * service directly.
+ */
+static __thread const char *sThreadName;
+static u8 sCrashStack[0x4000] __attribute__((aligned(8)));
+static char sCrashText[24 * 1024];
+
+static void crash_write_file(const char *path, const char *text, u32 length) {
+    Handle file;
+    u32 written;
+    if (R_FAILED(FSUSER_OpenFileDirectly(&file, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""), fsMakePath(PATH_ASCII, path),
+                                         FS_OPEN_WRITE | FS_OPEN_CREATE, 0))) {
+        return;
+    }
+    FSFILE_SetSize(file, 0);
+    FSFILE_Write(file, &written, 0, text, length, FS_WRITE_FLUSH);
+    FSFILE_Close(file);
+}
+
+static void crash_handler(ERRF_ExceptionInfo *info, CpuRegisters *regs) {
+    static const char *const sTypes[] = { "prefetch abort", "data abort", "undefined instruction", "VFP exception" };
+    int length = 0, i;
+    const u32 *sp = (const u32 *) regs->sp;
+
+#define ADD(...) length += snprintf(sCrashText + length, sizeof(sCrashText) - length, __VA_ARGS__)
+    ADD("%s in thread %s\n", (u32) info->type < 4 ? sTypes[info->type] : "exception",
+        sThreadName != NULL ? sThreadName : "main");
+    ADD("pc %08lx lr %08lx far %08lx fsr %08lx\n", regs->pc, regs->lr, info->far, info->fsr);
+    ADD("build %s\n", PORT_BUILD_VERSION);
+    ADD("renderer: %s, frame %d\n", gPlatGfxStage != NULL ? gPlatGfxStage : "-", port_gfx_frame_count());
+    for (i = 0; i < 13; i++) {
+        ADD("r%-2d %08lx%s", i, regs->r[i], (i % 4 == 3) ? "\n" : "  ");
+    }
+    ADD("sp  %08lx  cpsr %08lx\n\nstack:\n", regs->sp, regs->cpsr);
+    // The stack is only read if the stack pointer looks like it points at memory (heap or a thread stack).
+    if ((regs->sp & 3) == 0 && regs->sp >= 0x08000000 && regs->sp < 0x10000000) {
+        for (i = 0; i < 128; i++) {
+            ADD("%08lx%s", sp[i], (i % 8 == 7) ? "\n" : " ");
+        }
+    }
+    ADD("\nrecent log:\n");
+    if (length < (int) sizeof(sCrashText) - 1) {
+        length += plat_log_recent(sCrashText + length, sizeof(sCrashText) - length);
+    }
+#undef ADD
+    if (length > (int) sizeof(sCrashText) - 1) {
+        length = sizeof(sCrashText) - 1;
+    }
+    crash_write_file("/3ds/dkr/crash.txt", sCrashText, length);
+    // Back to the Homebrew Launcher; the next start offers to send the report.
+    svcExitProcess();
+}
+
+void bugreport_watch_thread(const char *name) {
+    sThreadName = name;
+    threadOnException(crash_handler, sCrashStack + sizeof(sCrashStack), WRITE_DATA_TO_HANDLER_STACK);
+}
+
+/* Building the report. */
+
+typedef struct Report {
+    int kind;
+    char title[160];
+    char *body;
+    BugReportFile files[MAX_FILES];
+    int fileCount;
+} Report;
+
+static void add_file(Report *report, const char *name) {
+    char path[256];
+    unsigned int size = 0;
+    unsigned char *data;
+    BugReportFile *file;
+
+    if (report->fileCount >= MAX_FILES) {
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/%s", DATA_DIR, name);
+    data = plat_load_file(path, &size);
+    if (data == NULL) {
+        return;
+    }
+    // GPU captures of an anti-aliased frame are twice the size of the screen in each direction. They are shrunk the
+    // way the display does it, so the report stays small; diff_frames.py takes either size.
+    if (strstr(name, "_gpu.bin") != NULL && size >= 8) {
+        u32 w, h, x, y;
+        memcpy(&w, data, 4);
+        memcpy(&h, data + 4, 4);
+        if (w > 240 && w % 2 == 0 && h % 2 == 0 && size >= 8 + w * h * 4) {
+            const u8 *in = data + 8;
+            u8 *out = data + 8;
+            for (y = 0; y < h / 2; y++) {
+                for (x = 0; x < w / 2; x++) {
+                    int c;
+                    for (c = 0; c < 4; c++) {
+                        const u8 *p = in + ((y * 2) * w + x * 2) * 4 + c;
+                        out[(y * (w / 2) + x) * 4 + c] = (p[0] + p[4] + p[w * 4] + p[w * 4 + 4] + 2) / 4;
+                    }
+                }
+            }
+            w /= 2;
+            h /= 2;
+            memcpy(data, &w, 4);
+            memcpy(data + 4, &h, 4);
+            size = 8 + w * h * 4;
+        }
+    }
+    file = &report->files[report->fileCount++];
+    file->name = strdup(name);
+    file->data = data;
+    file->size = size;
+}
+
+static void free_report(Report *report) {
+    int i;
+    for (i = 0; i < report->fileCount; i++) {
+        free((void *) report->files[i].name);
+        free((void *) report->files[i].data);
+    }
+    free(report->body);
+    report->body = NULL;
+    report->fileCount = 0;
+}
+
+/* The last lines of text, at most maxLength bytes, starting at a whole line. */
+static const char *tail(const char *text, size_t maxLength) {
+    size_t length = strlen(text);
+    const char *start, *newline;
+    if (length <= maxLength) {
+        return text;
+    }
+    start = text + length - maxLength;
+    newline = strchr(start, '\n');
+    return newline != NULL ? newline + 1 : start;
+}
+
+static void build_body(Report *report, const char *crashText, const char *recentLog) {
+    static const char *const sKinds[] = {
+        "Sent from the game (SELECT + touch)",
+        "The last run crashed; sent at the next start",
+        "The last run did not end normally (a freeze, or the power button); sent at the next start",
+    };
+    size_t capacity = 60000, length = 0;
+    char *body = malloc(capacity);
+    bool isNew3DS = false;
+    time_t now = time(NULL);
+    struct tm *tm = gmtime(&now);
+    int i;
+
+    if (body == NULL) {
+        return;
+    }
+    APT_CheckNew3DS(&isNew3DS);
+#define ADD(...)                                                                                                       \
+    do {                                                                                                               \
+        if (length < capacity) {                                                                                       \
+            length += snprintf(body + length, capacity - length, __VA_ARGS__);                                         \
+        }                                                                                                              \
+    } while (0)
+    ADD("<!-- dkr-bug-report v1 kind=%s -->\n",
+        report->kind == REPORT_BUTTON ? "button" : (report->kind == REPORT_LAST_CRASHED ? "crash" : "unended"));
+    ADD("**What:** %s\n", sKinds[report->kind]);
+    ADD("**Build:** `%s`\n", PORT_BUILD_VERSION);
+    ADD("**Console:** %s\n", isNew3DS ? "New 3DS" : "Old 3DS");
+    if (tm != NULL) {
+        ADD("**Console clock:** %04d-%02d-%02d %02d:%02d\n", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+            tm->tm_hour, tm->tm_min);
+    }
+    if (report->kind == REPORT_BUTTON) {
+        struct mallinfo info = mallinfo();
+        ADD("**Frame:** %d, renderer %s\n", port_gfx_frame_count(), gPlatGfxStage != NULL ? gPlatGfxStage : "-");
+        ADD("**Counters:** vi %u, gfx %u/%u, audio %u, sys %u, sound gaps %u, drops %u, texture failures %u\n",
+            gPlatCounters[PLAT_COUNTER_VI], gPlatCounters[PLAT_COUNTER_GFX_QUEUED],
+            gPlatCounters[PLAT_COUNTER_GFX_DONE], gPlatCounters[PLAT_COUNTER_AUDIO], gPlatCounters[PLAT_COUNTER_MAIN],
+            gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN], gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED],
+            gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]);
+        ADD("**Free memory:** gpu %lu KB, heap %lu KB\n", (unsigned long) (linearSpaceFree() / 1024),
+            (unsigned long) ((info.fordblks + (__ctru_heap_size - info.arena)) / 1024));
+    }
+    if (crashText != NULL) {
+        ADD("\n### Crash\n\n```\n%s\n```\n", tail(crashText, 12000));
+    }
+    if (recentLog != NULL && recentLog[0] != '\0') {
+        size_t room = (length + 4000 < capacity) ? capacity - length - 4000 : 0;
+        ADD("\n### Log (last lines)\n\n```\n%s\n```\n", tail(recentLog, room > 30000 ? 30000 : room));
+    }
+    if (report->fileCount > 0) {
+        ADD("\n### Files\n\nAttached below as comments; `port/tools/bugreport_fetch.py <issue>` saves them.\n\n");
+        for (i = 0; i < report->fileCount; i++) {
+            ADD("- `%s` (%u bytes)\n", report->files[i].name, report->files[i].size);
+        }
+    }
+#undef ADD
+    if (length >= capacity) {
+        body[capacity - 1] = '\0';
+    }
+    report->body = body;
+}
+
+/* Sending. */
+
+static void (*sShow)(const char *text);
+
+static void show_progress(const char *text) {
+    char line[160];
+    snprintf(line, sizeof(line), "Bug report: %s", text);
+    sShow(line);
+}
+
+/* Sets up the network, sends, and takes it down again. Returns 0 on success; result has the issue or the error. */
+static int send_report(const ReportConfig *config, Report *report, char *result, size_t resultSize) {
+    static int sCurlReady;
+    BugReportConfig send;
+    u32 wifi = 0;
+    u32 *socBuffer = NULL;
+    u32 socSize = 0x100000;
+    int status;
+
+    if (R_SUCCEEDED(acInit())) {
+        ACU_GetWifiStatus(&wifi);
+        acExit();
+        if (wifi == 0) {
+            snprintf(result, resultSize, "no Wi-Fi connection");
+            return -1;
+        }
+    }
+    // The network buffer comes from the heap the game also uses; take less if a full one does not fit.
+    while (socBuffer == NULL && socSize >= 0x40000) {
+        socBuffer = memalign(0x1000, socSize);
+        if (socBuffer == NULL) {
+            socSize /= 2;
+        }
+    }
+    if (socBuffer == NULL) {
+        snprintf(result, resultSize, "not enough memory for the network");
+        return -1;
+    }
+    if (R_FAILED(socInit(socBuffer, socSize))) {
+        free(socBuffer);
+        snprintf(result, resultSize, "could not start the network");
+        return -1;
+    }
+    sslcInit(0); // For the TLS library's random numbers.
+    if (!sCurlReady) {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        sCurlReady = 1;
+    }
+
+    memset(&send, 0, sizeof(send));
+    send.token = config->token;
+    send.repo = config->repo;
+    send.apiUrl = config->apiUrl;
+    send.label = REPORT_LABEL;
+    send.caPem = sGithubCaPem;
+    send.caFile = file_exists(DATA_DIR "/cacert.pem") ? DATA_DIR "/cacert.pem" : NULL;
+    send.userAgent = "dkr-3ds/" PORT_BUILD_VERSION;
+    status = bugreport_send(&send, report->title, report->body, report->files, report->fileCount,
+                            MAX_ATTACHMENT_BYTES, show_progress, result, resultSize);
+
+    sslcExit();
+    socExit();
+    free(socBuffer);
+    return status;
+}
+
+/* Keeps a report that could not be sent, so it is not lost. */
+static void save_unsent(const Report *report) {
+    FILE *file = fopen(DATA_DIR "/bugreport_unsent.txt", "w");
+    if (file != NULL) {
+        fprintf(file, "%s\n\n%s\n", report->title, report->body != NULL ? report->body : "");
+        fclose(file);
+    }
+}
+
+static int send_and_show(const ReportConfig *config, Report *report) {
+    char result[300];
+    int status;
+
+    if (report->body == NULL) {
+        sShow("Bug report: out of memory");
+        return -1;
+    }
+    status = send_report(config, report, result, sizeof(result));
+    if (status == 0) {
+        char line[360];
+        const char *number = strrchr(result, '/');
+        snprintf(line, sizeof(line), "Bug report sent: issue #%s", number != NULL ? number + 1 : result);
+        sShow(line);
+        plat_log("bug report sent: %s", result);
+    } else {
+        char line[360];
+        snprintf(line, sizeof(line), "Bug report %s: %s", status > 0 ? "partly sent" : "not sent", result);
+        sShow(line);
+        plat_log("%s", line);
+        if (status < 0) {
+            save_unsent(report);
+            sShow("Saved as sdmc:/3ds/dkr/bugreport_unsent.txt");
+        }
+    }
+    return status;
+}
+
+/* The start of the program: the previous run's files, and the offer to report it. */
+
+static void show_console(const char *text) {
+    printf("  %s\n", text);
+    gfxFlushBuffers();
+    gfxSwapBuffers();
+    gspWaitForVBlank();
+}
+
+/* Returns nonzero if anything was shown on the bottom screen. */
+int bugreport_boot(void) {
+    int lastUnended = file_exists(RUNNING_PATH);
+    int crashed;
+    ReportConfig config;
+    FILE *marker;
+
+    // Nothing has been logged yet, so log.txt is still the last run's.
+    if (lastUnended) {
+        move_file(DATA_DIR "/log.txt", DATA_DIR "/last_log.txt");
+        move_file(DATA_DIR "/crash.txt", DATA_DIR "/last_crash.txt");
+    } else {
+        remove(DATA_DIR "/crash.txt");
+    }
+    marker = fopen(RUNNING_PATH, "w");
+    if (marker != NULL) {
+        fclose(marker);
+    }
+    if (!lastUnended || !load_config(&config)) {
+        return 0;
+    }
+
+    crashed = file_exists(DATA_DIR "/last_crash.txt");
+    printf("\n  %s\n\n", crashed ? "The game crashed last time." : "The game did not exit normally last time.");
+    printf("  Send a bug report with its log?\n\n");
+    printf("  A  Send       B  Skip\n\n");
+    for (;;) {
+        u32 down;
+        if (!aptMainLoop()) {
+            return 1;
+        }
+        hidScanInput();
+        down = hidKeysDown();
+        gfxFlushBuffers();
+        gfxSwapBuffers();
+        gspWaitForVBlank();
+        if (down & KEY_B) {
+            return 1;
+        }
+        if (down & KEY_A) {
+            break;
+        }
+    }
+
+    {
+        Report report;
+        char *crashText = NULL;
+        unsigned int size;
+
+        memset(&report, 0, sizeof(report));
+        report.kind = crashed ? REPORT_LAST_CRASHED : REPORT_LAST_UNENDED;
+        if (crashed) {
+            crashText = plat_load_file(DATA_DIR "/last_crash.txt", &size);
+            if (crashText != NULL) {
+                crashText = realloc(crashText, size + 1);
+                crashText[size] = '\0';
+            }
+        }
+        snprintf(report.title, sizeof(report.title), "[3DS bug report] %s",
+                 crashed ? "crash" : "the game did not exit normally");
+        if (crashText != NULL) {
+            // The first line says what crashed.
+            char first[100];
+            snprintf(first, sizeof(first), "%s", crashText);
+            first[strcspn(first, "\n")] = '\0';
+            snprintf(report.title, sizeof(report.title), "[3DS bug report] crash: %s", first);
+        }
+        add_file(&report, "last_log.txt");
+        add_file(&report, "last_crash.txt");
+        add_file(&report, "env.txt");
+        {
+            // The log file stops after the start-up lines, so its end is in the body too.
+            unsigned int logSize;
+            char *log = plat_load_file(DATA_DIR "/last_log.txt", &logSize);
+            if (log != NULL) {
+                log = realloc(log, logSize + 1);
+                log[logSize] = '\0';
+            }
+            build_body(&report, crashText, log);
+            free(log);
+        }
+        free(crashText);
+        sShow = show_console;
+        show_console("Sending...");
+        if (send_and_show(&config, &report) >= 0) {
+            remove(DATA_DIR "/last_crash.txt");
+        }
+        free_report(&report);
+        show_console("");
+        show_console("Press A to start the game.");
+        while (aptMainLoop()) {
+            hidScanInput();
+            if (hidKeysDown() & (KEY_A | KEY_START)) {
+                break;
+            }
+            gfxFlushBuffers();
+            gfxSwapBuffers();
+            gspWaitForVBlank();
+        }
+    }
+    return 1;
+}
+
+/* Called when the program ends normally. */
+void bugreport_clean_exit(void) {
+    remove(RUNNING_PATH);
+}
+
+/*
+ * During the game. A thread of the highest application priority watches the buttons by reading the HID shared
+ * memory, so a report can be sent even when the game itself has stopped reading the controls.
+ */
+static volatile int sBusy;
+
+static void show_status(const char *text) {
+    plat_status("%s", text);
+}
+
+static u32 peek_keys(void) {
+    u32 keys = 0, id;
+    id = hidSharedMem[4];
+    if (id > 7) {
+        id = 7;
+    }
+    keys = hidSharedMem[10 + id * 4];
+    id = hidSharedMem[42 + 4];
+    if (id > 7) {
+        id = 7;
+    }
+    if (hidSharedMem[42 + 8 + id * 2 + 1]) {
+        keys |= KEY_TOUCH;
+    }
+    return keys;
+}
+
+static void report_now(void) {
+    ReportConfig config;
+    Report report;
+    int haveToken = load_config(&config);
+    int before = gPlatSnapshotSaved, waited;
+    static char recent[32 * 1024];
+
+    show_status(haveToken ? "Bug report: taking a snapshot"
+                          : "Bug report: no token in sdmc:/3ds/dkr/bugreport.txt; saving a snapshot only");
+    plat_log("bug report requested");
+    gPlatSnapshotRequested = 1;
+    // If the renderer is stuck there is no snapshot; the report goes without it.
+    for (waited = 0; waited < 50 && gPlatSnapshotSaved == before; waited++) {
+        svcSleepThread(100 * 1000 * 1000);
+    }
+    if (!haveToken) {
+        return;
+    }
+
+    memset(&report, 0, sizeof(report));
+    report.kind = REPORT_BUTTON;
+    if (gPlatSnapshotSaved != before) {
+        char name[64];
+        int frame = gPlatSnapshotSaved;
+        snprintf(report.title, sizeof(report.title), "[3DS bug report] frame %d", frame);
+        snprintf(name, sizeof(name), "diff_%05d_log.txt", frame);
+        add_file(&report, name);
+        snprintf(name, sizeof(name), "diff_%05d_ref.png", frame);
+        add_file(&report, name);
+        snprintf(name, sizeof(name), "diff_%05d_gpu.bin", frame);
+        add_file(&report, name);
+        snprintf(name, sizeof(name), "diff_%05d_cmd.bin", frame);
+        add_file(&report, name);
+    } else {
+        snprintf(report.title, sizeof(report.title), "[3DS bug report] no snapshot (renderer: %s)",
+                 gPlatGfxStage != NULL ? gPlatGfxStage : "-");
+    }
+    add_file(&report, "log.txt");
+    add_file(&report, "env.txt");
+    plat_log_recent(recent, sizeof(recent));
+    build_body(&report, NULL, recent);
+    sShow = show_status;
+    send_and_show(&config, &report);
+    free_report(&report);
+}
+
+static void button_thread(void *arg) {
+    u32 last = 0;
+    (void) arg;
+    bugreport_watch_thread("bug report");
+    for (;;) {
+        u32 keys = peek_keys();
+        // SELECT held, and the touch just started.
+        if ((keys & KEY_SELECT) && (keys & KEY_TOUCH) && !(last & KEY_TOUCH) && !sBusy) {
+            sBusy = 1;
+            report_now();
+            sBusy = 0;
+        }
+        last = keys;
+        svcSleepThread(50 * 1000 * 1000);
+    }
+}
+
+void bugreport_start(void) {
+    // 64 KB: the TLS handshake needs a deep stack.
+    if (threadCreate(button_thread, NULL, 64 * 1024, 0x18, 0, true) == NULL) {
+        plat_log("bug report: could not create its thread");
+    }
+}
