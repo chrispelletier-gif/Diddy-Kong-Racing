@@ -1,0 +1,164 @@
+name: 3DS port
+
+# Builds the native port (port/) on every push: dkr.3dsx for the 3DS and the headless host build, then plays the
+# host build through the scripted scenarios in port/tools/frame_regression.py and compares its frames with the
+# build of the previous commit.
+#
+# Needs the ROMURL repository secret (the same one the N64 workflows use): a private download URL for a US 1.0
+# ROM (sha1 0cb115d8716dbbc2922fda38e533b9fe63bb9670). The ROM is only used inside the jobs; it is never uploaded.
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: port-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ROM_SHA1: 0cb115d8716dbbc2922fda38e533b9fe63bb9670
+
+jobs:
+  assets:
+    name: Asset headers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Get ROM
+        env:
+          ROMURL: ${{ secrets.ROMURL }}
+        run: |
+          if [ -z "$ROMURL" ]; then
+            echo "::error::The ROMURL repository secret is not set. Add a private download URL for the US 1.0 ROM under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          wget -q --timeout=60 -O baseroms/baserom.us.v77.z64 "$ROMURL"
+          echo "$ROM_SHA1  baseroms/baserom.us.v77.z64" | sha1sum -c --quiet -
+
+      - name: Build the asset tool
+        run: make -C tools dkr_assets_tool -j4
+
+      - name: Extract and build the assets
+        run: |
+          ./tools/dkr_assets_tool extract -dkrv us.v77
+          ./tools/dkr_assets_tool build -o build/assets.bin -dkrv us.v77
+
+      - name: Upload include/asset_enums.h
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-enums
+          path: include/asset_enums.h
+          retention-days: 1
+
+  build-3ds:
+    name: 3DS build
+    needs: assets
+    runs-on: ubuntu-latest
+    # devkitARM with libctru and citro3d. To update, pull devkitpro/devkitarm:latest and use its digest.
+    container: devkitpro/devkitarm@sha256:116afba8df8453961de2936ffab20dd441edf4d682856c1ec8b0e53d7ed0bbf5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download include/asset_enums.h
+        uses: actions/download-artifact@v4
+        with:
+          name: asset-enums
+          path: include
+
+      - name: Build dkr.3dsx
+        run: make -C port TARGET=3ds -j"$(nproc)"
+
+      - name: Upload dkr.3dsx
+        uses: actions/upload-artifact@v4
+        with:
+          name: dkr-3ds-${{ github.sha }}
+          # dkr.elf has the symbols for reading crash addresses.
+          path: |
+            port/build/3ds/dkr.3dsx
+            port/build/3ds/dkr.elf
+
+  host:
+    name: Host build and frame regression
+    needs: assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib python3-pil
+
+      - name: Download include/asset_enums.h
+        uses: actions/download-artifact@v4
+        with:
+          name: asset-enums
+          path: include
+
+      - name: Get ROM
+        env:
+          ROMURL: ${{ secrets.ROMURL }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/rom"
+          wget -q --timeout=60 -O "$RUNNER_TEMP/rom/baserom.z64" "$ROMURL"
+          echo "$ROM_SHA1  $RUNNER_TEMP/rom/baserom.z64" | sha1sum -c --quiet -
+
+      - name: Build the host version
+        run: make -C port TARGET=host -j"$(nproc)"
+
+      - name: Upload the host build
+        uses: actions/upload-artifact@v4
+        with:
+          name: dkr-host-${{ github.sha }}
+          path: port/build/host/dkr
+
+      - name: Build the previous commit
+        id: base
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # The commit this push builds on: the previous tip of the branch, or for a new branch, the parent commit.
+          base="$BEFORE"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base=$(git rev-parse HEAD^ 2>/dev/null || true)
+          fi
+          if [ -z "$base" ]; then
+            echo "No earlier commit to compare with."
+            exit 0
+          fi
+          echo "Comparing with $base"
+          git worktree add "$RUNNER_TEMP/base" "$base"
+          cp include/asset_enums.h "$RUNNER_TEMP/base/include/"
+          if make -C "$RUNNER_TEMP/base/port" TARGET=host -j"$(nproc)"; then
+            echo "exe=$RUNNER_TEMP/base/port/build/host/dkr" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::The previous commit ($base) doesn't build; frames are not compared."
+          fi
+
+      - name: Frame regression
+        env:
+          BASE_EXE: ${{ steps.base.outputs.exe }}
+        run: |
+          python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr ${BASE_EXE:+--base "$BASE_EXE"} --out "$RUNNER_TEMP/regression"
+
+      - name: Upload the differences and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frame-regression
+          # Frames that differ, side by side, and each run's log. The frames themselves are not kept.
+          path: |
+            ${{ runner.temp }}/regression/report.md
+            ${{ runner.temp }}/regression/differences/
+            ${{ runner.temp }}/regression/runs/*/*/log.txt
+          if-no-files-found: ignore

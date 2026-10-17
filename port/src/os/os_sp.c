@@ -28,6 +28,8 @@ static RcpWorker sGfxWorker;
 static RcpWorker sAudioWorker;
 static s32 sRcpStarted;
 static volatile s32 sGfxTasksPending;
+/* Tasks handed to the workers whose completion has not been raised yet (kernel lock). */
+static s32 sRcpTasksBusy;
 
 static OSTask *worker_next(RcpWorker *worker) {
     OSTask *task;
@@ -38,9 +40,24 @@ static OSTask *worker_next(RcpWorker *worker) {
 }
 
 static void worker_push(RcpWorker *worker, OSTask *task) {
+    plat_klock();
+    sRcpTasksBusy++;
+    plat_kunlock();
     worker->queue[worker->write % RCP_QUEUE_SIZE] = task;
     worker->write++;
     plat_sem_post(worker->sem);
+}
+
+/* Called after a task's completion event is raised, so lockstep never sees the RCP idle before it. */
+static void task_done(void) {
+    plat_klock();
+    sRcpTasksBusy--;
+    plat_kbroadcast();
+    plat_kunlock();
+}
+
+int port_rcp_idle(void) {
+    return sRcpTasksBusy == 0;
 }
 
 static void gfx_thread(void *arg) {
@@ -64,6 +81,7 @@ static void gfx_thread(void *arg) {
         plat_kbroadcast();
         plat_kunlock();
         port_raise_event(OS_EVENT_DP);
+        task_done();
     }
 }
 
@@ -81,6 +99,7 @@ static void audio_thread(void *arg) {
             gPlatCounters[PLAT_COUNTER_AUDIO]++;
         }
         port_raise_event(OS_EVENT_SP);
+        task_done();
     }
 }
 
@@ -108,6 +127,16 @@ void osSpTaskStartGo(OSTask *task) {
     } else {
         worker_push(&sAudioWorker, task);
     }
+    if (port_lockstep_enabled()) {
+        // Lockstep: the task finishes, and raises its interrupts, before the caller goes on.
+        int wasDisabled = port_int_release();
+        plat_klock();
+        while (sRcpTasksBusy > 0) {
+            plat_kwait();
+        }
+        plat_kunlock();
+        port_int_restore(wasDisabled);
+    }
 }
 
 void osSpTaskYield(void) {
@@ -131,6 +160,10 @@ void port_rcp_gfx_submitted(void) {
  * Waits until no graphics task is queued or running. The game sometimes frees memory that the display list being
  * drawn still uses, relying on the RCP having finished long before. This makes that safe however slow rendering is.
  */
+static int gfx_idle(void) {
+    return sGfxTasksPending <= 0;
+}
+
 void port_rcp_wait_idle(void) {
     int wasDisabled;
     if (sGfxTasksPending <= 0) {
@@ -140,9 +173,7 @@ void port_rcp_wait_idle(void) {
     // raise their events, so let them in while waiting (as the OS does for any blocking call).
     wasDisabled = port_int_release();
     plat_klock();
-    while (sGfxTasksPending > 0) {
-        plat_kwait();
-    }
+    port_kwait_until(gfx_idle);
     plat_kunlock();
     port_int_restore(wasDisabled);
 }

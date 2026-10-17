@@ -18,6 +18,9 @@ typedef struct PortControllerState {
     u8 connected;
 } PortControllerState;
 
+/* From port.h, which needs the game's headers: the game's clock (fixed steps in DKR_LOCKSTEP runs). */
+unsigned long long port_time_ns(void);
+
 static unsigned long long sAudioStart;
 static unsigned long long sAudioQueuedBytes;
 static unsigned int sAudioFrequency = 22050;
@@ -30,7 +33,7 @@ static unsigned long long audio_played_bytes(void) {
     if (sAudioStart == 0) {
         return 0;
     }
-    return (plat_time_ns() - sAudioStart) * sAudioFrequency / 1000000000ULL * 4;
+    return (port_time_ns() - sAudioStart) * sAudioFrequency / 1000000000ULL * 4;
 }
 
 /* DKR_DUMP_AUDIO names a file that receives every buffer as raw 16 bit stereo PCM at the output frequency. */
@@ -56,11 +59,11 @@ static void dump_audio(const s16 *samples, u32 numBytes) {
 void port_audio_output_queue(const s16 *samples, u32 numBytes) {
     dump_audio(samples, numBytes);
     if (sAudioStart == 0) {
-        sAudioStart = plat_time_ns();
+        sAudioStart = port_time_ns();
     }
     if (audio_played_bytes() > sAudioQueuedBytes) {
         // Underrun: restart the clock.
-        sAudioStart = plat_time_ns();
+        sAudioStart = port_time_ns();
         sAudioQueuedBytes = 0;
     }
     sAudioQueuedBytes += numBytes;

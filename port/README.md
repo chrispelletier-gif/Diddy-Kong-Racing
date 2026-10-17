@@ -142,6 +142,27 @@ These settings work on both builds (in `env.txt` on the 3DS, as environment vari
 `port/tools/testdata/eeprom_complete.bin` is a save made this way (file A, "AAA"). Copying it over `eeprom.bin`
 replaces your own saves.
 
+`DKR_LOCKSTEP=1` (meant for the host build) makes runs repeatable: the N64 threads take turns like on the console's
+single CPU, each retrace waits until every thread is done with the previous one, and the game's clock advances by
+exactly 1/60 s per retrace, so the same build always draws the same frames, as fast as the machine allows.
+
+`port/tools/frame_regression.py` uses it to compare two host builds:
+
+```
+python3 port/tools/frame_regression.py --rom baserom.z64 --head port/build/host/dkr --base old/dkr --out /tmp/regression
+```
+
+It plays a few scripted scenarios (the intro and title, a spread of levels through `DKR_WARP`, and the Adventure hub
+from the complete save) on both builds, and writes `report.md` and side by side images (base, head, difference) of
+every frame that differs.
+
+### CI
+
+`.github/workflows/Port.yml` runs on every push: it builds `dkr.3dsx` and the host build (both are uploaded as
+workflow artifacts), then runs the frame regression between this commit and the previous one, with its report on
+the run's summary page. It needs the `ROMURL` repository secret, a private download URL for the US 1.0 ROM (the
+same secret the N64 workflows use).
+
 ## Testing in Azahar
 
 The port runs in the Azahar emulator.

@@ -169,6 +169,7 @@ s32 osPiStartDma(OSIoMesg *mb, s32 priority, s32 direction, u32 devAddr, void *v
     mb->devAddr = devAddr;
     mb->size = nbytes;
     port_post_mesg(mq, mb);
+    port_lockstep_dma(nbytes);
     return 0;
 }
 

@@ -11,21 +11,181 @@
 #include "port.h"
 #include "plat/plat.h"
 
-/******************************** Threads ********************************/
-
 #define THREAD_ENTRY(t) ((void (*)(void *))(uintptr_t)(t)->context.pc)
 #define THREAD_ARG(t) ((void *) (uintptr_t)(t)->context.a0)
 #define THREAD_PLAT(t) ((PlatThread *) (uintptr_t)(t)->context.s0)
 
 static OSThread sMainThread;
 
+/******************************** Lockstep ********************************/
+
+/*
+ * DKR_LOCKSTEP=1 makes runs repeatable, for comparing frames between builds (the host build's CI regression run).
+ * Normally every N64 thread runs freely on its own host thread and retraces follow the wall clock, so how many
+ * retraces pass during a frame (the game's logic step) and how threads interleave depend on the machine. In
+ * lockstep the threads run one at a time like on the N64's single CPU: the highest priority thread that has work
+ * runs until it blocks, the RCP finishes each task before the thread that started it goes on, and the VI raises
+ * the next retrace only once no thread has anything left to do. The game then runs at a steady 30 updates per
+ * second, as fast as the machine allows, and the clock it reads advances by exactly one 60th of a second per
+ * retrace.
+ */
+#define MAX_THREADS 16
+
+/* Started threads and the queue each one is blocked on. Protected by the kernel lock. */
+static OSThread *sThreads[MAX_THREADS];
+static OSMesgQueue *sThreadWaitQueue[MAX_THREADS];
+static u8 sThreadWaitFull[MAX_THREADS];
+static int (*sThreadWaitUntil[MAX_THREADS])(void);
+static s32 sNumThreads;
+/* The thread that holds the emulated CPU, or -1. */
+static s32 sCpuOwner = -1;
+static s32 sLockstep = -1;
+static unsigned long long sLockstepRetraces;
+static u32 sLockstepDmaBytes;
+
+/* Loading still lets time pass: one retrace per this much PI DMA (the PI moves roughly 5 MB a second). */
+#define LOCKSTEP_DMA_BYTES_PER_RETRACE 0x14000
+
+int port_lockstep_enabled(void) {
+    if (sLockstep < 0) {
+        const char *env = plat_getenv("DKR_LOCKSTEP");
+        sLockstep = env != NULL && env[0] != '\0' && env[0] != '0';
+    }
+    return sLockstep;
+}
+
+/* The rest of this section is called with the kernel lock held. */
+
+static s32 thread_index(OSThread *t) {
+    s32 i;
+    for (i = 0; i < sNumThreads; i++) {
+        if (sThreads[i] == t) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Whether the thread could run now: started, not stopped, and not blocked on something that isn't there yet. */
+static int thread_ready(s32 i) {
+    OSMesgQueue *mq = sThreadWaitQueue[i];
+    if (sThreads[i]->state == OS_STATE_STOPPED) {
+        return FALSE;
+    }
+    if (sThreadWaitUntil[i] != NULL) {
+        return sThreadWaitUntil[i]();
+    }
+    if (mq == NULL) {
+        return TRUE;
+    }
+    return sThreadWaitFull[i] ? mq->validCount < mq->msgCount : mq->validCount > 0;
+}
+
+/* Hands a free CPU to the highest priority ready thread (the first started one on a tie). */
+static void cpu_pick(void) {
+    s32 i, best = -1;
+    if (sCpuOwner >= 0) {
+        return;
+    }
+    for (i = 0; i < sNumThreads; i++) {
+        if (thread_ready(i) && (best < 0 || sThreads[i]->priority > sThreads[best]->priority)) {
+            best = i;
+        }
+    }
+    if (best >= 0) {
+        sCpuOwner = best;
+        plat_kbroadcast();
+    }
+}
+
+static void cpu_acquire(s32 i) {
+    for (;;) {
+        cpu_pick();
+        if (sCpuOwner == i) {
+            return;
+        }
+        plat_kwait();
+    }
+}
+
+static void cpu_release(s32 i) {
+    if (sCpuOwner == i) {
+        sCpuOwner = -1;
+        cpu_pick();
+    }
+}
+
+void port_kwait_until(int (*ready)(void)) {
+    s32 i = port_lockstep_enabled() ? thread_index((OSThread *) plat_get_current_os_thread()) : -1;
+    if (i < 0) {
+        while (!ready()) {
+            plat_kwait();
+        }
+        return;
+    }
+    sThreadWaitUntil[i] = ready;
+    cpu_release(i);
+    cpu_acquire(i);
+    sThreadWaitUntil[i] = NULL;
+}
+
+/* Called by a thread that stops for good. */
+static void cpu_release_self(void) {
+    if (port_lockstep_enabled()) {
+        plat_klock();
+        cpu_release(thread_index((OSThread *) plat_get_current_os_thread()));
+        plat_kunlock();
+    }
+}
+
+void port_lockstep_wait(void) {
+    unsigned long long start = plat_time_ns();
+    s32 i;
+
+    plat_klock();
+    for (;;) {
+        cpu_pick();
+        for (i = 0; i < sNumThreads && !thread_ready(i); i++) {
+        }
+        // Nothing happens before the game starts its first thread: start-up takes no time.
+        if (sNumThreads > 0 && sCpuOwner < 0 && i == sNumThreads && port_rcp_idle()) {
+            break;
+        }
+        if (sNumThreads > 0 && plat_time_ns() - start > 2000000000ULL) {
+            // A thread polls instead of blocking. Let the retrace through rather than stall the run.
+            port_log("lockstep: thread %d still running after 2 s, raising the retrace anyway",
+                     sCpuOwner >= 0 ? (int) sThreads[sCpuOwner]->id : -1);
+            break;
+        }
+        plat_kwait_timeout(1000000);
+    }
+    sLockstepRetraces++;
+    plat_kunlock();
+}
+
+/* The console's clock as the game sees it. */
+unsigned long long port_time_ns(void) {
+    if (port_lockstep_enabled()) {
+        return sLockstepRetraces * 1000000000ULL / 60;
+    }
+    return plat_time_ns();
+}
+
+/******************************** Threads ********************************/
+
 static void thread_trampoline(void *arg) {
     OSThread *t = (OSThread *) arg;
     plat_set_current_os_thread(t);
     port_int_thread_init();
+    if (port_lockstep_enabled() && thread_index(t) >= 0) {
+        plat_klock();
+        cpu_acquire(thread_index(t));
+        plat_kunlock();
+    }
     THREAD_ENTRY(t)(THREAD_ARG(t));
     // N64 threads are never supposed to return.
     t->state = OS_STATE_STOPPED;
+    cpu_release_self();
     plat_thread_park();
 }
 
@@ -49,6 +209,12 @@ void osStartThread(OSThread *t) {
     }
     plat_snprintf(name, sizeof(name), "n64thread%d", (int) t->id);
     t->state = OS_STATE_RUNNABLE;
+    port_lockstep_enabled(); // Reads the setting now, rather than later with the kernel lock held.
+    plat_klock();
+    if (sNumThreads < MAX_THREADS) {
+        sThreads[sNumThreads++] = t;
+    }
+    plat_kunlock();
     t->context.s0 = (u64) (uintptr_t) plat_thread_create(thread_trampoline, t, t->priority, PLAT_THREAD_GAME, name);
 }
 
@@ -86,6 +252,7 @@ void osStopThread(OSThread *t) {
     // shutting down (reset), so stopping the calling thread is the only case that really matters.
     if (t == NULL || t == current_thread()) {
         current_thread()->state = OS_STATE_STOPPED;
+        cpu_release_self();
         plat_thread_park();
     }
     t->state = OS_STATE_STOPPED;
@@ -168,7 +335,50 @@ void __osRestoreInt(u32 enabled) {
     }
 }
 
+/*
+ * Called after each PI DMA. Retraces otherwise only come between frames, so a long load would run without any,
+ * and the audio thread, which works once per retrace, would not keep up with the music events the game queues
+ * meanwhile (the music player's event queue overflows and the player stalls).
+ */
+void port_lockstep_dma(u32 numBytes) {
+    s32 i;
+    if (!port_lockstep_enabled() || sIntDisabled) {
+        return;
+    }
+    plat_klock();
+    i = thread_index((OSThread *) plat_get_current_os_thread());
+    sLockstepDmaBytes += numBytes;
+    if (i < 0 || sCpuOwner != i || sLockstepDmaBytes < LOCKSTEP_DMA_BYTES_PER_RETRACE) {
+        plat_kunlock();
+        return;
+    }
+    sLockstepDmaBytes -= LOCKSTEP_DMA_BYTES_PER_RETRACE;
+    sLockstepRetraces++;
+    plat_kunlock();
+    port_vi_retrace();
+    // Let the threads the retrace woke run first if they outrank this one, as the interrupt would on the N64.
+    plat_klock();
+    cpu_release(i);
+    cpu_acquire(i);
+    plat_kunlock();
+}
+
 /******************************** Message queues ********************************/
+
+/* Blocks the calling thread until mq may have a message (or space, for a sender). Kernel lock held. */
+static void wait_on_queue(OSMesgQueue *mq, int forSpace) {
+    s32 i = port_lockstep_enabled() ? thread_index((OSThread *) plat_get_current_os_thread()) : -1;
+    if (i < 0) {
+        plat_kwait();
+        return;
+    }
+    // In lockstep the CPU goes to the next thread, and comes back once this one is ready and has the highest priority.
+    sThreadWaitQueue[i] = mq;
+    sThreadWaitFull[i] = forSpace;
+    cpu_release(i);
+    cpu_acquire(i);
+    sThreadWaitQueue[i] = NULL;
+}
 
 void osCreateMesgQueue(OSMesgQueue *mq, OSMesg *msg, s32 count) {
     mq->mtqueue = NULL;
@@ -189,7 +399,7 @@ s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
             port_int_restore(hadInt);
             return -1;
         }
-        plat_kwait();
+        wait_on_queue(mq, TRUE);
     }
     mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
     mq->validCount++;
@@ -209,7 +419,7 @@ s32 osJamMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
             port_int_restore(hadInt);
             return -1;
         }
-        plat_kwait();
+        wait_on_queue(mq, TRUE);
     }
     mq->first = (mq->first + mq->msgCount - 1) % mq->msgCount;
     mq->msg[mq->first] = msg;
@@ -230,7 +440,7 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag) {
             port_int_restore(hadInt);
             return -1;
         }
-        plat_kwait();
+        wait_on_queue(mq, FALSE);
     }
     if (msg != NULL) {
         *msg = mq->msg[mq->first];
@@ -292,15 +502,15 @@ static OSTime ns_to_count(unsigned long long ns) {
 }
 
 u32 osGetCount(void) {
-    return (u32) ns_to_count(plat_time_ns());
+    return (u32) ns_to_count(port_time_ns());
 }
 
 OSTime osGetTime(void) {
-    return sTimeBase + ns_to_count(plat_time_ns() - sTimeBaseNs);
+    return sTimeBase + ns_to_count(port_time_ns() - sTimeBaseNs);
 }
 
 void osSetTime(OSTime time) {
-    sTimeBaseNs = plat_time_ns();
+    sTimeBaseNs = port_time_ns();
     sTimeBase = time;
 }
 
