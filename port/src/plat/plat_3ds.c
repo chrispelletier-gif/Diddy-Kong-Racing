@@ -9,6 +9,7 @@
 #include <string.h>
 
 extern u32 __ctru_heap_size;
+extern void (*__system_retAddr)(void);
 
 /*
  * All emulated N64 threads run on the application core so that, like on the N64, only one of them executes
@@ -131,7 +132,7 @@ void gfxb_3ds_shutdown(void);
 /*
  * Ends the application. Returning from main would unmap the heap while the game's threads still run on it (their
  * stacks live there too), which crashed the whole system on exit. Instead the renderer is stopped, the sound and the
- * GPU are shut down, APT is told the application is done, and the process ends, which stops every thread at once.
+ * GPU are shut down, APT is told the application has closed, and the process ends, which stops every thread at once.
  */
 void plat_3ds_exit(void) {
     unsigned long long start = plat_time_ns();
@@ -149,7 +150,16 @@ void plat_3ds_exit(void) {
     if (sRendererParked != 0) {
         gfxExit();
     }
-    aptExit();
+    {
+        // When the system closed the application, aptExit leaves the last step, telling the HOME menu the
+        // application has closed, to the exit code (which would run it after freeing the heap). Without it the HOME
+        // menu crashed when it next launched something. It also ends the process.
+        void (*before)(void) = __system_retAddr;
+        aptExit();
+        if (__system_retAddr != before && __system_retAddr != NULL) {
+            __system_retAddr();
+        }
+    }
     svcExitProcess();
 }
 
