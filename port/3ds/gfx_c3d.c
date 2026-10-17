@@ -1179,13 +1179,18 @@ static void set_scissor(const short rect[4]) {
 #define IS_BLENDED(blend) ((blend) == GFX_BLEND_ALPHA || (blend) == GFX_BLEND_ADD)
 
 /*
- * Graphics test modes, for the kart shadow that still comes out as a black square in the hub with the split above.
- * Touching the top half of the bottom screen moves to the next one; the bottom screen says which is on.
+ * The kart shadow still came out as a black square in the hub with the split above. Testing on a New 3DS showed that
+ * writing the settings of the first blended draw twice fixes it (TEST_REWRITE), an empty triangle before it only
+ * sometimes: the GPU seems to miss some of the settings written right after an unblended draw. The normal mode
+ * (TEST_SPLIT) does both.
+ *
+ * Graphics test modes: touching the top half of the bottom screen moves to the next one, and the bottom screen says
+ * which is on.
  */
 enum { TEST_SPLIT, TEST_NOTHING, TEST_DIAG_ALPHA, TEST_PRIMER, TEST_REWRITE, TEST_COUNT };
 static const char *const sTestNames[TEST_COUNT] = {
-    "split before blending (normal)", "no fix", "show texture alpha as grey",
-    "empty triangle before blending", "write the settings twice",
+    "split and settings twice (normal)", "no fix", "show texture alpha as grey",
+    "empty triangle before blending", "settings twice only",
 };
 
 static int test_mode(void) {
@@ -1358,7 +1363,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     }
     first = drain_before_draw(state, numTriangles);
     set_all_state(state, &su0, &sv0, &su1, &sv1);
-    if (first && test_mode() == TEST_REWRITE) {
+    if (first && (test_mode() == TEST_REWRITE || test_mode() == TEST_SPLIT)) {
         // Write all the settings now, then mark them changed so that the draw writes them a second time.
         C3Di_UpdateContext();
         set_all_state(state, &su0, &sv0, &su1, &sv1);
