@@ -106,6 +106,7 @@ void plat_log_copy_to(const char *path);
  */
 enum { PLAT_3DS_PARKED_GPU_IDLE = 1, PLAT_3DS_PARKED_GPU_BUSY = 2 };
 void plat_3ds_quit_point(int parkedState);
+void plat_3ds_pause_renderer(int pause);
 void plat_3ds_exit(void) __attribute__((noreturn));
 
 /* Set when the player asks for a snapshot of the next frame (3DS: by touching the bottom screen). */

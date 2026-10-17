@@ -114,15 +114,44 @@ void plat_shutdown(void) {
 
 static volatile int sQuitting;
 static volatile int sRendererParked;
+static volatile int sPauseRequested;
+static volatile int sRendererPaused;
 
-/* Parks the calling thread for good once the application is closing (see plat_3ds_exit). */
+/*
+ * Called by the renderer at the start of each frame (with the GPU idle) and while it waits for the GPU. Holds it while
+ * the application is suspended (see plat_3ds_pause_renderer), and parks it for good once the application is closing
+ * (see plat_3ds_exit).
+ */
 void plat_3ds_quit_point(int parkedState) {
+    if (parkedState == PLAT_3DS_PARKED_GPU_IDLE) {
+        while (sPauseRequested && !sQuitting) {
+            sRendererPaused = 1;
+            svcSleepThread(1000000);
+        }
+        sRendererPaused = 0;
+    }
     if (!sQuitting) {
         return;
     }
     sRendererParked = parkedState;
     for (;;) {
         svcSleepThread(1000000000LL);
+    }
+}
+
+/*
+ * The HOME menu takes the GPU away while the application is suspended. The renderer kept drawing frames meanwhile,
+ * and the GPU hung when the game was resumed. So it waits at the start of a frame, with the GPU idle, until the
+ * application is restored.
+ */
+void plat_3ds_pause_renderer(int pause) {
+    unsigned long long start = plat_time_ns();
+    sPauseRequested = pause;
+    if (!pause) {
+        return;
+    }
+    while (!sRendererPaused && plat_time_ns() - start < 2000000000ULL) {
+        svcSleepThread(1000000);
     }
 }
 
