@@ -1178,11 +1178,32 @@ static void set_scissor(const short rect[4]) {
 #define SMALL_DRAWS_ONLY 16
 #define IS_BLENDED(blend) ((blend) == GFX_BLEND_ALPHA || (blend) == GFX_BLEND_ADD)
 
-static void drain_before_draw(const GfxDrawState *state, int numTriangles) {
+/*
+ * Graphics test modes, for the kart shadow that still comes out as a black square in the hub with the split above.
+ * Touching the top half of the bottom screen moves to the next one; the bottom screen says which is on.
+ */
+enum { TEST_SPLIT, TEST_NOTHING, TEST_DIAG_ALPHA, TEST_PRIMER, TEST_REWRITE, TEST_COUNT };
+static const char *const sTestNames[TEST_COUNT] = {
+    "split before blending (normal)", "no fix", "show texture alpha as grey",
+    "empty triangle before blending", "write the settings twice",
+};
+
+static int test_mode(void) {
+    static int sShown = -1;
+    int mode = gPlatGfxTest % TEST_COUNT;
+    if (mode != sShown) {
+        sShown = mode;
+        plat_status("Graphics test %d: %s", mode, sTestNames[mode]);
+    }
+    return mode;
+}
+
+/* Returns whether this is a blended draw after an unblended one, the case that showed the faults. */
+static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
     static int sFlushMode = -1, sSplitMode = -1;
     static unsigned int sLastKey = ~0u;
     unsigned int key;
-    int split;
+    int split, first;
 
     if (sFlushMode < 0) {
         const char *env = plat_getenv("DKR_FB_FLUSH");
@@ -1199,9 +1220,11 @@ static void drain_before_draw(const GfxDrawState *state, int numTriangles) {
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
     }
-    split = sSplitMode == 2 ? key != sLastKey
-          : sSplitMode == 1 ? IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF)
-                            : 0;
+    first = IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF);
+    split = sSplitMode == 2 ? key != sLastKey : sSplitMode == 1 ? first : 0;
+    if (test_mode() != TEST_SPLIT && test_mode() != TEST_DIAG_ALPHA) {
+        split = 0;
+    }
     if (split && sVboUsed > 0 && sDrainSplits < MAX_DRAIN_SPLITS &&
         (sDrainSplits < SMALL_DRAWS_ONLY || numTriangles <= 4)) {
         // The GPU reads the vertices so far when it runs the first part of the list.
@@ -1210,6 +1233,7 @@ static void drain_before_draw(const GfxDrawState *state, int numTriangles) {
         sDrainSplits++;
     }
     sLastKey = key;
+    return first;
 }
 
 /*
@@ -1224,7 +1248,7 @@ static void apply_alpha_diagnostic(const GfxDrawState *state) {
     if (sOn < 0) {
         sOn = plat_getenv("DKR_DIAG_ALPHA") != NULL;
     }
-    if (!sOn || !IS_BLENDED(state->blend)) {
+    if ((!sOn && test_mode() != TEST_DIAG_ALPHA) || !IS_BLENDED(state->blend)) {
         return;
     }
     for (i = 0; i < 6; i++) {
@@ -1243,10 +1267,57 @@ static void apply_alpha_diagnostic(const GfxDrawState *state) {
     }
 }
 
+static void set_draw_state(const GfxDrawState *state) {
+    switch (state->blend) {
+        case GFX_BLEND_ALPHA:
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
+            break;
+        case GFX_BLEND_ADD:
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ONE, GPU_ZERO);
+            break;
+        default:
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+            break;
+    }
+    C3D_AlphaTest(state->alphaTest, GPU_GEQUAL, state->alphaRef);
+    if (sDepthOnly) {
+        C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_DEPTH);
+    } else if (state->depthTest || state->depthWrite) {
+        C3D_DepthTest(true, state->depthTest ? GPU_GEQUAL : GPU_ALWAYS,
+                      state->depthWrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
+    } else {
+        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    }
+    C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f : 0.0f);
+    {
+        static int sNoCull = -1;
+        if (sNoCull < 0) {
+            sNoCull = plat_getenv("DKR_NO_CULL") != NULL;
+        }
+        C3D_CullFace((sNoCull || state->cullMode == 0) ? GPU_CULL_NONE
+                     : state->cullMode == 1                ? GPU_CULL_BACK_CCW
+                                                           : GPU_CULL_FRONT_CCW);
+    }
+    set_scissor(state->scissor);
+}
+
+/* Sets every GPU setting a draw uses. */
+static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
+    bind_texture(0, state->textures[0], su0, sv0);
+    bind_texture(1, state->textures[1], su1, sv1);
+    apply_combiner(state);
+    apply_alpha_diagnostic(state);
+    apply_fog(state);
+    set_draw_state(state);
+}
+
+/* citro3d's own function that writes the changed settings to the command list (not in its public header). */
+void C3Di_UpdateContext(void);
+
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
     C3DVertex *out;
     float su0, sv0, su1, sv1;
-    int i, count = numTriangles * 3;
+    int i, first, primer, count = numTriangles * 3;
 
     if (sVboUsed + count > VBO_VERTICES) {
         return;
@@ -1285,46 +1356,16 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
                  (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
                  verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
     }
-    drain_before_draw(state, numTriangles);
-    bind_texture(0, state->textures[0], &su0, &sv0);
-    bind_texture(1, state->textures[1], &su1, &sv1);
-    apply_combiner(state);
-    apply_alpha_diagnostic(state);
-    apply_fog(state);
+    first = drain_before_draw(state, numTriangles);
+    set_all_state(state, &su0, &sv0, &su1, &sv1);
+    if (first && test_mode() == TEST_REWRITE) {
+        // Write all the settings now, then mark them changed so that the draw writes them a second time.
+        C3Di_UpdateContext();
+        set_all_state(state, &su0, &sv0, &su1, &sv1);
+    }
+    primer = first && test_mode() == TEST_PRIMER && sVboUsed + count + 3 <= VBO_VERTICES;
 
-    switch (state->blend) {
-        case GFX_BLEND_ALPHA:
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
-            break;
-        case GFX_BLEND_ADD:
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ONE, GPU_ZERO);
-            break;
-        default:
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-            break;
-    }
-    C3D_AlphaTest(state->alphaTest, GPU_GEQUAL, state->alphaRef);
-    if (sDepthOnly) {
-        C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_DEPTH);
-    } else if (state->depthTest || state->depthWrite) {
-        C3D_DepthTest(true, state->depthTest ? GPU_GEQUAL : GPU_ALWAYS,
-                      state->depthWrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
-    } else {
-        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
-    }
-    C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f : 0.0f);
-    {
-        static int sNoCull = -1;
-        if (sNoCull < 0) {
-            sNoCull = plat_getenv("DKR_NO_CULL") != NULL;
-        }
-        C3D_CullFace((sNoCull || state->cullMode == 0) ? GPU_CULL_NONE
-                     : state->cullMode == 1                ? GPU_CULL_BACK_CCW
-                                                           : GPU_CULL_FRONT_CCW);
-    }
-    set_scissor(state->scissor);
-
-    out = &sVbo[sVboUsed];
+    out = &sVbo[sVboUsed + (primer ? 3 : 0)];
     for (i = 0; i < count; i++) {
         const GfxVertex *v = &verts[i];
         to_screen(v, &out[i]);
@@ -1337,6 +1378,14 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         out[i].color[1] = v->g * (1.0f / 255.0f);
         out[i].color[2] = v->b * (1.0f / 255.0f);
         out[i].color[3] = v->a * (1.0f / 255.0f);
+    }
+    if (primer) {
+        // A triangle with no area, drawn with the same settings first.
+        for (i = 0; i < 3; i++) {
+            sVbo[sVboUsed + i] = out[0];
+        }
+        C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, 3);
+        sVboUsed += 3;
     }
     C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, count);
     sVboUsed += count;

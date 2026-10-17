@@ -111,6 +111,8 @@ void plat_3ds_exit(void) __attribute__((noreturn));
 
 /* Set when the player asks for a snapshot of the next frame (3DS: by touching the bottom screen). */
 extern volatile int gPlatSnapshotRequested;
+/* Graphics test mode for finding hardware drawing faults (3DS: touching the top half of the bottom screen cycles it). */
+extern volatile int gPlatGfxTest;
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
