@@ -253,6 +253,7 @@ const char *plat_data_dir(void) {
 static LightLock sLogLock;
 static int sLogLines;
 static int sLogDebug;
+static FILE *sLogCopy;
 
 static FILE *log_file(void) {
     static int sChecked;
@@ -287,6 +288,9 @@ static void log_line(const char *prefix, const char *text) {
         fflush(file);
         sLogLines++;
     }
+    if (sLogCopy != NULL) {
+        fprintf(sLogCopy, "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+    }
     LightLock_Unlock(&sLogLock);
 }
 
@@ -294,8 +298,29 @@ void plat_log_keep(void) {
     sLogDebug = 1;
 }
 
+/* Snapshots get a log file of their own: some ways of copying files off the SD card kept serving an old log.txt. */
+void plat_log_copy_to(const char *path) {
+    FILE *file = (path != NULL) ? fopen(path, "w") : NULL;
+    FILE *old;
+    LightLock_Lock(&sLogLock);
+    old = sLogCopy;
+    sLogCopy = file;
+    LightLock_Unlock(&sLogLock);
+    if (old != NULL) {
+        fclose(old);
+    }
+    if (file != NULL) {
+        struct mallinfo info = mallinfo();
+        plat_log("free memory: gpu %lu KB, heap %lu KB; texture failures %u, sound gaps %u, drops %u",
+                 (unsigned long) (linearSpaceFree() / 1024),
+                 (unsigned long) ((info.fordblks + (__ctru_heap_size - info.arena)) / 1024),
+                 gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED], gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN],
+                 gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED]);
+    }
+}
+
 void plat_log(const char *fmt, ...) {
-    char buffer[256];
+    char buffer[512];
     va_list args;
     va_start(args, fmt);
     vsnprintf(buffer, sizeof(buffer), fmt, args);

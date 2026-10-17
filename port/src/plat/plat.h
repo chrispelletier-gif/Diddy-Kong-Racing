@@ -97,6 +97,8 @@ void plat_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void plat_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 /* Keeps logging after the start-up lines, which the 3DS otherwise stops at to spare the SD card. */
 void plat_log_keep(void);
+/* Also writes log lines to this file until called with NULL, which closes it (3DS only). */
+void plat_log_copy_to(const char *path);
 
 /* Set when the player asks for a snapshot of the next frame (3DS: by touching the bottom screen). */
 extern volatile int gPlatSnapshotRequested;

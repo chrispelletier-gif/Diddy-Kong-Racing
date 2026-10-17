@@ -586,9 +586,21 @@ static void flush_batch(void) {
     if (sBatchCount > 0) {
         if (sFrameCount == sTraceFrame) {
             const GfxVertex *v = &sBatchVerts[0];
+            float minU = v->u0, maxU = v->u0, minV = v->v0, maxV = v->v0, minW = v->w, maxW = v->w;
+            s32 i;
+            for (i = 1; i < sBatchCount * 3; i++) {
+                const GfxVertex *o = &sBatchVerts[i];
+                minU = (o->u0 < minU) ? o->u0 : minU;
+                maxU = (o->u0 > maxU) ? o->u0 : maxU;
+                minV = (o->v0 < minV) ? o->v0 : minV;
+                maxV = (o->v0 > maxV) ? o->v0 : maxV;
+                minW = (o->w < minW) ? o->w : minW;
+                maxW = (o->w > maxW) ? o->w : maxW;
+            }
             trace_state(&sBatchState, sBatchCount);
             plat_log("    v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d", v->x, v->y, v->z, v->w, v->u0, v->v0,
                      v->r, v->g, v->b, v->a);
+            plat_log("    u %.3f..%.3f v %.3f..%.3f w %.1f..%.1f", minU, maxU, minV, maxV, minW, maxW);
         }
         gfxb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount);
         REF_CALL(refb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount));
@@ -1181,6 +1193,11 @@ void port_gfx_run_task(void *taskPtr) {
         sTraceFrame = sFrameCount;
         plat_log_keep();
         gfxb_log_draws();
+        {
+            char path[256];
+            plat_snprintf(path, sizeof(path), "%s/diff_%05d_log.txt", plat_data_dir(), (int) sFrameCount);
+            plat_log_copy_to(path);
+        }
         plat_log("snapshot of frame %d", (int) sFrameCount);
     }
 #endif
@@ -1206,6 +1223,7 @@ void port_gfx_run_task(void *taskPtr) {
         gfxb_capture_frame(path);
         sRefActive = FALSE;
         if (sTraceFrame == sFrameCount) {
+            plat_log_copy_to(NULL);
             plat_status("Snapshot saved (frame %d)", (int) sFrameCount);
         }
     }

@@ -1035,12 +1035,13 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         const GfxTexture *tex = state->textures[0];
         const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
         plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "
-                 "tex %p (%dx%d gpu %dx%d) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d",
+                 "tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d",
                  numTriangles, state->blend, state->alphaTest, state->alphaRef, state->depthTest, state->depthWrite,
                  state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d,
                  c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles, (void *) tex,
                  tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0, t != NULL ? t->tex.width : 0,
-                 t != NULL ? t->tex.height : 0, verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
+                 t != NULL ? t->tex.height : 0, t != NULL ? t->tex.data : NULL,
+                 (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
                  verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a);
     }
     bind_texture(0, state->textures[0], &su0, &sv0);
