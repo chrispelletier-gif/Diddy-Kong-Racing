@@ -116,8 +116,6 @@ extern volatile int gPlatSnapshotSaved;
 
 /* Copies the most recent log lines, oldest first, into out (3DS only; empty elsewhere). Returns the length. */
 int plat_log_recent(char *out, int size);
-/* Graphics test mode for finding hardware drawing faults (3DS: touching the top half of the bottom screen cycles it). */
-extern volatile int gPlatGfxTest;
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
