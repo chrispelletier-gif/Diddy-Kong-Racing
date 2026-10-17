@@ -1169,13 +1169,16 @@ static void set_scissor(const short rect[4]) {
  *
  * DKR_GPU_SPLIT ends the command list before such a draw and starts a new one, which the GPU only begins once it has
  * finished the previous list: 1 (the default) before a blended draw that follows an unblended one, 2 whenever the
- * blending, alpha test or depth settings change, 0 never. The GPU's command queue holds 32 entries a frame, so at most
- * MAX_DRAIN_SPLITS are made per frame.
+ * blending, alpha test or depth settings change, 0 never. This fixed the letter but not the shadows, which come later
+ * in a race frame than the first 12 splits allowed. The GPU's command queue holds 32 entries a frame and a frame needs
+ * 3 of its own, so at most MAX_DRAIN_SPLITS are made; past SMALL_DRAWS_ONLY, only for draws of a few triangles, which
+ * are the ones that showed the problem.
  */
-#define MAX_DRAIN_SPLITS 12
+#define MAX_DRAIN_SPLITS 24
+#define SMALL_DRAWS_ONLY 16
 #define IS_BLENDED(blend) ((blend) == GFX_BLEND_ALPHA || (blend) == GFX_BLEND_ADD)
 
-static void drain_before_draw(const GfxDrawState *state) {
+static void drain_before_draw(const GfxDrawState *state, int numTriangles) {
     static int sFlushMode = -1, sSplitMode = -1;
     static unsigned int sLastKey = ~0u;
     unsigned int key;
@@ -1199,7 +1202,8 @@ static void drain_before_draw(const GfxDrawState *state) {
     split = sSplitMode == 2 ? key != sLastKey
           : sSplitMode == 1 ? IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF)
                             : 0;
-    if (split && sVboUsed > 0 && sDrainSplits < MAX_DRAIN_SPLITS) {
+    if (split && sVboUsed > 0 && sDrainSplits < MAX_DRAIN_SPLITS &&
+        (sDrainSplits < SMALL_DRAWS_ONLY || numTriangles <= 4)) {
         // The GPU reads the vertices so far when it runs the first part of the list.
         GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
         C3D_FrameSplit(GX_CMDLIST_FLUSH);
@@ -1281,7 +1285,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
                  (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
                  verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
     }
-    drain_before_draw(state);
+    drain_before_draw(state, numTriangles);
     bind_texture(0, state->textures[0], &su0, &sv0);
     bind_texture(1, state->textures[1], &su1, &sv1);
     apply_combiner(state);
