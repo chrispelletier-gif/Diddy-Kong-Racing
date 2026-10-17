@@ -1225,6 +1225,7 @@ void port_gfx_run_task(void *taskPtr) {
         if (sTraceFrame == sFrameCount) {
             plat_log_copy_to(NULL);
             plat_status("Snapshot saved (frame %d)", (int) sFrameCount);
+            gPlatSnapshotSaved = (int) sFrameCount;
         }
     }
 #endif

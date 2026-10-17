@@ -47,7 +47,7 @@ PORT_GAME_SRC := $(wildcard src/*.c src/os/*.c src/game/*.c src/gfx/*.c src/audi
 PORT_SYS_SRC := src/plat/plat_common.c src/plat/input_script.c $(wildcard src/gfx/sys/*.c src/audio/sys/*.c)
 
 ifeq ($(TARGET),3ds)
-  PORT_SYS_SRC += src/plat/plat_3ds.c $(wildcard 3ds/*.c)
+  PORT_SYS_SRC += src/plat/plat_3ds.c src/plat/bugreport.c $(wildcard 3ds/*.c)
 else
   PORT_SYS_SRC += src/plat/plat_posix.c $(wildcard host/*.c)
 endif
@@ -89,10 +89,15 @@ ifeq ($(TARGET),3ds)
   # The ARM EABI default of variable sized enums would change the layout of the game's structs.
   GAME_ARCH_FLAGS := -fno-short-enums -DPORT_GFX_REFERENCE
   CTRULIB   := $(DEVKITPRO)/libctru
-  SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -Iinclude -Isrc
+  PORTLIBS  := $(DEVKITPRO)/portlibs/3ds
+  # Identifies the build in bug reports.
+  PORT_BUILD_VERSION := $(shell git -c safe.directory='*' describe --always --dirty 2>/dev/null || echo unknown)
+  SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include -Iinclude -Isrc \
+                -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\"
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
-  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning
-  LIBS      := -lcitro3d -lctru -lm
+  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning
+  # curl and mbedtls (devkitPro's 3ds-curl) send bug reports.
+  LIBS      := -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru -lm
   EXE       := $(BUILD_DIR)/dkr.elf
 else
   CC        := gcc

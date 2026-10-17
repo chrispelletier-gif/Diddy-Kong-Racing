@@ -7,6 +7,10 @@
 
 void port_boot(void);
 void port_si_flush(void);
+int bugreport_boot(void);
+void bugreport_start(void);
+void bugreport_clean_exit(void);
+void bugreport_watch_thread(const char *name);
 
 /* Saves are written to the SD card shortly after the game makes them; make sure none are lost when leaving. */
 static aptHookCookie sAptCookie;
@@ -19,8 +23,6 @@ static void apt_hook(APT_HookType hook, void *param) {
 
 /* The game only uses the top screen; the bottom one shows the controls. */
 static void show_bottom_screen_help(void) {
-    static PrintConsole sConsole;
-    consoleInit(GFX_BOTTOM, &sConsole);
     printf("\n  Diddy Kong Racing\n");
     printf("  Native 3DS port of the decomp\n\n");
     printf("  Circle Pad   Steer\n");
@@ -32,6 +34,7 @@ static void show_bottom_screen_help(void) {
     printf("  C-Stick      C buttons\n");
     printf("  SELECT       N64 L button\n");
     printf("  START        Pause\n\n");
+    printf("  SELECT+touch Send a bug report\n\n");
     printf("  Saves: sdmc:/3ds/dkr/\n");
 }
 
@@ -61,13 +64,24 @@ int main(int argc, char **argv) {
     hidInit();
     mkdir("sdmc:/3ds", 0777);
     mkdir(plat_data_dir(), 0777);
+    {
+        static PrintConsole sConsole;
+        consoleInit(GFX_BOTTOM, &sConsole);
+    }
+    bugreport_watch_thread("main");
+    // Offers to report the last run if it did not end normally. Must come before anything is logged.
+    if (bugreport_boot()) {
+        consoleClear();
+    }
     show_bottom_screen_help();
 
     port_boot();
+    bugreport_start();
     aptHook(&sAptCookie, apt_hook, NULL);
     while (plat_main_loop_iteration()) {
     }
     port_si_flush();
     gfxExit();
+    bugreport_clean_exit();
     return 0;
 }

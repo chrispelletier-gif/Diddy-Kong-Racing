@@ -102,6 +102,11 @@ void plat_log_copy_to(const char *path);
 
 /* Set when the player asks for a snapshot of the next frame (3DS: by touching the bottom screen). */
 extern volatile int gPlatSnapshotRequested;
+/* The frame number of the last snapshot saved (its files are diff_NNNNN_*), or 0 before the first one. */
+extern volatile int gPlatSnapshotSaved;
+
+/* Copies the most recent log lines, oldest first, into out (3DS only; empty elsewhere). Returns the length. */
+int plat_log_recent(char *out, int size);
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
