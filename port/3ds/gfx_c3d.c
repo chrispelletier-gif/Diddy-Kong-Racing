@@ -46,6 +46,7 @@ static shaderProgram_s sProgram;
 static C3DVertex *sVbo;
 static int sVboUsed;
 static C3D_Tex sWhiteTex;
+extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
 static int sFrameStarted;
 static int sDepthOnly;
 static int sFrameCount, sFrameTriangles;
@@ -355,50 +356,109 @@ static int sSnapshotFrame = -1;
 static struct {
     const C3DTexture *tex;
     const void *data;
-    u32 hash;
+    u32 *copy; // What the memory held when the texture was drawn
 } sChecked[MAX_CHECKED_TEXTURES];
 static int sNumChecked;
+static int sSnapshotPending;
 
-static u32 texture_hash(const C3DTexture *t) {
-    const u32 *data = (const u32 *) t->tex.data;
-    u32 n = t->tex.width * t->tex.height, i, hash = 2166136261u;
-    // Read the memory the GPU reads (flushing first, so nothing the CPU wrote is thrown away).
-    GSPGPU_FlushDataCache(data, n * 4);
-    GSPGPU_InvalidateDataCache(data, n * 4);
-    for (i = 0; i < n; i++) {
-        hash = (hash ^ data[i]) * 16777619u;
-    }
-    return hash;
+static u32 texture_words(const C3DTexture *t) {
+    return t->tex.width * t->tex.height;
+}
+
+/* Makes the CPU see the memory the GPU reads (flushing first, so nothing the CPU wrote is thrown away). */
+static void sync_from_memory(const void *data, u32 size) {
+    GSPGPU_FlushDataCache(data, size);
+    GSPGPU_InvalidateDataCache(data, size);
 }
 
 static void remember_texture(const C3DTexture *t) {
+    u32 size = texture_words(t) * 4;
+    u32 *copy;
     int i;
     for (i = 0; i < sNumChecked; i++) {
         if (sChecked[i].tex == t) {
             return;
         }
     }
-    if (sNumChecked < MAX_CHECKED_TEXTURES) {
-        sChecked[sNumChecked].tex = t;
-        sChecked[sNumChecked].data = t->tex.data;
-        sChecked[sNumChecked].hash = texture_hash(t);
-        sNumChecked++;
+    if (sNumChecked == MAX_CHECKED_TEXTURES || (copy = malloc(size)) == NULL) {
+        return;
+    }
+    sync_from_memory(t->tex.data, size);
+    memcpy(copy, t->tex.data, size);
+    sChecked[sNumChecked].tex = t;
+    sChecked[sNumChecked].data = t->tex.data;
+    sChecked[sNumChecked].copy = copy;
+    sNumChecked++;
+}
+
+static void save_words(const char *what, int index, const void *data, u32 words) {
+    char path[256];
+    FILE *f;
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_tex%d_%s.bin", plat_data_dir(), sSnapshotFrame, index, what);
+    f = fopen(path, "wb");
+    if (f != NULL) {
+        fwrite(data, 4, words, f);
+        fclose(f);
     }
 }
 
 /* Once the GPU has finished the snapshot frame, and before any texture is deleted. */
 static void check_textures_after_frame(void) {
-    int i, changed = 0;
+    int i, j, changed = 0;
     for (i = 0; i < sNumChecked; i++) {
         const C3DTexture *t = sChecked[i].tex;
-        if (t->tex.data != sChecked[i].data || texture_hash(t) != sChecked[i].hash) {
-            plat_log("after the GPU: texture memory at %p (%dx%d) changed", sChecked[i].data, t->tex.width,
-                     t->tex.height);
+        const u32 *now = (const u32 *) sChecked[i].data;
+        u32 n = texture_words(t), k, wrong = 0, first = 0;
+        u32 values[4] = { 0 }, counts[4] = { 0 };
+        sync_from_memory(now, n * 4);
+        for (k = 0; k < n; k++) {
+            if (now[k] != sChecked[i].copy[k]) {
+                if (wrong++ == 0) {
+                    first = k;
+                }
+                // The most common new values say what overwrote it.
+                for (j = 0; j < 4; j++) {
+                    if (counts[j] == 0 || values[j] == now[k]) {
+                        values[j] = now[k];
+                        counts[j]++;
+                        break;
+                    }
+                }
+            }
+        }
+        if (wrong > 0 || t->tex.data != sChecked[i].data) {
+            plat_log("after the GPU: texture %d at %p (%dx%d, now at %p): %lu of %lu words changed from word %lu; new "
+                     "values %08lX x%lu, %08lX x%lu, %08lX x%lu, %08lX x%lu",
+                     i, sChecked[i].data, t->tex.width, t->tex.height, t->tex.data, (unsigned long) wrong,
+                     (unsigned long) n, (unsigned long) first, (unsigned long) values[0], (unsigned long) counts[0],
+                     (unsigned long) values[1], (unsigned long) counts[1], (unsigned long) values[2],
+                     (unsigned long) counts[2], (unsigned long) values[3], (unsigned long) counts[3]);
+            if (changed < 4) {
+                save_words("drawn", i, sChecked[i].copy, n);
+                save_words("after", i, now, n);
+            }
             changed++;
         }
+        free(sChecked[i].copy);
     }
     plat_log("after the GPU: %d of %d textures changed", changed, sNumChecked);
     sNumChecked = 0;
+}
+
+/* Where the other buffers in GPU memory are, to see what lies next to a texture that changed. */
+static void log_buffers(void) {
+    u16 w, h;
+    u8 *top0, *top1, *bottom;
+    top0 = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
+    plat_log("buffers: command list %p (%lu bytes), vertices %p (%lu bytes), white texture %p, colour %p, depth %p",
+             (void *) gpuCmdBuf, (unsigned long) gpuCmdBufSize * 4, (void *) sVbo,
+             (unsigned long) (sizeof(C3DVertex) * VBO_VERTICES), sWhiteTex.data, sTarget->frameBuf.colorBuf,
+             sTarget->frameBuf.depthBuf);
+    top1 = gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &w, &h);
+    bottom = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
+    plat_log("buffers: top screen %p / %p (%ux%u), bottom screen %p, linear heap %p (%lu bytes), %lu free",
+             (void *) top0, (void *) top1, w, h, (void *) bottom, (void *) (uintptr_t) __ctru_linear_heap,
+             (unsigned long) __ctru_linear_heap_size, (unsigned long) linearSpaceFree());
 }
 
 static void save_command_list(void) {
@@ -418,7 +478,10 @@ static void save_command_list(void) {
 void gfxb_log_draws(int snapshotFrame) {
     sLogFrame = sFrameCount;
     sSnapshotFrame = snapshotFrame;
-    sNumChecked = 0;
+    sSnapshotPending = snapshotFrame >= 0;
+    if (sSnapshotPending) {
+        log_buffers();
+    }
 }
 
 /* Called on the main thread when the application closes, once the renderer has stopped with the GPU idle. */
@@ -461,8 +524,12 @@ void gfxb_start_frame(void) {
     // The application is closing: stop here, with the GPU idle and no frame being built, so it can be shut down.
     plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
     gPlatGfxStage = "drawing";
-    if (sNumChecked > 0) {
+    if (sSnapshotPending) {
+        // The snapshot's log file is closed here, once the GPU has drawn the frame and its textures are checked.
+        sSnapshotPending = 0;
         check_textures_after_frame();
+        plat_log_copy_to(NULL);
+        plat_status("Snapshot saved (frame %d)", sSnapshotFrame);
     }
     if (sFrameCount < 3) {
         plat_log("frame %d: GPU ready", sFrameCount);
@@ -1100,7 +1167,6 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     if (gpuCmdBufOffset > gpuCmdBufSize - gpuCmdBufSize / 10) {
         // A full command buffer silently drops commands, and a half written command can hang the real GPU (an
         // emulator shrugs it off). Hand what is there to the GPU and carry on in an empty buffer instead.
-        extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
         if (sCmdBufSplits++ < 5) {
             plat_log("frame %d: command buffer full, splitting it", sFrameCount);
         }

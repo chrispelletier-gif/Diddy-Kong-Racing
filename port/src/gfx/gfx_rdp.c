@@ -1190,12 +1190,12 @@ void port_gfx_run_task(void *taskPtr) {
         sRefActive = TRUE;
         sTraceFrame = sFrameCount;
         plat_log_keep();
-        gfxb_log_draws((int) sFrameCount);
         {
             char path[256];
             plat_snprintf(path, sizeof(path), "%s/diff_%05d_log.txt", plat_data_dir(), (int) sFrameCount);
             plat_log_copy_to(path);
         }
+        gfxb_log_draws((int) sFrameCount);
         plat_log("snapshot of frame %d", (int) sFrameCount);
     }
 #endif
@@ -1220,10 +1220,7 @@ void port_gfx_run_task(void *taskPtr) {
         plat_snprintf(path, sizeof(path), "%s/diff_%05d_gpu.bin", plat_data_dir(), (int) sFrameCount);
         gfxb_capture_frame(path);
         sRefActive = FALSE;
-        if (sTraceFrame == sFrameCount) {
-            plat_log_copy_to(NULL);
-            plat_status("Snapshot saved (frame %d)", (int) sFrameCount);
-        }
+        // The renderer closes the snapshot's log once the GPU has drawn the frame.
     }
 #endif
 }
