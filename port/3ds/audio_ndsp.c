@@ -10,6 +10,8 @@
 
 #include "plat/plat.h"
 
+u32 port_audio_output_remaining_bytes(void);
+
 #define NUM_WAVEBUFS 8
 #define WAVEBUF_BYTES 8192
 
@@ -17,7 +19,7 @@ static ndspWaveBuf sWaveBufs[NUM_WAVEBUFS];
 static u8 *sSampleData;
 static u32 sWaveBufBytes[NUM_WAVEBUFS];
 static int sNextBuf;
-static int sDspAvailable;
+static volatile int sDspAvailable;
 static u32 sFrequency = 22050;
 
 /* Fallback clock used when the DSP is unavailable. */
@@ -79,6 +81,16 @@ void port_audio_output_init(u32 frequency) {
         sWaveBufs[i].status = NDSP_WBUF_DONE;
     }
     sDspAvailable = 1;
+    plat_status("Sound started");
+}
+
+/* The application is closing. Later calls see no DSP and only count time. */
+void port_audio_output_exit(void) {
+    if (sDspAvailable) {
+        sDspAvailable = 0;
+        ndspChnWaveBufClear(0);
+        ndspExit();
+    }
 }
 
 static unsigned long long fake_played_bytes(void) {
@@ -103,7 +115,11 @@ void port_audio_output_queue(const s16 *samples, u32 numBytes) {
     wb = &sWaveBufs[sNextBuf];
     if (wb->status == NDSP_WBUF_QUEUED || wb->status == NDSP_WBUF_PLAYING) {
         // Every buffer is still in flight: the game is producing faster than the DSP plays. Drop this one.
+        gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED]++;
         return;
+    }
+    if (ndspChnIsPlaying(0) == false || port_audio_output_remaining_bytes() == 0) {
+        gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN]++;
     }
     if (numBytes > WAVEBUF_BYTES) {
         numBytes = WAVEBUF_BYTES;

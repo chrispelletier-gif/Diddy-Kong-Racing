@@ -94,8 +94,10 @@ void refb_clear_depth(const short rect[4]);
 void refb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
 void refb_save_png(const char *path);
 void gfxb_capture_frame(const char *path);
+void gfxb_log_draws(int snapshotFrame);
 static s32 sDiffEvery;
 static s32 sRefActive;
+static s32 sRefInitialised;
 #define REF_CALL(call)                                                                                                 \
     do {                                                                                                               \
         if (sRefActive) {                                                                                              \
@@ -257,8 +259,19 @@ static u8 wrap_mode(u8 cm, u8 mask) {
     return (cm & G_TX_MIRROR) ? GFX_WRAP_MIRROR : GFX_WRAP_REPEAT;
 }
 
+/*
+ * Whether a cache entry has to keep its texture: the batch waiting to be drawn uses it, or the draw being set up
+ * ("pinned") already looked it up for its other tile. Replacing it would draw those triangles with another texture.
+ */
+static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
+    if (&e->tex == pinned) {
+        return TRUE;
+    }
+    return sBatchCount > 0 && (&e->tex == sBatchState.textures[0] || &e->tex == sBatchState.textures[1]);
+}
+
 /* Returns the texture for the given tile, decoding it if it isn't in the cache. */
-static GfxTexture *lookup_texture(s32 tileIndex) {
+static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     Tile *tile = &g.tiles[tileIndex & 7];
     TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63];
     u32 width, height, size, hash, i, slot, oldest;
@@ -313,17 +326,14 @@ static GfxTexture *lookup_texture(s32 tileIndex) {
     wrapT = wrap_mode(tile->cmt, tile->maskt);
 
     slot = ((uintptr_t) load->addr >> 3) % TEX_CACHE_SIZE;
-    oldest = slot;
+    oldest = TEX_CACHE_SIZE;
     for (i = 0; i < 8; i++) {
         e = &sTexCache[(slot + i) % TEX_CACHE_SIZE];
+        // The filter and wrap modes are part of the key, since changing them in place would also change them for
+        // triangles already batched with this texture.
         if (e->used && e->addr == load->addr && e->width == width && e->height == height && e->fmt == tile->fmt &&
-            e->siz == tile->siz && e->tlut == tlut && e->hash == hash && e->lineSwapped == load->lineSwapped) {
-            if (e->filter != filter || e->wrapS != wrapS || e->wrapT != wrapT) {
-                e->filter = e->tex.filter = filter;
-                e->wrapS = e->tex.wrapS = wrapS;
-                e->wrapT = e->tex.wrapT = wrapT;
-                gfxb_texture_upload(&e->tex);
-            }
+            e->siz == tile->siz && e->tlut == tlut && e->hash == hash && e->lineSwapped == load->lineSwapped &&
+            e->filter == filter && e->wrapS == wrapS && e->wrapT == wrapT) {
             e->lastFrame = sFrameCount;
             return &e->tex;
         }
@@ -331,9 +341,12 @@ static GfxTexture *lookup_texture(s32 tileIndex) {
             oldest = (slot + i) % TEX_CACHE_SIZE;
             break;
         }
-        if (e->lastFrame < sTexCache[oldest].lastFrame) {
+        if (!texture_in_use(e, pinned) && (oldest == TEX_CACHE_SIZE || e->lastFrame < sTexCache[oldest].lastFrame)) {
             oldest = (slot + i) % TEX_CACHE_SIZE;
         }
+    }
+    if (oldest == TEX_CACHE_SIZE) {
+        return NULL; // Can't happen: at most three of the eight entries are in use.
     }
 
     e = &sTexCache[oldest];
@@ -343,6 +356,7 @@ static GfxTexture *lookup_texture(s32 tileIndex) {
     }
     pixels = plat_malloc(width * height * 4);
     if (pixels == NULL) {
+        gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
         e->used = FALSE;
         return NULL;
     }
@@ -541,10 +555,10 @@ static void build_draw_state(GfxDrawState *s, s32 isRect) {
     }
 
     if (usesTex0 || cyc == G_CYC_COPY) {
-        s->textures[0] = lookup_texture(isRect ? (g.rdpHalf1 >> 0) & 7 : 0);
+        s->textures[0] = lookup_texture(isRect ? (g.rdpHalf1 >> 0) & 7 : 0, NULL);
     }
     if (usesTex1) {
-        s->textures[1] = lookup_texture(isRect ? ((g.rdpHalf1 + 1) & 7) : 1);
+        s->textures[1] = lookup_texture(isRect ? ((g.rdpHalf1 + 1) & 7) : 1, s->textures[0]);
     }
 }
 
@@ -570,9 +584,21 @@ static void flush_batch(void) {
     if (sBatchCount > 0) {
         if (sFrameCount == sTraceFrame) {
             const GfxVertex *v = &sBatchVerts[0];
+            float minU = v->u0, maxU = v->u0, minV = v->v0, maxV = v->v0, minW = v->w, maxW = v->w;
+            s32 i;
+            for (i = 1; i < sBatchCount * 3; i++) {
+                const GfxVertex *o = &sBatchVerts[i];
+                minU = (o->u0 < minU) ? o->u0 : minU;
+                maxU = (o->u0 > maxU) ? o->u0 : maxU;
+                minV = (o->v0 < minV) ? o->v0 : minV;
+                maxV = (o->v0 > maxV) ? o->v0 : maxV;
+                minW = (o->w < minW) ? o->w : minW;
+                maxW = (o->w > maxW) ? o->w : maxW;
+            }
             trace_state(&sBatchState, sBatchCount);
             plat_log("    v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d", v->x, v->y, v->z, v->w, v->u0, v->v0,
                      v->r, v->g, v->b, v->a);
+            plat_log("    u %.3f..%.3f v %.3f..%.3f w %.1f..%.1f", minU, maxU, minV, maxV, minW, maxW);
         }
         gfxb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount);
         REF_CALL(refb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount));
@@ -1136,6 +1162,7 @@ void port_gfx_init(void) {
             sDiffEvery = (diff != NULL) ? port_atoi(diff) : 0;
             if (sDiffEvery > 0) {
                 refb_init();
+                sRefInitialised = TRUE;
             }
         }
 #endif
@@ -1151,6 +1178,27 @@ void port_gfx_run_task(void *taskPtr) {
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
 #endif
     gfxb_start_frame();
+#ifdef PORT_GFX_REFERENCE
+    if (gPlatSnapshotRequested) {
+        // A snapshot: the frame is also drawn by the reference renderer, both images are saved as for DKR_DIFF_EVERY,
+        // and every draw is logged.
+        gPlatSnapshotRequested = 0;
+        if (!sRefInitialised) {
+            refb_init();
+            sRefInitialised = TRUE;
+        }
+        sRefActive = TRUE;
+        sTraceFrame = sFrameCount;
+        plat_log_keep();
+        {
+            char path[256];
+            plat_snprintf(path, sizeof(path), "%s/diff_%05d_log.txt", plat_data_dir(), (int) sFrameCount);
+            plat_log_copy_to(path);
+        }
+        gfxb_log_draws((int) sFrameCount);
+        plat_log("snapshot of frame %d", (int) sFrameCount);
+    }
+#endif
     REF_CALL(refb_start_frame());
     g.vertexIndex = 0;
     g.billboard = 0;
@@ -1158,8 +1206,10 @@ void port_gfx_run_task(void *taskPtr) {
         g.scissor[2] = GFX_SCREEN_WIDTH;
         g.scissor[3] = GFX_SCREEN_HEIGHT;
     }
+    gPlatGfxStage = "running a display list";
     run_dl((const Gfx *) task->t.data_ptr, -1);
     flush_batch();
+    gPlatGfxStage = "ending the frame";
     gfxb_end_frame();
 #ifdef PORT_GFX_REFERENCE
     if (sRefActive) {
@@ -1170,6 +1220,7 @@ void port_gfx_run_task(void *taskPtr) {
         plat_snprintf(path, sizeof(path), "%s/diff_%05d_gpu.bin", plat_data_dir(), (int) sFrameCount);
         gfxb_capture_frame(path);
         sRefActive = FALSE;
+        // The renderer closes the snapshot's log once the GPU has drawn the frame.
     }
 #endif
 }

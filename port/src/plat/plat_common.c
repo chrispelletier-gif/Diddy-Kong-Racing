@@ -7,6 +7,11 @@
 #include <string.h>
 #include <dirent.h>
 
+volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
+const char *volatile gPlatGfxStage = "not started";
+volatile int gPlatSnapshotRequested;
+volatile int gPlatGfxTest;
+
 void *plat_load_file(const char *path, unsigned int *size) {
     FILE *f = fopen(path, "rb");
     long len;
@@ -31,6 +36,18 @@ void *plat_load_file(const char *path, unsigned int *size) {
     fclose(f);
     *size = (unsigned int) len;
     return data;
+}
+
+int plat_load_file_start(const char *path, void *data, unsigned int size) {
+    FILE *f = fopen(path, "rb");
+    size_t got;
+
+    if (f == NULL) {
+        return -1;
+    }
+    got = fread(data, 1, size, f);
+    fclose(f);
+    return (int) got;
 }
 
 int plat_save_file(const char *path, const void *data, unsigned int size) {

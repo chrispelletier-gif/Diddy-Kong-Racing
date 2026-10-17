@@ -18,8 +18,8 @@ SYS_CFLAGS += -I$(BUILD_DIR)/shader
 
 $(SHADER_BIN): $(SHADER_SRC)
 	@mkdir -p $(dir $@)
-	@echo "PICASSO $<"
-	@$(TOOLS_BIN)/picasso -o $@ $<
+	@echo "PICASSO $^"
+	@$(TOOLS_BIN)/picasso -o $@ $^
 
 $(SHADER_ASM) $(SHADER_HDR): $(SHADER_BIN)
 	@cd $(dir $<) && $(TOOLS_BIN)/bin2s -a 4 -H shader_shbin.h shader.shbin > shader_shbin.s

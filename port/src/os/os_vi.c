@@ -26,6 +26,7 @@ static void vi_thread(void *arg) {
         plat_intlock_lock();
         sViCurrentFramebuffer = sViNextFramebuffer;
         sViRetraceCounter++;
+        gPlatCounters[PLAT_COUNTER_VI]++;
         if (sViEventQueue != NULL && sViRetraceCounter >= sViRetraceCount) {
             sViRetraceCounter = 0;
             port_post_mesg(sViEventQueue, sViEventMsg);

@@ -61,11 +61,29 @@ static s32 normalise_rom_byte_order(u8 *rom, u32 size) {
     return FALSE;
 }
 
+/* Checks the internal name in the header first, so that other ROMs on the SD card are not read in full. */
+static s32 is_dkr_header(const char *path) {
+    static u8 header[0x1000];
+    s32 got = plat_load_file_start(path, header, sizeof(header));
+
+    if (got < 0) {
+        return PORT_ROM_NOT_FOUND;
+    }
+    if (got != (s32) sizeof(header) || !normalise_rom_byte_order(header, sizeof(header))) {
+        return PORT_ROM_NOT_N64;
+    }
+    return (bcmp(header + 0x20, "Diddy Kong Racing", 17) == 0) ? PORT_ROM_OK : PORT_ROM_NOT_DKR;
+}
+
 s32 port_rom_load(const char *path) {
     unsigned int size;
     u32 count, lutStart, lutEnd;
     u8 *data;
+    s32 headerResult = is_dkr_header(path);
 
+    if (headerResult != PORT_ROM_OK) {
+        return headerResult;
+    }
     data = plat_load_file(path, &size);
     if (data == NULL) {
         return PORT_ROM_NOT_FOUND;

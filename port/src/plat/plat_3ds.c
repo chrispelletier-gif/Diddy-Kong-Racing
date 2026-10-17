@@ -2,10 +2,14 @@
 #include "plat.h"
 
 #include <3ds.h>
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+extern u32 __ctru_heap_size;
+extern void (*__system_retAddr)(void);
 
 /*
  * All emulated N64 threads run on the application core so that, like on the N64, only one of them executes
@@ -33,6 +37,9 @@ static LightLock sIntLock;
 static __thread void *sCurrentOsThread;
 static int sRcpCore;
 static int sAudioCore;
+static LightLock sConsoleLock;
+
+static void watchdog_start(void);
 
 static int prio_from_n64(int n64Priority) {
     int prio;
@@ -53,19 +60,26 @@ void plat_init(void) {
     LightLock_Init(&sKernelLock);
     CondVar_Init(&sKernelCond);
     LightLock_Init(&sIntLock);
+    LightLock_Init(&sConsoleLock);
 
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
+    // DKR_SINGLE_CORE=1 keeps everything on the application core, as on an Old 3DS.
     APT_CheckNew3DS(&isNew3DS);
     if (isNew3DS) {
         osSetSpeedupEnable(true);
-        sRcpCore = 2;
-    } else {
-        sRcpCore = 0;
     }
+    sRcpCore = (isNew3DS && plat_getenv("DKR_SINGLE_CORE") == NULL) ? 2 : 0;
+    plat_status("%s, renderer on core %d", isNew3DS ? "New 3DS" : "Old 3DS", sRcpCore);
     // The scheduler cannot start the next frame while an audio task is running, so audio tasks must finish quickly:
-    // they run next to the renderer at the same high priority. (The system core, which only gives applications a
+    // they run next to the renderer, at a higher priority. (The system core, which only gives applications a
     // share of its time, made them take several times longer.)
     sAudioCore = sRcpCore;
+    watchdog_start();
+    {
+        // citro3d is set up (and the GPU self test run) on the main thread, as in SM64's 3DS port.
+        extern void gfxb_init(void);
+        gfxb_init();
+    }
 }
 
 /*
@@ -98,6 +112,86 @@ unsigned long long plat_idle_ns(void) {
 void plat_shutdown(void) {
 }
 
+static volatile int sQuitting;
+static volatile int sRendererParked;
+static volatile int sPauseRequested;
+static volatile int sRendererPaused;
+
+/*
+ * Called by the renderer at the start of each frame (with the GPU idle) and while it waits for the GPU. Holds it while
+ * the application is suspended (see plat_3ds_pause_renderer), and parks it for good once the application is closing
+ * (see plat_3ds_exit).
+ */
+void plat_3ds_quit_point(int parkedState) {
+    if (parkedState == PLAT_3DS_PARKED_GPU_IDLE) {
+        while (sPauseRequested && !sQuitting) {
+            sRendererPaused = 1;
+            svcSleepThread(1000000);
+        }
+        sRendererPaused = 0;
+    }
+    if (!sQuitting) {
+        return;
+    }
+    sRendererParked = parkedState;
+    for (;;) {
+        svcSleepThread(1000000000LL);
+    }
+}
+
+/*
+ * The HOME menu takes the GPU away while the application is suspended. The renderer kept drawing frames meanwhile,
+ * and the GPU hung when the game was resumed. So it waits at the start of a frame, with the GPU idle, until the
+ * application is restored.
+ */
+void plat_3ds_pause_renderer(int pause) {
+    unsigned long long start = plat_time_ns();
+    sPauseRequested = pause;
+    if (!pause) {
+        return;
+    }
+    while (!sRendererPaused && plat_time_ns() - start < 2000000000ULL) {
+        svcSleepThread(1000000);
+    }
+}
+
+void port_audio_output_exit(void);
+void gfxb_3ds_shutdown(void);
+
+/*
+ * Ends the application. Returning from main would unmap the heap while the game's threads still run on it (their
+ * stacks live there too), which crashed the whole system on exit. Instead the renderer is stopped, the sound and the
+ * GPU are shut down, APT is told the application has closed, and the process ends, which stops every thread at once.
+ */
+void plat_3ds_exit(void) {
+    unsigned long long start = plat_time_ns();
+
+    sQuitting = 1;
+    while (sRendererParked == 0 && plat_time_ns() - start < 1000000000ULL) {
+        svcSleepThread(1000000);
+    }
+    port_audio_output_exit();
+    // Nothing may use the bottom screen console once the screens are gone: hold its lock for good.
+    LightLock_Lock(&sConsoleLock);
+    if (sRendererParked == PLAT_3DS_PARKED_GPU_IDLE) {
+        gfxb_3ds_shutdown();
+    }
+    if (sRendererParked != 0) {
+        gfxExit();
+    }
+    {
+        // When the system closed the application, aptExit leaves the last step, telling the HOME menu the
+        // application has closed, to the exit code (which would run it after freeing the heap). Without it the HOME
+        // menu crashed when it next launched something. It also ends the process.
+        void (*before)(void) = __system_retAddr;
+        aptExit();
+        if (__system_retAddr != before && __system_retAddr != NULL) {
+            __system_retAddr();
+        }
+    }
+    svcExitProcess();
+}
+
 static void thread_entry(void *arg) {
     PlatThread *thread = (PlatThread *) arg;
     thread->func(thread->arg);
@@ -122,7 +216,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             stackSize = 128 * 1024;
             break;
         case PLAT_THREAD_AUDIO:
-            prio = PRIO_RCP;
+            // Above the renderer: 3DS threads of equal priority never preempt each other, so an audio task that
+            // arrives while a frame is being drawn would otherwise wait for the whole frame and the sound would
+            // run dry.
+            prio = PRIO_HARDWARE;
             core = sAudioCore;
             stackSize = 64 * 1024;
             break;
@@ -133,8 +230,11 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
     }
     thread->handle = threadCreate(thread_entry, thread, stackSize, prio, core, true);
     if (thread->handle == NULL && core != 0) {
+        plat_log("thread %s: core %d unavailable, using core 0", name, core);
+        core = 0;
         thread->handle = threadCreate(thread_entry, thread, stackSize, prio, 0, true);
     }
+    plat_log("thread %s: priority 0x%X, core %d", name, prio, core);
     if (thread->handle == NULL) {
         plat_fatal("Could not create thread %s", name);
     }
@@ -225,7 +325,17 @@ const char *plat_data_dir(void) {
     return "sdmc:/3ds/dkr";
 }
 
-/* Creating sdmc:/3ds/dkr/debug turns on logging to sdmc:/3ds/dkr/log.txt. */
+/*
+ * The start-up is always logged to sdmc:/3ds/dkr/log.txt (the first LOG_BOOT_LINES lines), so there is something to
+ * look at if the game does not start. Creating sdmc:/3ds/dkr/debug keeps logging after that.
+ */
+#define LOG_BOOT_LINES 200
+
+static LightLock sLogLock;
+static int sLogLines;
+static int sLogDebug;
+static FILE *sLogCopy;
+
 static FILE *log_file(void) {
     static int sChecked;
     static FILE *sFile;
@@ -234,28 +344,150 @@ static FILE *log_file(void) {
         sChecked = 1;
         if (flag != NULL) {
             fclose(flag);
-            sFile = fopen("sdmc:/3ds/dkr/log.txt", "w");
+            sLogDebug = 1;
         }
+        sFile = fopen("sdmc:/3ds/dkr/log.txt", "w");
+    }
+    if (!sLogDebug && sLogLines >= LOG_BOOT_LINES) {
+        return NULL;
     }
     return sFile;
 }
 
-void plat_log(const char *fmt, ...) {
-    char buffer[256];
+static void log_line(const char *prefix, const char *text) {
+    static int sLockReady;
     FILE *file;
+    if (!sLockReady) {
+        // The first line is logged from the main thread before any other thread exists.
+        LightLock_Init(&sLogLock);
+        sLockReady = 1;
+    }
+    LightLock_Lock(&sLogLock);
+    file = log_file();
+    if (file != NULL) {
+        fprintf(file, "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+        fflush(file);
+        sLogLines++;
+    }
+    if (sLogCopy != NULL) {
+        fprintf(sLogCopy, "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+    }
+    LightLock_Unlock(&sLogLock);
+}
+
+void plat_log_keep(void) {
+    sLogDebug = 1;
+}
+
+/* Snapshots get a log file of their own: some ways of copying files off the SD card kept serving an old log.txt. */
+void plat_log_copy_to(const char *path) {
+    FILE *file = (path != NULL) ? fopen(path, "w") : NULL;
+    FILE *old;
+    LightLock_Lock(&sLogLock);
+    old = sLogCopy;
+    sLogCopy = file;
+    LightLock_Unlock(&sLogLock);
+    if (old != NULL) {
+        fclose(old);
+    }
+    if (file != NULL) {
+        struct mallinfo info = mallinfo();
+        plat_log("free memory: gpu %lu KB, heap %lu KB; texture failures %u, sound gaps %u, drops %u",
+                 (unsigned long) (linearSpaceFree() / 1024),
+                 (unsigned long) ((info.fordblks + (__ctru_heap_size - info.arena)) / 1024),
+                 gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED], gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN],
+                 gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED]);
+    }
+}
+
+void plat_log(const char *fmt, ...) {
+    char buffer[512];
     va_list args;
     va_start(args, fmt);
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     svcOutputDebugString(buffer, strlen(buffer));
-    file = log_file();
-    if (file != NULL) {
-        fprintf(file, "%s\n", buffer);
-        fflush(file);
-    }
+    log_line("", buffer);
 #ifdef PORT_DEBUG_CONSOLE
     printf("%s\n", buffer);
 #endif
+}
+
+/* Makes what the console wrote visible: nothing else flushes the bottom screen's framebuffer from the CPU cache. */
+static void console_flush(void) {
+    u16 width, height;
+    u8 *fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &width, &height);
+    GSPGPU_FlushDataCache(fb, width * height * 2);
+}
+
+/* The bottom screen console is the current one (see main_3ds.c). */
+void plat_status(const char *fmt, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    log_line("", buffer);
+    LightLock_Lock(&sConsoleLock);
+    printf("  %s\n", buffer);
+    console_flush();
+    LightLock_Unlock(&sConsoleLock);
+}
+
+/*
+ * The watchdog shows the progress counters (plat.h) at the bottom of the bottom screen once a second, and logs them
+ * every few seconds for the first minute. Its thread has the highest priority an application can use, so it keeps
+ * running even if a game thread never yields; if its line stops updating, the whole system is stuck (for example
+ * the GPU).
+ */
+static void watchdog(void *arg) {
+    unsigned int last[PLAT_COUNTER_COUNT];
+    int seconds = 0;
+
+    (void) arg;
+    memset(last, 0, sizeof(last));
+    for (;;) {
+        char line[2][64];
+        unsigned int now[PLAT_COUNTER_COUNT];
+        int i;
+
+        svcSleepThread(1000000000LL);
+        seconds++;
+        for (i = 0; i < PLAT_COUNTER_COUNT; i++) {
+            now[i] = gPlatCounters[i];
+        }
+        snprintf(line[0], sizeof(line[0]), "%3ds vi%+4d gfx %u/%u aud%+4d sys%+3d", seconds,
+                 (int) (now[PLAT_COUNTER_VI] - last[PLAT_COUNTER_VI]), now[PLAT_COUNTER_GFX_QUEUED],
+                 now[PLAT_COUNTER_GFX_DONE], (int) (now[PLAT_COUNTER_AUDIO] - last[PLAT_COUNTER_AUDIO]),
+                 (int) (now[PLAT_COUNTER_MAIN] - last[PLAT_COUNTER_MAIN]));
+        // Sound gaps and drops, textures without memory, free GPU (linear) and CPU (heap) memory in tenths of a MB.
+        {
+            struct mallinfo info = mallinfo();
+            unsigned long gpuFree = linearSpaceFree() / (1024 * 1024 / 10);
+            unsigned long heapFree = (info.fordblks + (__ctru_heap_size - info.arena)) / (1024 * 1024 / 10);
+            snprintf(line[1], sizeof(line[1]), "gap %u drop %u tex %u gpu %lu.%luM heap %lu.%luM",
+                     now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED],
+                     now[PLAT_COUNTER_TEXTURE_FAILED], gpuFree / 10, gpuFree % 10, heapFree / 10, heapFree % 10);
+        }
+        memcpy(last, now, sizeof(last));
+
+        // Two fixed rows at the bottom; the cursor is put back for the start-up lines.
+        LightLock_Lock(&sConsoleLock);
+        printf("\x1b[s\x1b[29;1H\x1b[2K%.39s\x1b[30;1H\x1b[2K%.39s\x1b[u", line[0], line[1]);
+        console_flush();
+        LightLock_Unlock(&sConsoleLock);
+
+        if (seconds % 5 == 0 && seconds <= 60) {
+            log_line("watchdog: ", line[0]);
+            log_line("watchdog: ", line[1]);
+        }
+    }
+}
+
+static void watchdog_start(void) {
+    if (threadCreate(watchdog, NULL, 8 * 1024, 0x18, 0, true) == NULL) {
+        plat_log("watchdog: could not create its thread");
+    }
 }
 
 void plat_fatal(const char *fmt, ...) {
@@ -267,13 +499,7 @@ void plat_fatal(const char *fmt, ...) {
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     svcOutputDebugString(buffer, strlen(buffer));
-    {
-        FILE *file = log_file();
-        if (file != NULL) {
-            fprintf(file, "FATAL: %s\n", buffer);
-            fflush(file);
-        }
-    }
+    log_line("FATAL: ", buffer);
 
     // Shown as text on the top screen (the system error dialog does not appear in every emulator).
     consoleInit(GFX_TOP, &sTopConsole);

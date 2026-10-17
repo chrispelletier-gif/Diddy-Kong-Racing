@@ -190,6 +190,21 @@ void plat_log(const char *fmt, ...) {
     fputc('\n', stderr);
 }
 
+void plat_log_keep(void) {
+}
+
+void plat_log_copy_to(const char *path) {
+    (void) path;
+}
+
+void plat_status(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fputc('\n', stderr);
+}
+
 void plat_fatal(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);

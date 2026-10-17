@@ -120,10 +120,15 @@ void port_boot(void) {
     char path[256];
     s32 result;
 
+    unsigned long long start;
+
     plat_init();
+    plat_status("Loading the ROM...");
+    start = plat_time_ns();
     result = find_rom(path, sizeof(path));
     switch (result) {
         case PORT_ROM_OK:
+            plat_status("ROM loaded in %.1f s", (plat_time_ns() - start) / 1e9);
             port_log("Using ROM %s", path);
             break;
         case PORT_ROM_WRONG_VERSION:
@@ -139,5 +144,6 @@ void port_boot(void) {
     port_si_init();
     port_vi_init();
     port_rcp_init();
+    plat_status("Starting the game...");
     mainproc();
 }

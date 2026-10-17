@@ -70,6 +70,8 @@ int plat_main_loop_iteration(void);
 /* Whole file helpers. plat_load_file returns a malloc'd buffer (or NULL) and writes the size to *size. */
 void *plat_load_file(const char *path, unsigned int *size);
 int plat_save_file(const char *path, const void *data, unsigned int size);
+/* Reads up to size bytes from the start of a file. Returns the number read, or -1 if it cannot be opened. */
+int plat_load_file_start(const char *path, void *data, unsigned int size);
 void *plat_malloc(size_t size);
 void plat_free(void *ptr);
 int plat_snprintf(char *buf, size_t size, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
@@ -90,7 +92,46 @@ const char *const *plat_rom_search_dirs(void);
 const char *plat_data_dir(void);
 
 void plat_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* A start-up progress line: shown on the bottom screen on the 3DS, and logged. */
+void plat_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void plat_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
+/* Keeps logging after the start-up lines, which the 3DS otherwise stops at to spare the SD card. */
+void plat_log_keep(void);
+/* Also writes log lines to this file until called with NULL, which closes it (3DS only). */
+void plat_log_copy_to(const char *path);
+
+/*
+ * 3DS only: closing the application. The game's threads keep running until the process ends, so the renderer stops
+ * at a quit point first (saying whether the GPU was idle), and the process ends without freeing their memory.
+ */
+enum { PLAT_3DS_PARKED_GPU_IDLE = 1, PLAT_3DS_PARKED_GPU_BUSY = 2 };
+void plat_3ds_quit_point(int parkedState);
+void plat_3ds_pause_renderer(int pause);
+void plat_3ds_exit(void) __attribute__((noreturn));
+
+/* Set when the player asks for a snapshot of the next frame (3DS: by touching the bottom screen). */
+extern volatile int gPlatSnapshotRequested;
+/* Graphics test mode for finding hardware drawing faults (3DS: touching the top half of the bottom screen cycles it). */
+extern volatile int gPlatGfxTest;
+
+/*
+ * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
+ * stops counting says which part of the game stopped.
+ */
+enum PlatCounter {
+    PLAT_COUNTER_VI,         /* Retraces seen by the VI thread. */
+    PLAT_COUNTER_GFX_QUEUED, /* Display lists handed to the RCP by the game. */
+    PLAT_COUNTER_GFX_DONE,   /* Display lists the renderer has finished. */
+    PLAT_COUNTER_AUDIO,      /* Audio tasks run. */
+    PLAT_COUNTER_MAIN,       /* Main (system) loop iterations. */
+    PLAT_COUNTER_AUDIO_UNDERRUN, /* Sound buffers queued after the output had run dry (a gap in the sound). */
+    PLAT_COUNTER_AUDIO_DROPPED,  /* Sound buffers dropped because the output was full. */
+    PLAT_COUNTER_TEXTURE_FAILED, /* Textures the GPU had no memory for (drawn white instead). */
+    PLAT_COUNTER_COUNT
+};
+extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
+/* What the renderer thread is doing right now. */
+extern const char *volatile gPlatGfxStage;
 
 #ifdef __cplusplus
 }

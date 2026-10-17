@@ -24,16 +24,18 @@
 #define TOP_HEIGHT 240
 #define VBO_VERTICES (3 * 24 * 1024)
 
+/* What the vertex shader receives: positions already in the 3DS screen's clip space, colours from 0 to 1. */
 typedef struct C3DVertex {
     float pos[4];
     float tc0[2];
     float tc1[2];
-    unsigned char color[4];
+    float color[4];
 } C3DVertex;
 
 typedef struct C3DTexture {
     C3D_Tex tex;
     float scaleU, scaleV;
+    int resample;
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
@@ -41,13 +43,19 @@ static C3D_RenderTarget *sTarget;
 static int sRenderScale = 1;
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
-static int sLocProjection, sLocTexScale, sLocTexOffset;
 static C3DVertex *sVbo;
 static int sVboUsed;
 static C3D_Tex sWhiteTex;
+extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
 static int sFrameStarted;
 static int sDepthOnly;
 static int sFrameCount, sFrameTriangles;
+/* For the hang report: the size of the last frame handed to the GPU. */
+static int sLastFrameTriangles;
+static float sLastFrameUsage;
+static int sCmdBufSplits;
+/* Command list splits made this frame to let the GPU finish before a blended draw (see drain_before_draw). */
+static int sDrainSplits, sLastDrainSplits;
 
 /* The N64 picture is 320 pixels wide; by default it is shown centred on the 400 pixel wide top screen. */
 static float sScreenScaleX = 320.0f / 400.0f;
@@ -58,29 +66,196 @@ static int sNumPendingFrees, sPendingFreesCapacity;
 
 /******************************** Setup ********************************/
 
-static void set_projection(void) {
-    C3D_Mtx m;
-    /*
-     * Rows of the matrix applied to the clip space position (x, y, z, w):
-     *  - x is scaled into the middle of the screen,
-     *  - z is remapped from [-w, w] (near to far) to [-w, 0] with depth = -z / w, so nearer is larger,
-     *  - then everything is rotated a quarter turn for the 3DS screen: x' = y, y' = -x.
-     */
-    Mtx_Zeros(&m);
-    m.r[0].y = 1.0f;          // x' = y
-    m.r[1].x = -sScreenScaleX; // y' = -x * scale
-    m.r[2].z = 0.5f;          // z' = (z - w) / 2
-    m.r[2].w = -0.5f;
-    m.r[3].w = 1.0f;
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sLocProjection, &m);
+/*
+ * Vertices arrive in clip space for the N64 screen. To fit them to the 3DS top screen (in gfxb_draw_triangles):
+ *  - x is scaled into the middle of the screen,
+ *  - z is remapped from [-w, w] (near to far) to [-w, 0] with depth = -z / w, so nearer is larger; the N64 has no far
+ *    plane, so anything beyond it is pinned to the farthest depth instead of being clipped,
+ *  - then everything is rotated a quarter turn for the 3DS screen: x' = y, y' = -x.
+ */
+static void to_screen(const GfxVertex *v, C3DVertex *out) {
+    float z = 0.5f * (v->z - v->w);
+    out->pos[0] = v->y;
+    out->pos[1] = -v->x * sScreenScaleX;
+    out->pos[2] = z < 0.0f ? z : 0.0f;
+    out->pos[3] = v->w;
+}
+
+/*
+ * GPU self test, for finding what hangs a real 3DS when an emulator copes. Before the game starts, a few frames are
+ * drawn that each add one feature of the renderer to the one before, and the bottom screen says which one never
+ * finished. Skipped with DKR_NO_GPU_TEST=1.
+ */
+static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
+static void apply_combiner(const GfxDrawState *state);
+static void apply_fog(const GfxDrawState *state);
+
+static int sGpuTestStep;
+
+static void gpu_test_wait(const char *what) {
+    unsigned long long start = plat_time_ns();
+    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        if (plat_time_ns() - start > 2000000000ULL) {
+            plat_status("GPU test %d HUNG: %s", sGpuTestStep, what);
+            gPlatGfxStage = "GPU test hung";
+            for (;;) {
+                plat_sleep_ns(1000000000ULL);
+            }
+        }
+        plat_sleep_ns(250000);
+    }
+    C3D_FrameEnd(0); // Nothing in it: only used to wait for the GPU.
+}
+
+static void gpu_test_triangle(C3DVertex *v) {
+    static const float xs[3] = { -0.5f, 0.5f, 0.0f }, ys[3] = { -0.5f, -0.5f, 0.5f };
+    int i;
+    for (i = 0; i < 3; i++) {
+        memset(&v[i], 0, sizeof(v[i]));
+        v[i].pos[0] = xs[i];
+        v[i].pos[1] = ys[i];
+        v[i].pos[3] = 1.0f;
+        v[i].color[0] = v[i].color[1] = v[i].color[2] = v[i].color[3] = 1.0f;
+    }
+}
+
+static void gpu_test_step(const char *what) {
+    sGpuTestStep++;
+    plat_log("GPU test %d: %s", sGpuTestStep, what);
+    gpu_test_wait(what);
+    C3D_FrameBegin(0);
+    C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+    C3D_FrameDrawOn(sTarget);
+}
+
+static void gpu_test_end(const char *what) {
+    C3D_FrameEnd(0);
+    gpu_test_wait(what);
+}
+
+static void gpu_self_test(void) {
+    static const char *const sNames[] = {
+        "empty frame",
+        "triangle",
+        "+ texture unit 1",
+        "+ fog unit off",
+        "+ scissor",
+        "+ depth test",
+        "+ game combiner",
+        "+ fog table",
+        "game clear rectangles",
+    };
+    GfxDrawState state;
+    C3D_TexEnv *env;
+    int i;
+
+    if (plat_getenv("DKR_NO_GPU_TEST") != NULL) {
+        return;
+    }
+    plat_status("GPU test...");
+    gPlatGfxStage = "GPU test";
+
+    // 1: an empty frame, like the game's first one.
+    gpu_test_step(sNames[0]);
+    gpu_test_end(sNames[0]);
+
+    // 2: one flat triangle with the simplest state.
+    gpu_test_step(sNames[1]);
+    gpu_test_triangle(sVbo);
+    C3D_TexBind(0, &sWhiteTex);
+    env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    for (i = 1; i < 6; i++) {
+        C3D_TexEnvInit(C3D_GetTexEnv(i));
+    }
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[1]);
+
+    // 3 to 8: add the renderer's features one at a time.
+    gpu_test_step(sNames[2]);
+    gpu_test_triangle(sVbo);
+    C3D_TexBind(1, &sWhiteTex);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[2]);
+
+    gpu_test_step(sNames[3]);
+    gpu_test_triangle(sVbo);
+    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[3]);
+
+    gpu_test_step(sNames[4]);
+    gpu_test_triangle(sVbo);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, 40, 40, 200, 360);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[4]);
+
+    gpu_test_step(sNames[5]);
+    gpu_test_triangle(sVbo);
+    C3D_DepthTest(true, GPU_GEQUAL, GPU_WRITE_ALL);
+    C3D_DepthMap(true, -1.0f, 0.0002f);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[5]);
+
+    memset(&state, 0, sizeof(state));
+    state.combiner.numCycles = 1;
+    state.combiner.rgb[0].a = GFX_CC_TEXEL0;
+    state.combiner.rgb[0].b = GFX_CC_ZERO;
+    state.combiner.rgb[0].c = GFX_CC_SHADE;
+    state.combiner.rgb[0].d = GFX_CC_ZERO;
+    state.combiner.alpha[0] = state.combiner.rgb[0];
+    state.prim[0] = state.prim[1] = state.prim[2] = state.prim[3] = 255;
+
+    gpu_test_step(sNames[6]);
+    gpu_test_triangle(sVbo);
+    apply_combiner(&state);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    gpu_test_end(sNames[6]);
+
+    gpu_test_step(sNames[7]);
+    gpu_test_triangle(sVbo);
+    state.fogEnabled = 1;
+    state.fogMul = 256;
+    state.fogOffset = -100;
+    apply_fog(&state);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    state.fogEnabled = 0;
+    apply_fog(&state);
+    gpu_test_end(sNames[7]);
+
+    gpu_test_step(sNames[8]);
+    {
+        static const short sFull[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
+        sVboUsed = 0;
+        draw_clear_rect(sFull, 0x204080FF, 0);
+        draw_clear_rect(sFull, 0, 1);
+        sVboUsed = 0;
+        sFrameTriangles = 0;
+    }
+    gpu_test_end(sNames[8]);
+
+    plat_status("GPU test passed");
 }
 
 void gfxb_init(void) {
+    static int sDone;
     C3D_AttrInfo *attr;
     C3D_BufInfo *buf;
     u32 white[64];
     int i;
 
+    // Called early from the main thread (plat_init), and again by the renderer thread.
+    if (sDone) {
+        return;
+    }
+    sDone = 1;
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
     {
         // Anti-aliasing is on unless DKR_AA=0. The doubled target needs 3MB of VRAM, so fall back if it does not fit.
@@ -96,23 +271,20 @@ void gfxb_init(void) {
         }
         C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT,
                                   DISPLAY_TRANSFER_FLAGS(sRenderScale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO));
-        plat_log("render scale %d", sRenderScale);
+        plat_status("Graphics started%s", sRenderScale == 2 ? " (anti-aliased)" : "");
     }
 
     sShaderDvlb = DVLB_ParseFile((u32 *) shader_shbin, shader_shbin_size);
     shaderProgramInit(&sProgram);
     shaderProgramSetVsh(&sProgram, &sShaderDvlb->DVLE[0]);
     C3D_BindProgram(&sProgram);
-    sLocProjection = shaderInstanceGetUniformLocation(sProgram.vertexShader, "projection");
-    sLocTexScale = shaderInstanceGetUniformLocation(sProgram.vertexShader, "texScale");
-    sLocTexOffset = shaderInstanceGetUniformLocation(sProgram.vertexShader, "texOffset");
 
     attr = C3D_GetAttrInfo();
     AttrInfo_Init(attr);
     AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
     AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
     AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4);
+    AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 4);
 
     sVbo = linearAlloc(sizeof(C3DVertex) * VBO_VERTICES);
     buf = C3D_GetBufInfo();
@@ -125,8 +297,8 @@ void gfxb_init(void) {
     C3D_TexInit(&sWhiteTex, 8, 8, GPU_RGBA8);
     C3D_TexUpload(&sWhiteTex, white);
 
-    set_projection();
     C3D_DepthMap(true, -1.0f, 0.0f);
+    gpu_self_test();
 }
 
 /******************************** Frames ********************************/
@@ -173,6 +345,152 @@ static void capture_pending_frame(void) {
     sCapturePath[0] = '\0';
 }
 
+static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
+
+static int sLogFrame = -2; // Frame whose draws are logged (DKR_LOG_DRAWS, or a snapshot)
+static int sSnapshotFrame = -1;
+
+/*
+ * Snapshots also check that the textures the frame used still hold the same data once the GPU has drawn it (they are
+ * checked when drawn too), and save the frame's GPU command list, to see exactly what the GPU was told.
+ */
+#define MAX_CHECKED_TEXTURES 512
+static struct {
+    const C3DTexture *tex;
+    const void *data;
+    u32 *copy; // What the memory held when the texture was drawn
+} sChecked[MAX_CHECKED_TEXTURES];
+static int sNumChecked;
+static int sSnapshotPending;
+
+static u32 texture_words(const C3DTexture *t) {
+    return t->tex.width * t->tex.height;
+}
+
+/* Makes the CPU see the memory the GPU reads (flushing first, so nothing the CPU wrote is thrown away). */
+static void sync_from_memory(const void *data, u32 size) {
+    GSPGPU_FlushDataCache(data, size);
+    GSPGPU_InvalidateDataCache(data, size);
+}
+
+static void remember_texture(const C3DTexture *t) {
+    u32 size = texture_words(t) * 4;
+    u32 *copy;
+    int i;
+    for (i = 0; i < sNumChecked; i++) {
+        if (sChecked[i].tex == t) {
+            return;
+        }
+    }
+    if (sNumChecked == MAX_CHECKED_TEXTURES || (copy = malloc(size)) == NULL) {
+        return;
+    }
+    sync_from_memory(t->tex.data, size);
+    memcpy(copy, t->tex.data, size);
+    sChecked[sNumChecked].tex = t;
+    sChecked[sNumChecked].data = t->tex.data;
+    sChecked[sNumChecked].copy = copy;
+    sNumChecked++;
+}
+
+static void save_words(const char *what, int index, const void *data, u32 words) {
+    char path[256];
+    FILE *f;
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_tex%d_%s.bin", plat_data_dir(), sSnapshotFrame, index, what);
+    f = fopen(path, "wb");
+    if (f != NULL) {
+        fwrite(data, 4, words, f);
+        fclose(f);
+    }
+}
+
+/* Once the GPU has finished the snapshot frame, and before any texture is deleted. */
+static void check_textures_after_frame(void) {
+    int i, j, changed = 0;
+    for (i = 0; i < sNumChecked; i++) {
+        const C3DTexture *t = sChecked[i].tex;
+        const u32 *now = (const u32 *) sChecked[i].data;
+        u32 n = texture_words(t), k, wrong = 0, first = 0;
+        u32 values[4] = { 0 }, counts[4] = { 0 };
+        sync_from_memory(now, n * 4);
+        for (k = 0; k < n; k++) {
+            if (now[k] != sChecked[i].copy[k]) {
+                if (wrong++ == 0) {
+                    first = k;
+                }
+                // The most common new values say what overwrote it.
+                for (j = 0; j < 4; j++) {
+                    if (counts[j] == 0 || values[j] == now[k]) {
+                        values[j] = now[k];
+                        counts[j]++;
+                        break;
+                    }
+                }
+            }
+        }
+        if (wrong > 0 || t->tex.data != sChecked[i].data) {
+            plat_log("after the GPU: texture %d at %p (%dx%d, now at %p): %lu of %lu words changed from word %lu; new "
+                     "values %08lX x%lu, %08lX x%lu, %08lX x%lu, %08lX x%lu",
+                     i, sChecked[i].data, t->tex.width, t->tex.height, t->tex.data, (unsigned long) wrong,
+                     (unsigned long) n, (unsigned long) first, (unsigned long) values[0], (unsigned long) counts[0],
+                     (unsigned long) values[1], (unsigned long) counts[1], (unsigned long) values[2],
+                     (unsigned long) counts[2], (unsigned long) values[3], (unsigned long) counts[3]);
+            if (changed < 4) {
+                save_words("drawn", i, sChecked[i].copy, n);
+                save_words("after", i, now, n);
+            }
+            changed++;
+        }
+        free(sChecked[i].copy);
+    }
+    plat_log("after the GPU: %d of %d textures changed", changed, sNumChecked);
+    sNumChecked = 0;
+}
+
+/* Where the other buffers in GPU memory are, to see what lies next to a texture that changed. */
+static void log_buffers(void) {
+    u16 w, h;
+    u8 *top0, *top1, *bottom;
+    top0 = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
+    plat_log("buffers: command list %p (%lu bytes), vertices %p (%lu bytes), white texture %p, colour %p, depth %p",
+             (void *) gpuCmdBuf, (unsigned long) gpuCmdBufSize * 4, (void *) sVbo,
+             (unsigned long) (sizeof(C3DVertex) * VBO_VERTICES), sWhiteTex.data, sTarget->frameBuf.colorBuf,
+             sTarget->frameBuf.depthBuf);
+    top1 = gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &w, &h);
+    bottom = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
+    plat_log("buffers: top screen %p / %p (%ux%u), bottom screen %p, linear heap %p (%lu bytes), %lu free",
+             (void *) top0, (void *) top1, w, h, (void *) bottom, (void *) (uintptr_t) __ctru_linear_heap,
+             (unsigned long) __ctru_linear_heap_size, (unsigned long) linearSpaceFree());
+}
+
+static void save_command_list(void) {
+    char path[256];
+    FILE *f;
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_cmd.bin", plat_data_dir(), sSnapshotFrame);
+    f = fopen(path, "wb");
+    if (f != NULL) {
+        fwrite(gpuCmdBuf, 4, gpuCmdBufOffset, f);
+        fclose(f);
+    }
+    plat_log("command list: %lu words at %p saved to %s", (unsigned long) gpuCmdBufOffset, (void *) gpuCmdBuf,
+             f != NULL ? path : "nowhere (could not open the file)");
+}
+
+/* Logs every draw of the current frame. */
+void gfxb_log_draws(int snapshotFrame) {
+    sLogFrame = sFrameCount;
+    sSnapshotFrame = snapshotFrame;
+    sSnapshotPending = snapshotFrame >= 0;
+    if (sSnapshotPending) {
+        log_buffers();
+    }
+}
+
+/* Called on the main thread when the application closes, once the renderer has stopped with the GPU idle. */
+void gfxb_3ds_shutdown(void) {
+    C3D_Fini();
+}
+
 static void process_pending_frees(void) {
     int i;
     for (i = 0; i < sNumPendingFrees; i++) {
@@ -186,15 +504,56 @@ void gfxb_start_frame(void) {
     // No vblank throttling here: the emulated VI already paces the game. Beginning a frame still waits for the GPU
     // to finish the previous one, after which its textures can be deleted and the vertex buffer reused.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
-    C3D_FrameBegin(0);
+    if (sFrameCount < 3) {
+        plat_log("frame %d: waiting for the GPU", sFrameCount);
+    }
+    gPlatGfxStage = "waiting for the GPU";
+    if (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        // Poll instead of blocking, so that a GPU that never finishes the previous frame gets reported.
+        unsigned long long start = plat_time_ns();
+        int reported = 0;
+        while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+            if (!reported && plat_time_ns() - start > 3000000000ULL) {
+                reported = 1;
+                gPlatGfxStage = "GPU not responding";
+                plat_status("GPU stuck after frame %d (%d triangles, cmd buffer %.0f%%)", sFrameCount - 1,
+                            sLastFrameTriangles, sLastFrameUsage * 100.0f);
+            }
+            plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_BUSY);
+            plat_sleep_ns(250000);
+        }
+    }
+    // The application is closing: stop here, with the GPU idle and no frame being built, so it can be shut down.
+    plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
+    gPlatGfxStage = "drawing";
+    if (sSnapshotPending) {
+        // The snapshot's log file is closed here, once the GPU has drawn the frame and its textures are checked.
+        sSnapshotPending = 0;
+        check_textures_after_frame();
+        plat_log_copy_to(NULL);
+        plat_status("Snapshot saved (frame %d)", sSnapshotFrame);
+    }
+    if (sFrameCount < 3) {
+        plat_log("frame %d: GPU ready", sFrameCount);
+    }
+    if (sFrameCount == 1) {
+        plat_status("First frame drawn");
+    }
     process_pending_frees();
     // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
-    // draws nothing (while a level loads) must not show up as a black flash.
-    C3D_RenderTargetClear(sTarget, sFrameStarted < 0 ? C3D_CLEAR_DEPTH : C3D_CLEAR_ALL, 0x000000FF, 0);
+    // draws nothing (while a level loads) must not show up as a black flash. So only the first frame uses a memory
+    // fill; after that the depth buffer is cleared by drawing. (A memory fill of the depth buffer alone never finished
+    // on a real New 3DS, which hung the game after its first frame. Emulators complete it.)
+    if (sFrameStarted >= 0) {
+        C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+    }
     C3D_FrameDrawOn(sTarget);
     sVboUsed = 0;
+    if (sFrameStarted < 0) {
+        static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
+        draw_clear_rect(sFullScreen, 0, 1);
+    }
     sFrameStarted = 1;
-    set_projection();
 }
 
 /* DKR_GFX_TEST draws a reference quad: a 16x16 texture, red on top, blue at the bottom, with a green left column. */
@@ -284,10 +643,25 @@ void gfxb_end_frame(void) {
             draw_test_pattern();
         }
     }
-    if ((sFrameCount++ % 120) == 0) {
-        plat_log("frame %d: %d triangles at %llu ms", sFrameCount, sFrameTriangles, plat_time_ns() / 1000000ULL);
+    if (sFrameCount == sLogFrame && sSnapshotFrame >= 0) {
+        save_command_list();
     }
+    {
+        static float sMaxUsage;
+        float usage = C3D_GetCmdBufUsage();
+        if (usage > sMaxUsage) {
+            sMaxUsage = usage;
+        }
+        if ((sFrameCount++ % 120) == 0) {
+            plat_log("frame %d: %d triangles at %llu ms, command buffer %.0f%% (max %.0f%%), %d splits", sFrameCount,
+                     sFrameTriangles, plat_time_ns() / 1000000ULL, usage * 100.0f, sMaxUsage * 100.0f, sDrainSplits);
+        }
+    }
+    sLastFrameTriangles = sFrameTriangles;
+    sLastFrameUsage = C3D_GetCmdBufUsage();
     sFrameTriangles = 0;
+    sLastDrainSplits = sDrainSplits;
+    sDrainSplits = 0;
     GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
     C3D_FrameEnd(0);
     sFrameStarted = -1; // A frame has been drawn, so the target holds an image.
@@ -319,19 +693,41 @@ static GPU_TEXTURE_WRAP_PARAM wrap_param(unsigned char mode) {
     }
 }
 
+/*
+ * The GPU texel at (px, py) of the power of two sized texture. Wrapping textures that aren't a power of two are
+ * stretched to fit, others are padded (repeating their edge texels) and their coordinates scaled.
+ */
+static u32 gpu_texel(const GfxTexture *tex, unsigned int pw, unsigned int ph, int resample, unsigned int px,
+                     unsigned int py) {
+    unsigned int w = tex->width, h = tex->height;
+    unsigned int sx, sy;
+    u32 c;
+    if (resample) {
+        sx = px * w / pw;
+        sy = py * h / ph;
+    } else {
+        sx = (px < w) ? px : w - 1;
+        sy = (py < h) ? py : h - 1;
+    }
+    c = tex->pixels[sy * w + sx];
+    // RGBA8888 with R in the low byte -> the GPU's RGBA8 (R in the high byte).
+    return ((c & 0xFF) << 24) | ((c & 0xFF00) << 8) | ((c >> 8) & 0xFF00) | (c >> 24);
+}
+
 void gfxb_texture_upload(GfxTexture *tex) {
     C3DTexture *t = (C3DTexture *) tex->backendData;
     unsigned int w = tex->width, h = tex->height;
     unsigned int pw = next_pot(w), ph = next_pot(h);
     int resample = (tex->wrapS != GFX_WRAP_CLAMP && pw != w) || (tex->wrapT != GFX_WRAP_CLAMP && ph != h);
     u32 *data;
-    unsigned int x, y, tx, ty;
+    unsigned int tx, ty;
     int i;
 
     if (t == NULL) {
         t = calloc(1, sizeof(C3DTexture));
         if (t == NULL || !C3D_TexInit(&t->tex, pw, ph, GPU_RGBA8)) {
             static int sFailures;
+            gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
             if ((sFailures++ % 50) == 0) {
                 plat_log("texture %ux%u allocation failed (%d failures, linear free %lu)", pw, ph, sFailures,
                          (unsigned long) linearSpaceFree());
@@ -341,38 +737,19 @@ void gfxb_texture_upload(GfxTexture *tex) {
         }
         tex->backendData = t;
     }
-    data = malloc(pw * ph * 4);
-    if (data == NULL) {
-        return;
-    }
-    // Swizzle into 8x8 tiles, top row first (the GPU samples t = 0 from the start of the data). Wrapping textures that aren't a power of two are stretched to fit,
-    // others are padded (repeating their edge texels) and their coordinates scaled.
+    // Swizzled straight into the texture's memory in 8x8 tiles, top row first (the GPU samples t = 0 from the start
+    // of the data). No temporary buffer: when the heap was short, skipping the upload left whatever the memory held
+    // before, such as an old solid black texture. The data reaches the GPU with the frame's cache flush.
+    data = (u32 *) t->tex.data;
     for (ty = 0; ty < ph; ty += 8) {
         for (tx = 0; tx < pw; tx += 8) {
             u32 *tile = &data[(ty / 8) * (pw / 8) * 64 + (tx / 8) * 64];
             for (i = 0; i < 64; i++) {
-                unsigned int px = tx + (i & 7);
-                unsigned int py = ty + (i >> 3);
-                unsigned int imageRow = py;
-                unsigned int sx, sy;
-                u32 c;
-                if (resample) {
-                    sx = px * w / pw;
-                    sy = imageRow * h / ph;
-                } else {
-                    sx = (px < w) ? px : w - 1;
-                    sy = (imageRow < h) ? imageRow : h - 1;
-                }
-                c = tex->pixels[sy * w + sx];
-                // RGBA8888 with R in the low byte -> the GPU's RGBA8 (R in the high byte).
-                tile[sTileOrder[i]] = ((c & 0xFF) << 24) | ((c & 0xFF00) << 8) | ((c >> 8) & 0xFF00) | (c >> 24);
+                tile[sTileOrder[i]] = gpu_texel(tex, pw, ph, resample, tx + (i & 7), ty + (i >> 3));
             }
         }
     }
-    (void) x;
-    (void) y;
-    C3D_TexUpload(&t->tex, data);
-    free(data);
+    t->resample = resample;
     t->scaleU = resample ? 1.0f : (float) w / pw;
     t->scaleV = resample ? 1.0f : (float) h / ph;
     if (tex->filter == GFX_FILTER_POINT) {
@@ -381,6 +758,46 @@ void gfxb_texture_upload(GfxTexture *tex) {
         C3D_TexSetFilter(&t->tex, GPU_LINEAR, GPU_LINEAR);
     }
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
+}
+
+/* For snapshots: logs a texture whose memory no longer holds what was uploaded. */
+static void verify_texture(const GfxTexture *tex) {
+    const C3DTexture *t = (const C3DTexture *) tex->backendData;
+    unsigned int pw, ph, tx, ty, wrong = 0, firstAt = 0;
+    u32 firstGot = 0, firstWant = 0;
+    const u32 *data;
+    int i;
+
+    if (t == NULL) {
+        plat_log("  texture %p %dx%d has no GPU copy", (const void *) tex, tex->width, tex->height);
+        return;
+    }
+    pw = t->tex.width;
+    ph = t->tex.height;
+    data = (const u32 *) t->tex.data;
+    // Read what is in memory, not what the CPU cache holds.
+    GSPGPU_FlushDataCache(data, pw * ph * 4);
+    GSPGPU_InvalidateDataCache(data, pw * ph * 4);
+    for (ty = 0; ty < ph; ty += 8) {
+        for (tx = 0; tx < pw; tx += 8) {
+            const u32 *tile = &data[(ty / 8) * (pw / 8) * 64 + (tx / 8) * 64];
+            for (i = 0; i < 64; i++) {
+                u32 want = gpu_texel(tex, pw, ph, t->resample, tx + (i & 7), ty + (i >> 3));
+                if (tile[sTileOrder[i]] != want) {
+                    if (wrong++ == 0) {
+                        firstAt = (ty + (i >> 3)) * pw + tx + (i & 7);
+                        firstGot = tile[sTileOrder[i]];
+                        firstWant = want;
+                    }
+                }
+            }
+        }
+    }
+    if (wrong > 0) {
+        plat_log("  texture %p %dx%d at %p: %u of %u texels changed, first at %u: %08lX instead of %08lX",
+                 (const void *) tex, tex->width, tex->height, (const void *) data, wrong, pw * ph, firstAt,
+                 (unsigned long) firstGot, (unsigned long) firstWant);
+    }
 }
 
 void gfxb_texture_free(GfxTexture *tex) {
@@ -584,7 +1001,7 @@ static void apply_fog(const GfxDrawState *state) {
     if (on && (state->fogMul != sLutMul || state->fogOffset != sLutOffset)) {
         float data[256];
         int i;
-        // Depth d runs from 1 at the near plane to 0 at the far plane, and z / w = 1 - 2d (see set_projection).
+        // Depth d runs from 1 at the near plane to 0 at the far plane, and z / w = 1 - 2d (see to_screen).
         for (i = 0; i <= 128; i++) {
             float zw = 1.0f - 2.0f * (i / 128.0f);
             float fog = zw * state->fogMul + state->fogOffset;
@@ -743,38 +1160,119 @@ static void set_scissor(const short rect[4]) {
                    bottom * sRenderScale);
 }
 
-void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
-    C3DVertex *out;
-    float su0, sv0, su1, sv1;
-    int i, count = numTriangles * 3;
+/*
+ * Snapshots on a real New 3DS showed small blended draws (a kart shadow, one letter of text) drawn as if their
+ * texture were fully opaque, or their blending off: the shadow came out as a solid black square, the letter as a white
+ * box, although the command list set exactly the same state as for the same draws that came out right. Each time the
+ * draw before was a large opaque one, so the GPU looks to still be busy with it while the next draw's settings are
+ * written. Flushing the framebuffer between them (DKR_FB_FLUSH=1, or 2 for every draw) did not help.
+ *
+ * DKR_GPU_SPLIT ends the command list before such a draw and starts a new one, which the GPU only begins once it has
+ * finished the previous list: 1 (the default) before a blended draw that follows an unblended one, 2 whenever the
+ * blending, alpha test or depth settings change, 0 never. This fixed the letter but not the shadows, which come later
+ * in a race frame than the first 12 splits allowed. The GPU's command queue holds 32 entries a frame and a frame needs
+ * 3 of its own, so at most MAX_DRAIN_SPLITS are made; past SMALL_DRAWS_ONLY, only for draws of a few triangles, which
+ * are the ones that showed the problem.
+ */
+#define MAX_DRAIN_SPLITS 24
+#define SMALL_DRAWS_ONLY 16
+#define IS_BLENDED(blend) ((blend) == GFX_BLEND_ALPHA || (blend) == GFX_BLEND_ADD)
 
-    if (sVboUsed + count > VBO_VERTICES) {
+/*
+ * The kart shadow still came out as a black square in the hub with the split above. Testing on a New 3DS showed that
+ * writing the settings of the first blended draw twice fixes it (TEST_REWRITE), an empty triangle before it only
+ * sometimes: the GPU seems to miss some of the settings written right after an unblended draw. The normal mode
+ * (TEST_SPLIT) does both.
+ *
+ * Graphics test modes: touching the top half of the bottom screen moves to the next one, and the bottom screen says
+ * which is on.
+ */
+enum { TEST_SPLIT, TEST_NOTHING, TEST_DIAG_ALPHA, TEST_PRIMER, TEST_REWRITE, TEST_COUNT };
+static const char *const sTestNames[TEST_COUNT] = {
+    "split and settings twice (normal)", "no fix", "show texture alpha as grey",
+    "empty triangle before blending", "settings twice only",
+};
+
+static int test_mode(void) {
+    static int sShown = -1;
+    int mode = gPlatGfxTest % TEST_COUNT;
+    if (mode != sShown) {
+        sShown = mode;
+        plat_status("Graphics test %d: %s", mode, sTestNames[mode]);
+    }
+    return mode;
+}
+
+/* Returns whether this is a blended draw after an unblended one, the case that showed the faults. */
+static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
+    static int sFlushMode = -1, sSplitMode = -1;
+    static unsigned int sLastKey = ~0u;
+    unsigned int key;
+    int split, first;
+
+    if (sFlushMode < 0) {
+        const char *env = plat_getenv("DKR_FB_FLUSH");
+        sFlushMode = env != NULL ? atoi(env) : 0;
+        env = plat_getenv("DKR_GPU_SPLIT");
+        sSplitMode = env != NULL ? atoi(env) : 1;
+        plat_log("framebuffer flush between draws: %s; command list split: %s",
+                 sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always",
+                 sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes");
+    }
+    key = state->blend | (state->alphaTest << 4) | (state->alphaRef << 8) | (state->depthTest << 16) |
+          (state->depthWrite << 17) | (sDepthOnly << 18);
+    if (sFlushMode == 2 || (sFlushMode == 1 && key != sLastKey)) {
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    }
+    first = IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF);
+    split = sSplitMode == 2 ? key != sLastKey : sSplitMode == 1 ? first : 0;
+    if (test_mode() != TEST_SPLIT && test_mode() != TEST_DIAG_ALPHA) {
+        split = 0;
+    }
+    if (split && sVboUsed > 0 && sDrainSplits < MAX_DRAIN_SPLITS &&
+        (sDrainSplits < SMALL_DRAWS_ONLY || numTriangles <= 4)) {
+        // The GPU reads the vertices so far when it runs the first part of the list.
+        GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
+        C3D_FrameSplit(GX_CMDLIST_FLUSH);
+        sDrainSplits++;
+    }
+    sLastKey = key;
+    return first;
+}
+
+/*
+ * DKR_DIAG_ALPHA=1, for finding the cause of the boxes above: blended draws show their texture's alpha as grey and
+ * are drawn half transparent. A box that comes out grey has the right blending but an opaque texture; one that shows
+ * the letter or shadow shape at full brightness has the right texture but no blending.
+ */
+static void apply_alpha_diagnostic(const GfxDrawState *state) {
+    static int sOn = -1;
+    int i;
+
+    if (sOn < 0) {
+        sOn = plat_getenv("DKR_DIAG_ALPHA") != NULL;
+    }
+    if ((!sOn && test_mode() != TEST_DIAG_ALPHA) || !IS_BLENDED(state->blend)) {
         return;
     }
-    {
-        static int sLogFrame = -2;
-        if (sLogFrame == -2) {
-            const char *env = plat_getenv("DKR_LOG_DRAWS");
-            sLogFrame = env != NULL ? atoi(env) : -1;
-        }
-        if (sFrameCount == sLogFrame) {
-            const GfxCombiner *c = &state->combiner;
-            plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "
-                     "tex %p v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d",
-                     numTriangles, state->blend, state->alphaTest, state->alphaRef, state->depthTest, state->depthWrite,
-                     state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d,
-                     c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles, (void *) state->textures[0],
-                     verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0, verts[0].v0, verts[0].r, verts[0].g,
-                     verts[0].b, verts[0].a);
+    for (i = 0; i < 6; i++) {
+        C3D_TexEnv *env = C3D_GetTexEnv(i);
+        C3D_TexEnvInit(env);
+        if (i == 0) {
+            C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+            C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+            C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+            C3D_TexEnvColor(env, 0x80FFFFFF);
+        } else {
+            C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
         }
     }
-    bind_texture(0, state->textures[0], &su0, &sv0);
-    bind_texture(1, state->textures[1], &su1, &sv1);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexScale, su0, -sv0, su1, -sv1);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTexOffset, 0.0f, 1.0f, 0.0f, 1.0f);
-    apply_combiner(state);
-    apply_fog(state);
+}
 
+static void set_draw_state(const GfxDrawState *state) {
     switch (state->blend) {
         case GFX_BLEND_ALPHA:
             C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
@@ -806,22 +1304,93 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
                                                            : GPU_CULL_FRONT_CCW);
     }
     set_scissor(state->scissor);
+}
 
-    out = &sVbo[sVboUsed];
+/* Sets every GPU setting a draw uses. */
+static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
+    bind_texture(0, state->textures[0], su0, sv0);
+    bind_texture(1, state->textures[1], su1, sv1);
+    apply_combiner(state);
+    apply_alpha_diagnostic(state);
+    apply_fog(state);
+    set_draw_state(state);
+}
+
+/* citro3d's own function that writes the changed settings to the command list (not in its public header). */
+void C3Di_UpdateContext(void);
+
+void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
+    C3DVertex *out;
+    float su0, sv0, su1, sv1;
+    int i, first, primer, count = numTriangles * 3;
+
+    if (sVboUsed + count > VBO_VERTICES) {
+        return;
+    }
+    if (gpuCmdBufOffset > gpuCmdBufSize - gpuCmdBufSize / 10) {
+        // A full command buffer silently drops commands, and a half written command can hang the real GPU (an
+        // emulator shrugs it off). Hand what is there to the GPU and carry on in an empty buffer instead.
+        if (sCmdBufSplits++ < 5) {
+            plat_log("frame %d: command buffer full, splitting it", sFrameCount);
+        }
+        GSPGPU_FlushDataCache((void *) __ctru_linear_heap, __ctru_linear_heap_size);
+        C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    }
+    if (sLogFrame == -2) {
+        const char *env = plat_getenv("DKR_LOG_DRAWS");
+        sLogFrame = env != NULL ? atoi(env) : -1;
+    }
+    if (sFrameCount == sLogFrame) {
+        const GfxCombiner *c = &state->combiner;
+        if (state->textures[0] != NULL) {
+            verify_texture(state->textures[0]);
+            if (state->textures[0]->backendData != NULL) {
+                remember_texture((const C3DTexture *) state->textures[0]->backendData);
+            }
+        }
+        const GfxTexture *tex = state->textures[0];
+        const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
+        plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "
+                 "tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d "
+                 "cmd %lu",
+                 numTriangles, state->blend, state->alphaTest, state->alphaRef, state->depthTest, state->depthWrite,
+                 state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d,
+                 c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles, (void *) tex,
+                 tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0, t != NULL ? t->tex.width : 0,
+                 t != NULL ? t->tex.height : 0, t != NULL ? t->tex.data : NULL,
+                 (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
+                 verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
+    }
+    first = drain_before_draw(state, numTriangles);
+    set_all_state(state, &su0, &sv0, &su1, &sv1);
+    if (first && (test_mode() == TEST_REWRITE || test_mode() == TEST_SPLIT)) {
+        // Write all the settings now, then mark them changed so that the draw writes them a second time.
+        C3Di_UpdateContext();
+        set_all_state(state, &su0, &sv0, &su1, &sv1);
+    }
+    primer = first && test_mode() == TEST_PRIMER && sVboUsed + count + 3 <= VBO_VERTICES;
+
+    out = &sVbo[sVboUsed + (primer ? 3 : 0)];
     for (i = 0; i < count; i++) {
         const GfxVertex *v = &verts[i];
-        out[i].pos[0] = v->x;
-        out[i].pos[1] = v->y;
-        out[i].pos[2] = v->z;
-        out[i].pos[3] = v->w;
-        out[i].tc0[0] = v->u0;
-        out[i].tc0[1] = v->v0;
-        out[i].tc1[0] = v->u1;
-        out[i].tc1[1] = v->v1;
-        out[i].color[0] = v->r;
-        out[i].color[1] = v->g;
-        out[i].color[2] = v->b;
-        out[i].color[3] = v->a;
+        to_screen(v, &out[i]);
+        // Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
+        out[i].tc0[0] = v->u0 * su0;
+        out[i].tc0[1] = 1.0f - v->v0 * sv0;
+        out[i].tc1[0] = v->u1 * su1;
+        out[i].tc1[1] = 1.0f - v->v1 * sv1;
+        out[i].color[0] = v->r * (1.0f / 255.0f);
+        out[i].color[1] = v->g * (1.0f / 255.0f);
+        out[i].color[2] = v->b * (1.0f / 255.0f);
+        out[i].color[3] = v->a * (1.0f / 255.0f);
+    }
+    if (primer) {
+        // A triangle with no area, drawn with the same settings first.
+        for (i = 0; i < 3; i++) {
+            sVbo[sVboUsed + i] = out[0];
+        }
+        C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, 3);
+        sVboUsed += 3;
     }
     C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, count);
     sVboUsed += count;
@@ -863,21 +1432,12 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
     sDepthOnly = 0;
 }
 
-/* A full clear can use the faster memory fill, but only before anything is drawn: fills are not ordered with draws. */
-static int is_full_clear(const short rect[4]) {
-    return sVboUsed == 0 && rect[0] <= 0 && rect[1] <= 0 && rect[2] >= GFX_SCREEN_WIDTH - 1 &&
-           rect[3] >= GFX_SCREEN_HEIGHT - 1;
-}
-
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
     // Colour fills are drawn so that they cover only the game's part of the screen, leaving black bars at the sides.
     draw_clear_rect(rect, (r << 24) | (g << 16) | (b << 8) | a, 0);
 }
 
 void gfxb_clear_depth(const short rect[4]) {
-    if (is_full_clear(rect)) {
-        C3D_FrameBufClear(&sTarget->frameBuf, C3D_CLEAR_DEPTH, 0, 0);
-        return;
-    }
+    // Always drawn: a memory fill of the depth buffer alone hangs a real 3DS (see gfxb_start_frame).
     draw_clear_rect(rect, 0, 1);
 }

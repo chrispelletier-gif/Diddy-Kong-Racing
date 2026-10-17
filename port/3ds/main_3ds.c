@@ -15,6 +15,12 @@ static void apt_hook(APT_HookType hook, void *param) {
     if (hook == APTHOOK_ONSUSPEND || hook == APTHOOK_ONSLEEP || hook == APTHOOK_ONEXIT) {
         port_si_flush();
     }
+    // The renderer must not draw while the HOME menu has the GPU.
+    if (hook == APTHOOK_ONSUSPEND) {
+        plat_3ds_pause_renderer(1);
+    } else if (hook == APTHOOK_ONRESTORE) {
+        plat_3ds_pause_renderer(0);
+    }
 }
 
 /* The game only uses the top screen; the bottom one shows the controls. */
@@ -39,8 +45,18 @@ int plat_main_loop_iteration(void) {
     if (!aptMainLoop()) {
         return 0;
     }
+    // Back in the foreground (not every way back calls the restore hook).
+    plat_3ds_pause_renderer(0);
     // The game runs on its own threads; the main thread only has to keep servicing APT (home menu, sleep).
     svcSleepThread(16 * 1000 * 1000);
+    gPlatCounters[PLAT_COUNTER_MAIN]++;
+    {
+        // For the start-up log: shows whether the main thread still gets to run (it is the lowest priority one).
+        static int sIterations;
+        if (++sIterations % 120 == 0 && sIterations <= 120 * 15) {
+            plat_log("main thread alive");
+        }
+    }
     return 1;
 }
 
@@ -60,6 +76,5 @@ int main(int argc, char **argv) {
     while (plat_main_loop_iteration()) {
     }
     port_si_flush();
-    gfxExit();
-    return 0;
+    plat_3ds_exit();
 }
