@@ -56,12 +56,21 @@ int port_int_release(void);
 void port_int_restore(int wasDisabled);
 void port_post_mesg(struct OSMesgQueue_s *mq, void *msg);
 void port_raise_event(u32 event);
+/* Blocks the calling thread until ready() returns true (both with the kernel lock held). */
+void port_kwait_until(int (*ready)(void));
+/* DKR_LOCKSTEP: retraces wait for every N64 thread and the RCP to be idle (see os_core.c). */
+int port_lockstep_enabled(void);
+void port_lockstep_wait(void);
+unsigned long long port_time_ns(void);
+void port_lockstep_dma(u32 numBytes);
+void port_vi_retrace(void);
 
 /* Emulated hardware startup. */
 void port_vi_init(void);
 void port_rcp_init(void);
 void port_rcp_wait_idle(void);
 void port_rcp_gfx_submitted(void);
+int port_rcp_idle(void);
 void port_si_init(void);
 /* Writes pending save data to disk now (called on exit and when the application is suspended). */
 void port_si_flush(void);

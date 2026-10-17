@@ -17,21 +17,30 @@ static OSViMode *sViMode;
 static u8 sViBlack;
 static s32 sViStarted;
 
+/* Raises one retrace interrupt. */
+void port_vi_retrace(void) {
+    // Interrupts are not taken while a thread has them disabled.
+    plat_intlock_lock();
+    sViCurrentFramebuffer = sViNextFramebuffer;
+    sViRetraceCounter++;
+    gPlatCounters[PLAT_COUNTER_VI]++;
+    if (sViEventQueue != NULL && sViRetraceCounter >= sViRetraceCount) {
+        sViRetraceCounter = 0;
+        port_post_mesg(sViEventQueue, sViEventMsg);
+    }
+    plat_intlock_unlock();
+}
+
 static void vi_thread(void *arg) {
     (void) arg;
     port_int_thread_init();
     for (;;) {
-        plat_wait_vblank();
-        // Interrupts are not taken while a thread has them disabled.
-        plat_intlock_lock();
-        sViCurrentFramebuffer = sViNextFramebuffer;
-        sViRetraceCounter++;
-        gPlatCounters[PLAT_COUNTER_VI]++;
-        if (sViEventQueue != NULL && sViRetraceCounter >= sViRetraceCount) {
-            sViRetraceCounter = 0;
-            port_post_mesg(sViEventQueue, sViEventMsg);
+        if (port_lockstep_enabled()) {
+            port_lockstep_wait();
+        } else {
+            plat_wait_vblank();
         }
-        plat_intlock_unlock();
+        port_vi_retrace();
     }
 }
 
