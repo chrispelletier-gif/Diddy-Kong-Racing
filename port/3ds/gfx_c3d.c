@@ -1156,6 +1156,31 @@ static void set_scissor(const short rect[4]) {
                    bottom * sRenderScale);
 }
 
+/*
+ * Snapshots on a real New 3DS showed small draws (a kart shadow, one letter of text) drawn with the blending of the
+ * draw before them: the shadow came out as a solid black square, the letter as a white box, although the command
+ * list set the right state. Flushing the framebuffer before the blending, alpha test or depth settings change makes
+ * the GPU finish the previous draw first. DKR_FB_FLUSH=0 turns this off, 2 flushes before every draw.
+ */
+static void sync_fragment_state(const GfxDrawState *state) {
+    static int sMode = -1;
+    static unsigned int sLastKey = ~0u;
+    unsigned int key;
+
+    if (sMode < 0) {
+        const char *env = plat_getenv("DKR_FB_FLUSH");
+        sMode = env != NULL ? atoi(env) : 1;
+        plat_log("framebuffer flush between draws: %s", sMode == 0 ? "off" : sMode == 1 ? "on state changes" : "always");
+    }
+    key = state->blend | (state->alphaTest << 4) | (state->alphaRef << 8) | (state->depthTest << 16) |
+          (state->depthWrite << 17) | (sDepthOnly << 18);
+    if (sMode == 2 || (sMode == 1 && key != sLastKey)) {
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    }
+    sLastKey = key;
+}
+
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
     C3DVertex *out;
     float su0, sv0, su1, sv1;
@@ -1198,6 +1223,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
                  (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
                  verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
     }
+    sync_fragment_state(state);
     bind_texture(0, state->textures[0], &su0, &sv0);
     bind_texture(1, state->textures[1], &su1, &sv1);
     apply_combiner(state);
