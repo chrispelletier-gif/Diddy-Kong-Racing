@@ -67,8 +67,8 @@ runs silently.
 | SELECT        | L                   |                         |
 | START         | START               | Pause                   |
 
-The menus are driven by the stick, as on the N64. Touching the bottom screen saves a snapshot of the frame (see
-below); holding SELECT while touching it sends a bug report.
+The menus are driven by the stick, as on the N64. Touching the lower half of the bottom screen saves a snapshot of
+the frame (the upper half cycles the graphics test modes); holding SELECT while touching it sends a bug report.
 
 ## How it works
 

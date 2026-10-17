@@ -587,6 +587,8 @@ static void report_now(void) {
         add_file(&report, name);
         snprintf(name, sizeof(name), "diff_%05d_gpu.bin", frame);
         add_file(&report, name);
+        snprintf(name, sizeof(name), "diff_%05d_cmd.bin", frame);
+        add_file(&report, name);
     } else {
         snprintf(report.title, sizeof(report.title), "[3DS bug report] no snapshot (renderer: %s)",
                  gPlatGfxStage != NULL ? gPlatGfxStage : "-");
