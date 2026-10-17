@@ -54,6 +54,8 @@ static int sFrameCount, sFrameTriangles;
 static int sLastFrameTriangles;
 static float sLastFrameUsage;
 static int sCmdBufSplits;
+/* Command list splits made this frame to let the GPU finish before a blended draw (see drain_before_draw). */
+static int sDrainSplits, sLastDrainSplits;
 
 /* The N64 picture is 320 pixels wide; by default it is shown centred on the 400 pixel wide top screen. */
 static float sScreenScaleX = 320.0f / 400.0f;
@@ -651,13 +653,15 @@ void gfxb_end_frame(void) {
             sMaxUsage = usage;
         }
         if ((sFrameCount++ % 120) == 0) {
-            plat_log("frame %d: %d triangles at %llu ms, command buffer %.0f%% (max %.0f%%)", sFrameCount,
-                     sFrameTriangles, plat_time_ns() / 1000000ULL, usage * 100.0f, sMaxUsage * 100.0f);
+            plat_log("frame %d: %d triangles at %llu ms, command buffer %.0f%% (max %.0f%%), %d splits", sFrameCount,
+                     sFrameTriangles, plat_time_ns() / 1000000ULL, usage * 100.0f, sMaxUsage * 100.0f, sDrainSplits);
         }
     }
     sLastFrameTriangles = sFrameTriangles;
     sLastFrameUsage = C3D_GetCmdBufUsage();
     sFrameTriangles = 0;
+    sLastDrainSplits = sDrainSplits;
+    sDrainSplits = 0;
     GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
     C3D_FrameEnd(0);
     sFrameStarted = -1; // A frame has been drawn, so the target holds an image.
@@ -1157,28 +1161,82 @@ static void set_scissor(const short rect[4]) {
 }
 
 /*
- * Snapshots on a real New 3DS showed small draws (a kart shadow, one letter of text) drawn with the blending of the
- * draw before them: the shadow came out as a solid black square, the letter as a white box, although the command
- * list set the right state. Flushing the framebuffer before the blending, alpha test or depth settings change makes
- * the GPU finish the previous draw first. DKR_FB_FLUSH=0 turns this off, 2 flushes before every draw.
+ * Snapshots on a real New 3DS showed small blended draws (a kart shadow, one letter of text) drawn as if their
+ * texture were fully opaque, or their blending off: the shadow came out as a solid black square, the letter as a white
+ * box, although the command list set exactly the same state as for the same draws that came out right. Each time the
+ * draw before was a large opaque one, so the GPU looks to still be busy with it while the next draw's settings are
+ * written. Flushing the framebuffer between them (DKR_FB_FLUSH=1, or 2 for every draw) did not help.
+ *
+ * DKR_GPU_SPLIT ends the command list before such a draw and starts a new one, which the GPU only begins once it has
+ * finished the previous list: 1 (the default) before a blended draw that follows an unblended one, 2 whenever the
+ * blending, alpha test or depth settings change, 0 never. The GPU's command queue holds 32 entries a frame, so at most
+ * MAX_DRAIN_SPLITS are made per frame.
  */
-static void sync_fragment_state(const GfxDrawState *state) {
-    static int sMode = -1;
+#define MAX_DRAIN_SPLITS 12
+#define IS_BLENDED(blend) ((blend) == GFX_BLEND_ALPHA || (blend) == GFX_BLEND_ADD)
+
+static void drain_before_draw(const GfxDrawState *state) {
+    static int sFlushMode = -1, sSplitMode = -1;
     static unsigned int sLastKey = ~0u;
     unsigned int key;
+    int split;
 
-    if (sMode < 0) {
+    if (sFlushMode < 0) {
         const char *env = plat_getenv("DKR_FB_FLUSH");
-        sMode = env != NULL ? atoi(env) : 1;
-        plat_log("framebuffer flush between draws: %s", sMode == 0 ? "off" : sMode == 1 ? "on state changes" : "always");
+        sFlushMode = env != NULL ? atoi(env) : 0;
+        env = plat_getenv("DKR_GPU_SPLIT");
+        sSplitMode = env != NULL ? atoi(env) : 1;
+        plat_log("framebuffer flush between draws: %s; command list split: %s",
+                 sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always",
+                 sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes");
     }
     key = state->blend | (state->alphaTest << 4) | (state->alphaRef << 8) | (state->depthTest << 16) |
           (state->depthWrite << 17) | (sDepthOnly << 18);
-    if (sMode == 2 || (sMode == 1 && key != sLastKey)) {
+    if (sFlushMode == 2 || (sFlushMode == 1 && key != sLastKey)) {
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
     }
+    split = sSplitMode == 2 ? key != sLastKey
+          : sSplitMode == 1 ? IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF)
+                            : 0;
+    if (split && sVboUsed > 0 && sDrainSplits < MAX_DRAIN_SPLITS) {
+        // The GPU reads the vertices so far when it runs the first part of the list.
+        GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
+        C3D_FrameSplit(GX_CMDLIST_FLUSH);
+        sDrainSplits++;
+    }
     sLastKey = key;
+}
+
+/*
+ * DKR_DIAG_ALPHA=1, for finding the cause of the boxes above: blended draws show their texture's alpha as grey and
+ * are drawn half transparent. A box that comes out grey has the right blending but an opaque texture; one that shows
+ * the letter or shadow shape at full brightness has the right texture but no blending.
+ */
+static void apply_alpha_diagnostic(const GfxDrawState *state) {
+    static int sOn = -1;
+    int i;
+
+    if (sOn < 0) {
+        sOn = plat_getenv("DKR_DIAG_ALPHA") != NULL;
+    }
+    if (!sOn || !IS_BLENDED(state->blend)) {
+        return;
+    }
+    for (i = 0; i < 6; i++) {
+        C3D_TexEnv *env = C3D_GetTexEnv(i);
+        C3D_TexEnvInit(env);
+        if (i == 0) {
+            C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+            C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+            C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+            C3D_TexEnvColor(env, 0x80FFFFFF);
+        } else {
+            C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        }
+    }
 }
 
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
@@ -1223,10 +1281,11 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
                  (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
                  verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
     }
-    sync_fragment_state(state);
+    drain_before_draw(state);
     bind_texture(0, state->textures[0], &su0, &sv0);
     bind_texture(1, state->textures[1], &su1, &sv1);
     apply_combiner(state);
+    apply_alpha_diagnostic(state);
     apply_fog(state);
 
     switch (state->blend) {
