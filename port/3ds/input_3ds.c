@@ -70,7 +70,14 @@ void port_input_poll(PortControllerState *state, s32 maxControllers) {
     hidScanInput();
     held = hidKeysHeld();
     if (hidKeysDown() & KEY_TOUCH) {
-        gPlatSnapshotRequested = 1;
+        touchPosition touch;
+        hidTouchRead(&touch);
+        // The top half switches the graphics test mode (see gfx_c3d.c), the bottom half takes a snapshot.
+        if (touch.py < 120) {
+            gPlatGfxTest++;
+        } else {
+            gPlatSnapshotRequested = 1;
+        }
     }
     hidCircleRead(&pad);
 

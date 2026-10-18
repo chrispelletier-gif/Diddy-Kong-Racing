@@ -94,7 +94,7 @@ void refb_clear_depth(const short rect[4]);
 void refb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
 void refb_save_png(const char *path);
 void gfxb_capture_frame(const char *path);
-void gfxb_log_draws(void);
+void gfxb_log_draws(int snapshotFrame);
 static s32 sDiffEvery;
 static s32 sRefActive;
 static s32 sRefInitialised;
@@ -345,8 +345,6 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
             oldest = (slot + i) % TEX_CACHE_SIZE;
         }
     }
-    { u32 o = slot, j; int hole = 0; for (j = 0; j < 8; j++) { TexCacheEntry *q = &sTexCache[(slot + j) % TEX_CACHE_SIZE]; if (!q->used) { hole = 1; break; } if (q->lastFrame < sTexCache[o].lastFrame) o = (slot + j) % TEX_CACHE_SIZE; }
-      if (!hole && texture_in_use(&sTexCache[o], pinned)) { extern int printf(const char *, ...); printf("OLDBUG frame %ld %s\n", (long) sFrameCount, &sTexCache[o].tex == pinned ? "pinned" : "batch"); } }
     if (oldest == TEX_CACHE_SIZE) {
         return NULL; // Can't happen: at most three of the eight entries are in use.
     }
@@ -1192,12 +1190,12 @@ void port_gfx_run_task(void *taskPtr) {
         sRefActive = TRUE;
         sTraceFrame = sFrameCount;
         plat_log_keep();
-        gfxb_log_draws();
         {
             char path[256];
             plat_snprintf(path, sizeof(path), "%s/diff_%05d_log.txt", plat_data_dir(), (int) sFrameCount);
             plat_log_copy_to(path);
         }
+        gfxb_log_draws((int) sFrameCount);
         plat_log("snapshot of frame %d", (int) sFrameCount);
     }
 #endif
@@ -1222,10 +1220,7 @@ void port_gfx_run_task(void *taskPtr) {
         plat_snprintf(path, sizeof(path), "%s/diff_%05d_gpu.bin", plat_data_dir(), (int) sFrameCount);
         gfxb_capture_frame(path);
         sRefActive = FALSE;
-        if (sTraceFrame == sFrameCount) {
-            plat_log_copy_to(NULL);
-            plat_status("Snapshot saved (frame %d)", (int) sFrameCount);
-        }
+        // The renderer closes the snapshot's log once the GPU has drawn the frame.
     }
 #endif
 }

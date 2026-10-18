@@ -100,8 +100,19 @@ void plat_log_keep(void);
 /* Also writes log lines to this file until called with NULL, which closes it (3DS only). */
 void plat_log_copy_to(const char *path);
 
+/*
+ * 3DS only: closing the application. The game's threads keep running until the process ends, so the renderer stops
+ * at a quit point first (saying whether the GPU was idle), and the process ends without freeing their memory.
+ */
+enum { PLAT_3DS_PARKED_GPU_IDLE = 1, PLAT_3DS_PARKED_GPU_BUSY = 2 };
+void plat_3ds_quit_point(int parkedState);
+void plat_3ds_pause_renderer(int pause);
+void plat_3ds_exit(void) __attribute__((noreturn));
+
 /* Set when the player asks for a snapshot of the next frame (3DS: by touching the bottom screen). */
 extern volatile int gPlatSnapshotRequested;
+/* Graphics test mode for finding hardware drawing faults (3DS: touching the top half of the bottom screen cycles it). */
+extern volatile int gPlatGfxTest;
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that

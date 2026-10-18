@@ -9,6 +9,7 @@
 #include <string.h>
 
 extern u32 __ctru_heap_size;
+extern void (*__system_retAddr)(void);
 
 /*
  * All emulated N64 threads run on the application core so that, like on the N64, only one of them executes
@@ -109,6 +110,86 @@ unsigned long long plat_idle_ns(void) {
 }
 
 void plat_shutdown(void) {
+}
+
+static volatile int sQuitting;
+static volatile int sRendererParked;
+static volatile int sPauseRequested;
+static volatile int sRendererPaused;
+
+/*
+ * Called by the renderer at the start of each frame (with the GPU idle) and while it waits for the GPU. Holds it while
+ * the application is suspended (see plat_3ds_pause_renderer), and parks it for good once the application is closing
+ * (see plat_3ds_exit).
+ */
+void plat_3ds_quit_point(int parkedState) {
+    if (parkedState == PLAT_3DS_PARKED_GPU_IDLE) {
+        while (sPauseRequested && !sQuitting) {
+            sRendererPaused = 1;
+            svcSleepThread(1000000);
+        }
+        sRendererPaused = 0;
+    }
+    if (!sQuitting) {
+        return;
+    }
+    sRendererParked = parkedState;
+    for (;;) {
+        svcSleepThread(1000000000LL);
+    }
+}
+
+/*
+ * The HOME menu takes the GPU away while the application is suspended. The renderer kept drawing frames meanwhile,
+ * and the GPU hung when the game was resumed. So it waits at the start of a frame, with the GPU idle, until the
+ * application is restored.
+ */
+void plat_3ds_pause_renderer(int pause) {
+    unsigned long long start = plat_time_ns();
+    sPauseRequested = pause;
+    if (!pause) {
+        return;
+    }
+    while (!sRendererPaused && plat_time_ns() - start < 2000000000ULL) {
+        svcSleepThread(1000000);
+    }
+}
+
+void port_audio_output_exit(void);
+void gfxb_3ds_shutdown(void);
+
+/*
+ * Ends the application. Returning from main would unmap the heap while the game's threads still run on it (their
+ * stacks live there too), which crashed the whole system on exit. Instead the renderer is stopped, the sound and the
+ * GPU are shut down, APT is told the application has closed, and the process ends, which stops every thread at once.
+ */
+void plat_3ds_exit(void) {
+    unsigned long long start = plat_time_ns();
+
+    sQuitting = 1;
+    while (sRendererParked == 0 && plat_time_ns() - start < 1000000000ULL) {
+        svcSleepThread(1000000);
+    }
+    port_audio_output_exit();
+    // Nothing may use the bottom screen console once the screens are gone: hold its lock for good.
+    LightLock_Lock(&sConsoleLock);
+    if (sRendererParked == PLAT_3DS_PARKED_GPU_IDLE) {
+        gfxb_3ds_shutdown();
+    }
+    if (sRendererParked != 0) {
+        gfxExit();
+    }
+    {
+        // When the system closed the application, aptExit leaves the last step, telling the HOME menu the
+        // application has closed, to the exit code (which would run it after freeing the heap). Without it the HOME
+        // menu crashed when it next launched something. It also ends the process.
+        void (*before)(void) = __system_retAddr;
+        aptExit();
+        if (__system_retAddr != before && __system_retAddr != NULL) {
+            __system_retAddr();
+        }
+    }
+    svcExitProcess();
 }
 
 static void thread_entry(void *arg) {
