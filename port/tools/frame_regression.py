@@ -107,6 +107,10 @@ def run(exe, rom, scenario, out_dir):
     seconds = time.time() - start
     if result.returncode != 0:
         return False, "exited with code %d" % result.returncode, seconds
+    # The frame drawn as the build exits may or may not get written, so frames from that point on are dropped.
+    for name in os.listdir(frames_dir):
+        if int(name[len("frame_"):-len(".png")]) >= scenario["frames"]:
+            os.remove(os.path.join(frames_dir, name))
     expected = (scenario["frames"] - 1) // scenario["every"]
     written = len(os.listdir(frames_dir))
     if written < expected:
