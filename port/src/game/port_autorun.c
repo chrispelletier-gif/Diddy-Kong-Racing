@@ -49,6 +49,7 @@ typedef struct Race {
 } Race;
 
 static void set_phase(s32 phase);
+static void turn_off(const char *why);
 
 enum Phase {
     PHASE_OFF,
@@ -396,6 +397,13 @@ static void init(void) {
                 }
                 record_result(outcome, 0, NULL);
                 sNext = running + 1;
+                if (sNext >= sNumRaces) {
+                    // That was the last race: the run is over.
+                    plat_free(text);
+                    plat_free(state);
+                    turn_off("finished");
+                    return;
+                }
             }
             if (sNext >= sNumRaces) {
                 // The previous run had finished: start a new one.
