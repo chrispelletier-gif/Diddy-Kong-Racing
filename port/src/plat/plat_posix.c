@@ -197,6 +197,17 @@ void plat_log_copy_to(const char *path) {
     (void) path;
 }
 
+unsigned int plat_log_total(void) {
+    return 0;
+}
+
+int plat_log_recent(char *out, int size) {
+    if (size > 0) {
+        out[0] = '\0';
+    }
+    return 0;
+}
+
 void plat_status(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);

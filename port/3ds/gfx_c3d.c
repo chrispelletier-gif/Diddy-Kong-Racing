@@ -532,6 +532,7 @@ void gfxb_start_frame(void) {
         check_textures_after_frame();
         plat_log_copy_to(NULL);
         plat_status("Snapshot saved (frame %d)", sSnapshotFrame);
+        gPlatSnapshotSaved = sSnapshotFrame;
     }
     if (sFrameCount < 3) {
         plat_log("frame %d: GPU ready", sFrameCount);
@@ -1180,28 +1181,10 @@ static void set_scissor(const short rect[4]) {
 
 /*
  * The kart shadow still came out as a black square in the hub with the split above. Testing on a New 3DS showed that
- * writing the settings of the first blended draw twice fixes it (TEST_REWRITE), an empty triangle before it only
- * sometimes: the GPU seems to miss some of the settings written right after an unblended draw. The normal mode
- * (TEST_SPLIT) does both.
- *
- * Graphics test modes: touching the top half of the bottom screen moves to the next one, and the bottom screen says
- * which is on.
+ * writing the settings of the first blended draw twice fixes it (an empty triangle before it only sometimes did): the
+ * GPU seems to miss some of the settings written right after an unblended draw. Both the split and the second write
+ * are done.
  */
-enum { TEST_SPLIT, TEST_NOTHING, TEST_DIAG_ALPHA, TEST_PRIMER, TEST_REWRITE, TEST_COUNT };
-static const char *const sTestNames[TEST_COUNT] = {
-    "split and settings twice (normal)", "no fix", "show texture alpha as grey",
-    "empty triangle before blending", "settings twice only",
-};
-
-static int test_mode(void) {
-    static int sShown = -1;
-    int mode = gPlatGfxTest % TEST_COUNT;
-    if (mode != sShown) {
-        sShown = mode;
-        plat_status("Graphics test %d: %s", mode, sTestNames[mode]);
-    }
-    return mode;
-}
 
 /* Returns whether this is a blended draw after an unblended one, the case that showed the faults. */
 static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
@@ -1227,9 +1210,6 @@ static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
     }
     first = IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF);
     split = sSplitMode == 2 ? key != sLastKey : sSplitMode == 1 ? first : 0;
-    if (test_mode() != TEST_SPLIT && test_mode() != TEST_DIAG_ALPHA) {
-        split = 0;
-    }
     if (split && sVboUsed > 0 && sDrainSplits < MAX_DRAIN_SPLITS &&
         (sDrainSplits < SMALL_DRAWS_ONLY || numTriangles <= 4)) {
         // The GPU reads the vertices so far when it runs the first part of the list.
@@ -1253,7 +1233,7 @@ static void apply_alpha_diagnostic(const GfxDrawState *state) {
     if (sOn < 0) {
         sOn = plat_getenv("DKR_DIAG_ALPHA") != NULL;
     }
-    if ((!sOn && test_mode() != TEST_DIAG_ALPHA) || !IS_BLENDED(state->blend)) {
+    if (!sOn || !IS_BLENDED(state->blend)) {
         return;
     }
     for (i = 0; i < 6; i++) {
@@ -1322,7 +1302,7 @@ void C3Di_UpdateContext(void);
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
     C3DVertex *out;
     float su0, sv0, su1, sv1;
-    int i, first, primer, count = numTriangles * 3;
+    int i, first, count = numTriangles * 3;
 
     if (sVboUsed + count > VBO_VERTICES) {
         return;
@@ -1363,14 +1343,13 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     }
     first = drain_before_draw(state, numTriangles);
     set_all_state(state, &su0, &sv0, &su1, &sv1);
-    if (first && (test_mode() == TEST_REWRITE || test_mode() == TEST_SPLIT)) {
+    if (first) {
         // Write all the settings now, then mark them changed so that the draw writes them a second time.
         C3Di_UpdateContext();
         set_all_state(state, &su0, &sv0, &su1, &sv1);
     }
-    primer = first && test_mode() == TEST_PRIMER && sVboUsed + count + 3 <= VBO_VERTICES;
 
-    out = &sVbo[sVboUsed + (primer ? 3 : 0)];
+    out = &sVbo[sVboUsed];
     for (i = 0; i < count; i++) {
         const GfxVertex *v = &verts[i];
         to_screen(v, &out[i]);
@@ -1383,14 +1362,6 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         out[i].color[1] = v->g * (1.0f / 255.0f);
         out[i].color[2] = v->b * (1.0f / 255.0f);
         out[i].color[3] = v->a * (1.0f / 255.0f);
-    }
-    if (primer) {
-        // A triangle with no area, drawn with the same settings first.
-        for (i = 0; i < 3; i++) {
-            sVbo[sVboUsed + i] = out[0];
-        }
-        C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, 3);
-        sVboUsed += 3;
     }
     C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, count);
     sVboUsed += count;

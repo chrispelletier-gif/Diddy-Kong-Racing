@@ -25,6 +25,7 @@ struct PlatThread {
     Thread handle;
     PlatThreadFunc func;
     void *arg;
+    const char *name;
 };
 
 struct PlatSem {
@@ -112,6 +113,9 @@ unsigned long long plat_idle_ns(void) {
 void plat_shutdown(void) {
 }
 
+/* In bugreport_3ds.c: writes crash.txt if the thread crashes. */
+void bugreport_watch_thread(const char *name);
+
 static volatile int sQuitting;
 static volatile int sRendererParked;
 static volatile int sPauseRequested;
@@ -194,6 +198,7 @@ void plat_3ds_exit(void) {
 
 static void thread_entry(void *arg) {
     PlatThread *thread = (PlatThread *) arg;
+    bugreport_watch_thread(thread->name);
     thread->func(thread->arg);
 }
 
@@ -204,6 +209,7 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
 
     thread->func = func;
     thread->arg = arg;
+    thread->name = name;
     switch (kind) {
         case PLAT_THREAD_HARDWARE:
             prio = PRIO_HARDWARE;
@@ -336,6 +342,48 @@ static int sLogLines;
 static int sLogDebug;
 static FILE *sLogCopy;
 
+/* Every line also goes into a ring buffer, for bug reports: the file stops after the start-up lines. */
+#define LOG_RING_SIZE (48 * 1024)
+static char sLogRing[LOG_RING_SIZE];
+static unsigned int sLogRingEnd; // Total bytes ever written; the ring holds the last LOG_RING_SIZE of them.
+
+static void ring_add(const char *text, int length) {
+    int i;
+    for (i = 0; i < length; i++) {
+        sLogRing[(sLogRingEnd + i) % LOG_RING_SIZE] = text[i];
+    }
+    sLogRingEnd += length;
+}
+
+unsigned int plat_log_total(void) {
+    return sLogRingEnd;
+}
+
+/* Also used by the crash handler, without the lock: it must not wait for a thread that may have crashed holding it. */
+int plat_log_recent(char *out, int size) {
+    unsigned int end = sLogRingEnd, start, i;
+    unsigned int available = (end < LOG_RING_SIZE) ? end : LOG_RING_SIZE - 256;
+    if (size <= 0) {
+        return 0;
+    }
+    if (available > (unsigned int) size - 1) {
+        available = size - 1;
+    }
+    start = end - available;
+    for (i = 0; i < available; i++) {
+        out[i] = sLogRing[(start + i) % LOG_RING_SIZE];
+    }
+    out[available] = '\0';
+    // Start at a whole line.
+    if (start > 0) {
+        char *newline = strchr(out, '\n');
+        if (newline != NULL) {
+            memmove(out, newline + 1, strlen(newline + 1) + 1);
+        }
+    }
+    return strlen(out);
+}
+
 static FILE *log_file(void) {
     static int sChecked;
     static FILE *sFile;
@@ -363,6 +411,11 @@ static void log_line(const char *prefix, const char *text) {
         sLockReady = 1;
     }
     LightLock_Lock(&sLogLock);
+    {
+        char line[600];
+        int length = snprintf(line, sizeof(line), "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+        ring_add(line, length < (int) sizeof(line) ? length : (int) sizeof(line) - 1);
+    }
     file = log_file();
     if (file != NULL) {
         fprintf(file, "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
@@ -420,6 +473,31 @@ static void console_flush(void) {
     GSPGPU_FlushDataCache(fb, width * height * 2);
 }
 
+/*
+ * The bottom screen: the start-up lines and status messages scroll in its top 25 rows; below them is a fixed panel of
+ * 5 rows (screen rows 26-30): the update buttons (update_3ds.c) and the watchdog's two lines. Both are consoles on
+ * the same framebuffer, each with its own window.
+ */
+static PrintConsole sMainConsole, sPanelConsole;
+
+void plat_3ds_console_init(void) {
+    consoleInit(GFX_BOTTOM, &sMainConsole);
+    sPanelConsole = sMainConsole;
+    consoleSetWindow(&sMainConsole, 1, 1, 40, 25);
+    consoleSetWindow(&sPanelConsole, 1, 26, 40, 5);
+    consoleSelect(&sMainConsole);
+}
+
+/* Replaces row (1-5) of the panel; text must fit on the row (escape sequences aside). */
+void plat_3ds_panel_print(int row, const char *text) {
+    LightLock_Lock(&sConsoleLock);
+    consoleSelect(&sPanelConsole);
+    printf("\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row, text);
+    consoleSelect(&sMainConsole);
+    console_flush();
+    LightLock_Unlock(&sConsoleLock);
+}
+
 /* The bottom screen console is the current one (see main_3ds.c). */
 void plat_status(const char *fmt, ...) {
     char buffer[256];
@@ -471,11 +549,10 @@ static void watchdog(void *arg) {
         }
         memcpy(last, now, sizeof(last));
 
-        // Two fixed rows at the bottom; the cursor is put back for the start-up lines.
-        LightLock_Lock(&sConsoleLock);
-        printf("\x1b[s\x1b[29;1H\x1b[2K%.39s\x1b[30;1H\x1b[2K%.39s\x1b[u", line[0], line[1]);
-        console_flush();
-        LightLock_Unlock(&sConsoleLock);
+        // The last two rows of the panel, cut to fit.
+        line[0][39] = line[1][39] = '\0';
+        plat_3ds_panel_print(4, line[0]);
+        plat_3ds_panel_print(5, line[1]);
 
         if (seconds % 5 == 0 && seconds <= 60) {
             log_line("watchdog: ", line[0]);

@@ -8,6 +8,8 @@
 
 #include "plat/plat.h"
 
+int update_3ds_touch(int x, int y);
+
 typedef struct PortControllerState {
     u16 buttons;
     s8 stickX;
@@ -69,13 +71,12 @@ void port_input_poll(PortControllerState *state, s32 maxControllers) {
 
     hidScanInput();
     held = hidKeysHeld();
-    if (hidKeysDown() & KEY_TOUCH) {
+    // SELECT + touch sends a bug report instead (bugreport_3ds.c), which takes its own snapshot. The buttons at the
+    // bottom of the screen are the update's (update_3ds.c).
+    if ((hidKeysDown() & KEY_TOUCH) && !(held & KEY_SELECT)) {
         touchPosition touch;
         hidTouchRead(&touch);
-        // The top half switches the graphics test mode (see gfx_c3d.c), the bottom half takes a snapshot.
-        if (touch.py < 120) {
-            gPlatGfxTest++;
-        } else {
+        if (!update_3ds_touch(touch.px, touch.py)) {
             gPlatSnapshotRequested = 1;
         }
     }

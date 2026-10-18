@@ -83,6 +83,52 @@ jobs:
             port/build/3ds/dkr.3dsx
             port/build/3ds/dkr.elf
 
+  # The game's "Check for updates" button (port/3ds/update_3ds.c) installs these: release 3ds-newest has the build of
+  # the latest push to any branch, 3ds-master the latest build of master. Each holds dkr.3dsx and build.txt.
+  publish-3ds:
+    name: Publish the 3DS build
+    needs: build-3ds
+    if: github.event_name == 'push' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # One at a time; a newer build waiting replaces an older one.
+    concurrency:
+      group: port-publish-3ds
+    steps:
+      - name: Download dkr.3dsx
+        uses: actions/download-artifact@v4
+        with:
+          name: dkr-3ds-${{ github.sha }}
+          path: build
+
+      - name: Write build.txt
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          printf 'commit=%s\nbranch=%s\ndate=%s\nsize=%s\nsha256=%s\n' "$GITHUB_SHA" "$BRANCH" \
+            "$(date -u +%Y-%m-%dT%H:%MZ)" "$(stat -c %s build/dkr.3dsx)" \
+            "$(sha256sum build/dkr.3dsx | cut -d' ' -f1)" > build/build.txt
+          cat build/build.txt
+
+      - name: Publish the releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          publish() {
+            gh release delete "$1" --cleanup-tag --yes 2>/dev/null || true
+            gh release create "$1" --prerelease --target "$GITHUB_SHA" --title "$2" \
+              --notes "3DS build of $BRANCH at $GITHUB_SHA, made by CI. Install it from the game's Check for updates button." \
+              build/dkr.3dsx build/build.txt
+          }
+          publish 3ds-newest "3DS build: newest ($BRANCH)"
+          if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
+            publish 3ds-master "3DS build: master"
+          fi
+
   host:
     name: Host build and frame regression
     needs: assets

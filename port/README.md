@@ -67,7 +67,8 @@ runs silently.
 | SELECT        | L                   |                         |
 | START         | START               | Pause                   |
 
-The menus are driven by the stick, as on the N64.
+The menus are driven by the stick, as on the N64. Touching the bottom screen saves a snapshot of the frame (see
+below); holding SELECT while touching it sends a bug report.
 
 ## How it works
 
@@ -127,6 +128,53 @@ controls) work there, as do these renderer switches:
 - `DKR_VERTEX_FOG=1` (the old per vertex fog, for comparison)
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_SINGLE_CORE=1` (on a New 3DS, keeps the renderer on the main core as on an Old 3DS)
+
+## Bug reports
+
+The 3DS build can send a bug report over Wi-Fi as an issue on this repository, labelled `3ds-bug-report`:
+- Hold SELECT and touch the bottom screen. The game saves a snapshot of the frame and sends it with the log. This
+  also works when the game has frozen, without the snapshot if the renderer has stopped.
+- If the game crashes it writes `sdmc:/3ds/dkr/crash.txt` (the registers, the stack and the recent log) and goes
+  back to the Homebrew Launcher. The next time it starts, and also after a freeze that needed the power button, it
+  offers to send the last run's log and crash report (A sends, B skips).
+
+It needs a GitHub token that may only create issues, in `sdmc:/3ds/dkr/bugreport.txt`:
+1. On GitHub open Settings, Developer settings, Personal access tokens, Fine-grained tokens, and choose
+   Generate new token.
+2. Name it (for example "DKR 3DS bug reports") and pick an expiry date.
+3. Under Repository access choose Only select repositories, and pick this repository.
+4. Under Permissions, Repository permissions, set Issues to Read and write. Leave everything else as it is.
+5. Generate the token and copy it (it starts with `github_pat_`).
+6. Create `sdmc:/3ds/dkr/bugreport.txt` containing one line: `token=github_pat_...`. A `repo=owner/name` line sends
+   the reports to another repository.
+
+The token never leaves the console except to GitHub, and is not part of the reports. A report that cannot be sent
+is kept as `sdmc:/3ds/dkr/bugreport_unsent.txt`.
+
+The issue body has the build, the console, the counters and the end of the log. The files (the snapshot's
+`diff_N_ref.png`, `diff_N_gpu.bin` and `diff_N_log.txt`, `log.txt`, `env.txt`, or `last_log.txt` and
+`last_crash.txt` after a crash) are posted as compressed comments on the issue. To get them back:
+
+```sh
+python3 port/tools/bugreport_fetch.py --list        # open reports
+python3 port/tools/bugreport_fetch.py 12             # saves issue 12 to bugreport_12/
+python3 port/tools/diff_frames.py bugreport_12 bugreport_12/diff
+```
+
+A crash report gives `pc` and `lr`; with the `dkr.elf` of the same build (the `Build` line is its commit),
+`arm-none-eabi-addr2line -f -e dkr.elf <pc> <lr>` names the functions.
+
+## Updates
+
+CI publishes every 3DS build as a pre-release: `3ds-newest` is the latest push to any branch, `3ds-master` the
+latest build of master. Tap Check for updates at the bottom of the bottom screen; the game lists both builds (the
+one running is marked "this") and offers master, newest or cancel. The chosen build is downloaded next to the
+running `.3dsx`, checked against its size and sha256, and replaces it; tap Quit to finish the update, or keep
+playing and the new build runs next time. It only works when the game was started from the SD card (not over
+3dslink).
+
+While the repository is public no token is needed. For a private repository the token in
+`sdmc:/3ds/dkr/bugreport.txt` is used, and it needs Contents set to Read-only as well (step 4 above).
 
 ## Automated testing
 
