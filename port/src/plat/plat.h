@@ -116,6 +116,8 @@ extern volatile int gPlatSnapshotSaved;
 
 /* Copies the most recent log lines, oldest first, into out (3DS only; empty elsewhere). Returns the length. */
 int plat_log_recent(char *out, int size);
+/* How many bytes have been logged so far (3DS only; 0 elsewhere). Shows whether logging is still going on. */
+unsigned int plat_log_total(void);
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
