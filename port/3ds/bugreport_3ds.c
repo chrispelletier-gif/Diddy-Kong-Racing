@@ -9,7 +9,6 @@
  * Sending needs sdmc:/3ds/dkr/bugreport.txt with a line "token=<GitHub token>" (see the README).
  */
 #include <3ds.h>
-#include <curl/curl.h>
 #include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +18,7 @@
 
 #include "plat/bugreport.h"
 #include "plat/plat.h"
-#include "github_ca.h"
+#include "net_3ds.h"
 
 #ifndef PORT_BUILD_VERSION
 #define PORT_BUILD_VERSION "unknown"
@@ -321,57 +320,23 @@ static void show_progress(const char *text) {
 
 /* Sets up the network, sends, and takes it down again. Returns 0 on success; result has the issue or the error. */
 static int send_report(const ReportConfig *config, Report *report, char *result, size_t resultSize) {
-    static int sCurlReady;
     BugReportConfig send;
-    u32 wifi = 0;
-    u32 *socBuffer = NULL;
-    u32 socSize = 0x100000;
     int status;
 
-    if (R_SUCCEEDED(acInit())) {
-        ACU_GetWifiStatus(&wifi);
-        acExit();
-        if (wifi == 0) {
-            snprintf(result, resultSize, "no Wi-Fi connection");
-            return -1;
-        }
-    }
-    // The network buffer comes from the heap the game also uses; take less if a full one does not fit.
-    while (socBuffer == NULL && socSize >= 0x40000) {
-        socBuffer = memalign(0x1000, socSize);
-        if (socBuffer == NULL) {
-            socSize /= 2;
-        }
-    }
-    if (socBuffer == NULL) {
-        snprintf(result, resultSize, "not enough memory for the network");
+    if (net_3ds_begin(result, resultSize) != 0) {
         return -1;
     }
-    if (R_FAILED(socInit(socBuffer, socSize))) {
-        free(socBuffer);
-        snprintf(result, resultSize, "could not start the network");
-        return -1;
-    }
-    sslcInit(0); // For the TLS library's random numbers.
-    if (!sCurlReady) {
-        curl_global_init(CURL_GLOBAL_DEFAULT);
-        sCurlReady = 1;
-    }
-
     memset(&send, 0, sizeof(send));
     send.token = config->token;
     send.repo = config->repo;
     send.apiUrl = config->apiUrl;
     send.label = REPORT_LABEL;
-    send.caPem = sGithubCaPem;
-    send.caFile = file_exists(DATA_DIR "/cacert.pem") ? DATA_DIR "/cacert.pem" : NULL;
+    send.caPem = net_3ds_ca_pem();
+    send.caFile = net_3ds_ca_file();
     send.userAgent = "dkr-3ds/" PORT_BUILD_VERSION;
     status = bugreport_send(&send, report->title, report->body, report->files, report->fileCount,
                             MAX_ATTACHMENT_BYTES, show_progress, result, resultSize);
-
-    sslcExit();
-    socExit();
-    free(socBuffer);
+    net_3ds_end();
     return status;
 }
 

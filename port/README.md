@@ -164,6 +164,18 @@ python3 port/tools/diff_frames.py bugreport_12 bugreport_12/diff
 A crash report gives `pc` and `lr`; with the `dkr.elf` of the same build (the `Build` line is its commit),
 `arm-none-eabi-addr2line -f -e dkr.elf <pc> <lr>` names the functions.
 
+## Updates
+
+CI publishes every 3DS build as a pre-release: `3ds-newest` is the latest push to any branch, `3ds-master` the
+latest build of master. Tap Check for updates at the bottom of the bottom screen; the game lists both builds (the
+one running is marked "this") and offers master, newest or cancel. The chosen build is downloaded next to the
+running `.3dsx`, checked against its size and sha256, and replaces it; tap Quit to finish the update, or keep
+playing and the new build runs next time. It only works when the game was started from the SD card (not over
+3dslink).
+
+While the repository is public no token is needed. For a private repository the token in
+`sdmc:/3ds/dkr/bugreport.txt` is used, and it needs Contents set to Read-only as well (step 4 above).
+
 ## Automated testing
 
 These settings work on both builds (in `env.txt` on the 3DS, as environment variables on the host):

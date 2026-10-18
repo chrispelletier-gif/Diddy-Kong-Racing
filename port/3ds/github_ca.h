@@ -1,4 +1,4 @@
-/* Root certificates for api.github.com (Sectigo/USERTrust, DigiCert, ISRG), from the Mozilla CA store. */
+/* Root certificates for GitHub, its API and its release downloads (Sectigo/USERTrust, DigiCert, ISRG), from Mozilla. */
 static const char sGithubCaPem[] =
     /* USERTrust ECC Certification Authority */
     "-----BEGIN CERTIFICATE-----\n"

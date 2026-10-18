@@ -92,11 +92,13 @@ ifeq ($(TARGET),3ds)
   PORTLIBS  := $(DEVKITPRO)/portlibs/3ds
   # Identifies the build in bug reports.
   PORT_BUILD_VERSION := $(shell git -c safe.directory='*' describe --always --dirty 2>/dev/null || echo unknown)
+  # The full commit, which the update (3ds/update_3ds.c) compares with the published builds.
+  PORT_BUILD_COMMIT := $(shell git -c safe.directory='*' rev-parse HEAD 2>/dev/null)
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include -Iinclude -Isrc \
-                -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\"
+                -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\" -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
   LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning
-  # curl and mbedtls (devkitPro's 3ds-curl) send bug reports.
+  # curl and mbedtls (devkitPro's 3ds-curl) send bug reports and download updates.
   LIBS      := -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru -lm
   EXE       := $(BUILD_DIR)/dkr.elf
 else

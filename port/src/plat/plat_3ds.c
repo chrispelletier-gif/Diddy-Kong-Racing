@@ -469,6 +469,31 @@ static void console_flush(void) {
     GSPGPU_FlushDataCache(fb, width * height * 2);
 }
 
+/*
+ * The bottom screen: the start-up lines and status messages scroll in its top 25 rows; below them is a fixed panel of
+ * 5 rows (screen rows 26-30): the update buttons (update_3ds.c) and the watchdog's two lines. Both are consoles on
+ * the same framebuffer, each with its own window.
+ */
+static PrintConsole sMainConsole, sPanelConsole;
+
+void plat_3ds_console_init(void) {
+    consoleInit(GFX_BOTTOM, &sMainConsole);
+    sPanelConsole = sMainConsole;
+    consoleSetWindow(&sMainConsole, 1, 1, 40, 25);
+    consoleSetWindow(&sPanelConsole, 1, 26, 40, 5);
+    consoleSelect(&sMainConsole);
+}
+
+/* Replaces row (1-5) of the panel; text must fit on the row (escape sequences aside). */
+void plat_3ds_panel_print(int row, const char *text) {
+    LightLock_Lock(&sConsoleLock);
+    consoleSelect(&sPanelConsole);
+    printf("\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row, text);
+    consoleSelect(&sMainConsole);
+    console_flush();
+    LightLock_Unlock(&sConsoleLock);
+}
+
 /* The bottom screen console is the current one (see main_3ds.c). */
 void plat_status(const char *fmt, ...) {
     char buffer[256];
@@ -520,11 +545,10 @@ static void watchdog(void *arg) {
         }
         memcpy(last, now, sizeof(last));
 
-        // Two fixed rows at the bottom; the cursor is put back for the start-up lines.
-        LightLock_Lock(&sConsoleLock);
-        printf("\x1b[s\x1b[29;1H\x1b[2K%.39s\x1b[30;1H\x1b[2K%.39s\x1b[u", line[0], line[1]);
-        console_flush();
-        LightLock_Unlock(&sConsoleLock);
+        // The last two rows of the panel, cut to fit.
+        line[0][39] = line[1][39] = '\0';
+        plat_3ds_panel_print(4, line[0]);
+        plat_3ds_panel_print(5, line[1]);
 
         if (seconds % 5 == 0 && seconds <= 60) {
             log_line("watchdog: ", line[0]);
