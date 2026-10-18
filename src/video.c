@@ -47,6 +47,11 @@ u8 D_801262E4;
 UNUSED OSMesg D_801262E8[8];
 u8 gVideoDeltaCounter;
 u8 gVideoDeltaTime;
+#ifdef TARGET_PORT
+#define PORT_SLOW_FRAMES 3 // Slow frames in a row before the frame rate drops (see fb_update).
+#define PORT_FAST_FRAMES 4 // Fast frames in a row before it comes back.
+static u8 sPortSlowFrames;
+#endif
 OSScClient gVideoSched;
 
 /******************************/
@@ -268,6 +273,9 @@ void fb_alloc(s32 index) {
  */
 void video_delta_reset(void) {
     gVideoDeltaCounter = 0;
+#ifdef TARGET_PORT
+    sPortSlowFrames = 0;
+#endif
     gVideoDeltaTime = LOGIC_30FPS;
 }
 
@@ -296,6 +304,29 @@ s32 fb_update(s32 mesg) {
         tempUpdateRate++;
     }
 
+#ifdef TARGET_PORT
+    // The N64 code drops to the slower rate after one slow frame and needs 20 fast frames in a row to come back, so
+    // a single hitch (a texture decode, a burst of audio) meant 20 fps for two-thirds of a second. Here a slow frame
+    // or two stay just that (the logic step already covers the extra time), the rate drops only after
+    // PORT_SLOW_FRAMES slow frames in a row, and it comes back after PORT_FAST_FRAMES fast ones.
+    if (tempUpdateRate < gVideoDeltaTime) {
+        sPortSlowFrames = 0;
+        if (++gVideoDeltaCounter >= PORT_FAST_FRAMES) {
+            gVideoDeltaTime = tempUpdateRate;
+            gVideoDeltaCounter = 0;
+        }
+    } else {
+        gVideoDeltaCounter = 0;
+        if (gVideoDeltaTime < tempUpdateRate && D_801262E4 >= tempUpdateRate) {
+            if (++sPortSlowFrames >= PORT_SLOW_FRAMES) {
+                gVideoDeltaTime = tempUpdateRate;
+                sPortSlowFrames = 0;
+            }
+        } else {
+            sPortSlowFrames = 0;
+        }
+    }
+#else
     if (tempUpdateRate < gVideoDeltaTime) {
         if (gVideoDeltaCounter < 20) {
             gVideoDeltaCounter++;
@@ -310,6 +341,7 @@ s32 fb_update(s32 mesg) {
             gVideoDeltaTime = tempUpdateRate;
         }
     }
+#endif
     while (tempUpdateRate < gVideoDeltaTime) {
         osRecvMesg(gVideoMesgQueue, NULL, OS_MESG_BLOCK);
         tempUpdateRate++;
