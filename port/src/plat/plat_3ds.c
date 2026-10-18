@@ -355,6 +355,10 @@ static void ring_add(const char *text, int length) {
     sLogRingEnd += length;
 }
 
+unsigned int plat_log_total(void) {
+    return sLogRingEnd;
+}
+
 /* Also used by the crash handler, without the lock: it must not wait for a thread that may have crashed holding it. */
 int plat_log_recent(char *out, int size) {
     unsigned int end = sLogRingEnd, start, i;

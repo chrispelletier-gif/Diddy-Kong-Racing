@@ -560,16 +560,32 @@ static void report_now(void) {
     ReportConfig config;
     Report report;
     int haveToken = load_config(&config);
-    int before = gPlatSnapshotSaved, waited;
+    int before = gPlatSnapshotSaved, waited, quiet = 0;
+    unsigned int logged;
     static char recent[32 * 1024];
 
     show_status(haveToken ? "Bug report: taking a snapshot"
                           : "Bug report: no token in sdmc:/3ds/dkr/bugreport.txt; saving a snapshot only");
     plat_log("bug report requested");
+    // The log as it was before the snapshot, which fills it with the frame's draws (those are in its own file).
+    plat_log_recent(recent, sizeof(recent));
     gPlatSnapshotRequested = 1;
-    // If the renderer is stuck there is no snapshot; the report goes without it.
-    for (waited = 0; waited < 50 && gPlatSnapshotSaved == before; waited++) {
+    // A snapshot writes a line for every display list command and draw, which takes the SD card some 20 seconds. So
+    // the report waits as long as the log keeps growing (up to two minutes), and gives up after 5 quiet seconds: then
+    // the renderer is stuck and the report goes without a snapshot.
+    logged = plat_log_total();
+    for (waited = 0; waited < 1200 && quiet < 50 && gPlatSnapshotSaved == before; waited++) {
         svcSleepThread(100 * 1000 * 1000);
+        if (plat_log_total() != logged) {
+            logged = plat_log_total();
+            quiet = 0;
+        } else {
+            quiet++;
+        }
+        if (waited % 50 == 49) {
+            plat_status("Bug report: saving the snapshot (%d s)", (waited + 1) / 10);
+            logged = plat_log_total(); // The line above is not progress.
+        }
     }
     if (!haveToken) {
         return;
@@ -595,7 +611,6 @@ static void report_now(void) {
     }
     add_file(&report, "log.txt");
     add_file(&report, "env.txt");
-    plat_log_recent(recent, sizeof(recent));
     build_body(&report, NULL, recent);
     sShow = show_status;
     send_and_show(&config, &report);
