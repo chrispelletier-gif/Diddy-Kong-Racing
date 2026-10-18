@@ -38,6 +38,15 @@ unsigned long long plat_idle_ns(void) {
 void plat_shutdown(void) {
 }
 
+void plat_overlay_show(const char *text) {
+    (void) text;
+}
+
+void plat_send_test_results(const char *title, const char *summary) {
+    (void) title;
+    (void) summary;
+}
+
 static void *thread_entry(void *arg) {
     PlatThread *thread = (PlatThread *) arg;
     thread->func(thread->arg);

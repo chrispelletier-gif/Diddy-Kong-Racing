@@ -33,9 +33,18 @@
 void plat_3ds_panel_print(int row, const char *text);
 void plat_3ds_request_quit(void);
 void bugreport_watch_thread(const char *name);
+void bugreport_request(void);
+long port_autorun_enabled(void);
+void port_autorun_request(long start);
 
+/*
+ * The panel's buttons also start the other bottom screen actions: in the idle state they are "Bug report" (the same
+ * as SELECT + touch), "Test run" (port_autorun.c, after a confirmation) and "Updates". Touches anywhere else on the
+ * screen do nothing.
+ */
 enum UpdateState {
-    STATE_IDLE,     /* "Check for updates". */
+    STATE_IDLE,     /* Bug report / Test run / Updates. */
+    STATE_CONFIRM,  /* Start or stop the test run / - / cancel. */
     STATE_BUSY,     /* Checking or downloading; taps are ignored. */
     STATE_CHOOSE,   /* master / newest / cancel. */
     STATE_INSTALLED /* "Quit to finish the update". */
@@ -92,6 +101,31 @@ static void draw_buttons(const char *const *labels, int count) {
 
 static void draw_text_button(const char *label) {
     draw_buttons(&label, 1);
+}
+
+static int sTestRunShown = -1; // Whether the idle buttons say "Stop test" (1) or "Test run" (0).
+
+static void draw_home(void) {
+    const char *labels[3];
+    sTestRunShown = port_autorun_enabled() != 0;
+    labels[0] = "Bug report";
+    labels[1] = sTestRunShown ? "Stop test" : "Test run";
+    labels[2] = "Updates";
+    draw_buttons(labels, 3);
+}
+
+static void draw_confirm(void) {
+    const char *labels[3];
+    labels[0] = sTestRunShown ? "Stop test" : "Start test";
+    labels[1] = "-";
+    labels[2] = "cancel";
+    draw_buttons(labels, 3);
+    if (sTestRunShown) {
+        plat_status("Stop the test run? The results so far are sent as a report.");
+    } else {
+        plat_status("Test run: the AI races every track with every character (some 8 hours), recording a profile");
+        plat_status("of each race and any crash. Saves aren't written meanwhile. It starts from the title screen.");
+    }
 }
 
 static void show_busy(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -536,8 +570,8 @@ int update_3ds_touch(int x, int y) {
         return 0;
     }
     // Columns: one wide button, or three of 12 characters with a space before each (8 pixels a character).
-    button = sState == STATE_CHOOSE ? (x / 8 - 1) / 13 : 0;
-    if (sState == STATE_BUSY || button < 0 || button > 2) {
+    button = sState == STATE_INSTALLED ? 0 : (x / 8 - 1) / 13;
+    if (sState == STATE_BUSY || button < 0 || button > 2 || (x / 8) % 13 == 0) {
         return 1;
     }
     sTappedButton = button;
@@ -550,23 +584,47 @@ static void update_thread(void *arg) {
     bugreport_watch_thread("update");
     for (;;) {
         int button;
-        LightEvent_Wait(&sTapEvent);
+        // Every two seconds without a tap, the test run button is brought up to date (a run ends by itself).
+        if (LightEvent_WaitTimeout(&sTapEvent, 2000000000LL) != 0) {
+            if (sState == STATE_IDLE && sTestRunShown != (port_autorun_enabled() != 0)) {
+                draw_home();
+            }
+            continue;
+        }
         button = sTappedButton;
         switch (sState) {
             case STATE_IDLE:
-                sState = STATE_BUSY;
-                if (check()) {
-                    sState = STATE_CHOOSE;
-                    draw_choices();
+                if (button == 0) {
+                    bugreport_request();
+                } else if (button == 1) {
+                    sState = STATE_CONFIRM;
+                    draw_confirm();
                 } else {
+                    sState = STATE_BUSY;
+                    if (check()) {
+                        sState = STATE_CHOOSE;
+                        draw_choices();
+                    } else {
+                        sState = STATE_IDLE;
+                        draw_home();
+                    }
+                }
+                break;
+            case STATE_CONFIRM:
+                if (button == 0) {
+                    port_autorun_request(!sTestRunShown);
+                    // The run turns on or off at the game's next frame.
+                    svcSleepThread(200 * 1000 * 1000);
+                }
+                if (button != 1) {
                     sState = STATE_IDLE;
-                    draw_text_button("Check for updates");
+                    draw_home();
                 }
                 break;
             case STATE_CHOOSE:
                 if (button == 2) {
                     sState = STATE_IDLE;
-                    draw_text_button("Check for updates");
+                    draw_home();
                 } else if (sChannels[button].found) {
                     sState = STATE_BUSY;
                     sChosen = button;
@@ -595,7 +653,7 @@ void update_3ds_start(const char *selfPath) {
     }
     LightEvent_Init(&sTapEvent, RESET_ONESHOT);
     sState = STATE_IDLE;
-    draw_text_button("Check for updates");
+    draw_home();
     sStarted = 1;
     // 64 KB: the TLS handshake needs a deep stack.
     if (threadCreate(update_thread, NULL, 64 * 1024, 0x18, 0, true) == NULL) {

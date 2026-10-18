@@ -498,6 +498,51 @@ void plat_3ds_panel_print(int row, const char *text) {
     LightLock_Unlock(&sConsoleLock);
 }
 
+/*
+ * The profiler (plat_overlay_show) takes screen rows 14-25 while it is on, and the start-up lines and status messages
+ * scroll in rows 1-13 instead.
+ */
+#define OVERLAY_ROW 14
+#define OVERLAY_ROWS 12
+static PrintConsole sOverlayConsole;
+static int sOverlayShown;
+
+void plat_overlay_show(const char *text) {
+    int row = 0, clear = text[0] == '\0';
+    LightLock_Lock(&sConsoleLock);
+    if (!sOverlayShown && !clear) {
+        sOverlayShown = 1;
+        sOverlayConsole = sMainConsole;
+        consoleSetWindow(&sOverlayConsole, 1, OVERLAY_ROW, 40, OVERLAY_ROWS);
+        consoleSetWindow(&sMainConsole, 1, 1, 40, OVERLAY_ROW - 1);
+        consoleSelect(&sMainConsole);
+        printf("\x1b[%d;1H", OVERLAY_ROW - 1); // Carry on at the bottom of the smaller window.
+    }
+    if (sOverlayShown) {
+        consoleSelect(&sOverlayConsole);
+        // One row per line (the caller keeps each line to 39 visible characters); the first row is yellow.
+        while (row < OVERLAY_ROWS && *text != '\0') {
+            const char *end = strchr(text, '\n');
+            int length = end != NULL ? (int) (end - text) : (int) strlen(text);
+            printf("\x1b[%d;1H\x1b[0m\x1b[2K%s%.*s\x1b[0m", row + 1, row == 0 ? "\x1b[33m" : "", length, text);
+            text += length + (end != NULL);
+            row++;
+        }
+        for (; row < OVERLAY_ROWS; row++) {
+            printf("\x1b[%d;1H\x1b[0m\x1b[2K", row + 1);
+        }
+        consoleSelect(&sMainConsole);
+        if (clear) {
+            // Gone: the status messages get the whole area back.
+            sOverlayShown = 0;
+            consoleSetWindow(&sMainConsole, 1, 1, 40, OVERLAY_ROW + OVERLAY_ROWS - 1);
+            printf("\x1b[%d;1H", OVERLAY_ROW - 1);
+        }
+        console_flush();
+    }
+    LightLock_Unlock(&sConsoleLock);
+}
+
 /* The bottom screen console is the current one (see main_3ds.c). */
 void plat_status(const char *fmt, ...) {
     char buffer[256];
@@ -518,9 +563,35 @@ void plat_status(const char *fmt, ...) {
  * running even if a game thread never yields; if its line stops updating, the whole system is stuck (for example
  * the GPU).
  */
+long port_autorun_enabled(void);
+
+/*
+ * During the unattended test run, a renderer that has drawn nothing for 20 seconds (outside the HOME menu) is taken
+ * as a hang, and written down for the next launch to record (port_autorun.c); the file goes again if drawing resumes.
+ */
+static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written) {
+    char path[256], text[160];
+    snprintf(path, sizeof(path), "%s/autorun_hang.txt", plat_data_dir());
+    if (framesDrawn || sPauseRequested || !port_autorun_enabled()) {
+        *stalledSeconds = 0;
+        if (*written) {
+            *written = 0;
+            remove(path);
+        }
+        return;
+    }
+    if (++*stalledSeconds == 20) {
+        snprintf(text, sizeof(text), "renderer stuck while %s (gfx %u/%u, vi %u)\n",
+                 gPlatGfxStage != NULL ? gPlatGfxStage : "-", gPlatCounters[PLAT_COUNTER_GFX_QUEUED],
+                 gPlatCounters[PLAT_COUNTER_GFX_DONE], gPlatCounters[PLAT_COUNTER_VI]);
+        *written = plat_save_file(path, text, strlen(text));
+        log_line("watchdog: ", text);
+    }
+}
+
 static void watchdog(void *arg) {
     unsigned int last[PLAT_COUNTER_COUNT];
-    int seconds = 0;
+    int seconds = 0, stalledSeconds = 0, hangWritten = 0;
 
     (void) arg;
     memset(last, 0, sizeof(last));
@@ -547,6 +618,7 @@ static void watchdog(void *arg) {
                      now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED],
                      now[PLAT_COUNTER_TEXTURE_FAILED], gpuFree / 10, gpuFree % 10, heapFree / 10, heapFree % 10);
         }
+        check_for_hang(now[PLAT_COUNTER_GFX_DONE] != last[PLAT_COUNTER_GFX_DONE], &stalledSeconds, &hangWritten);
         memcpy(last, now, sizeof(last));
 
         // The last two rows of the panel, cut to fit.

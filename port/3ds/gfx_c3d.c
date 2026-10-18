@@ -12,6 +12,7 @@
 
 #include "gfx/gfx_backend.h"
 #include "plat/plat.h"
+#include "plat/profile.h"
 #include "shader_shbin.h"
 
 /* The display transfer converts to the screen's format and, with anti-aliasing, averages each 2x2 block of pixels. */
@@ -501,6 +502,7 @@ static void process_pending_frees(void) {
 }
 
 void gfxb_start_frame(void) {
+    unsigned long long waitStart;
     // No vblank throttling here: the emulated VI already paces the game. Beginning a frame still waits for the GPU
     // to finish the previous one, after which its textures can be deleted and the vertex buffer reused.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
@@ -508,6 +510,7 @@ void gfxb_start_frame(void) {
         plat_log("frame %d: waiting for the GPU", sFrameCount);
     }
     gPlatGfxStage = "waiting for the GPU";
+    waitStart = plat_time_ns();
     if (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
         // Poll instead of blocking, so that a GPU that never finishes the previous frame gets reported.
         unsigned long long start = plat_time_ns();
@@ -521,6 +524,13 @@ void gfxb_start_frame(void) {
             }
             plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_BUSY);
             plat_sleep_ns(250000);
+        }
+    }
+    if (prof_enabled()) {
+        prof_add(PROF_GPU_WAIT, plat_time_ns() - waitStart);
+        if (sFrameCount > 0) {
+            // How long the GPU took to draw the previous frame, which it has just finished.
+            prof_add(PROF_GPU_DRAW, (unsigned long long) (C3D_GetDrawingTime() * 1000000.0f));
         }
     }
     // The application is closing: stop here, with the GPU idle and no frame being built, so it can be shut down.

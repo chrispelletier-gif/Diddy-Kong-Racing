@@ -120,6 +120,14 @@ int plat_log_recent(char *out, int size);
 unsigned int plat_log_total(void);
 
 /*
+ * Shows a block of text lines (separated by '\n') above the watchdog on the bottom screen of the 3DS, replacing the
+ * previous block; ignored elsewhere. Used by the profiler.
+ */
+void plat_overlay_show(const char *text);
+/* Sends the unattended test run's results as a GitHub issue, in the background, if bug reports are set up (3DS). */
+void plat_send_test_results(const char *title, const char *summary);
+
+/*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
  * stops counting says which part of the game stopped.
  */

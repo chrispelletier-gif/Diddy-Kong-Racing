@@ -28,6 +28,9 @@
 #include "printf.h"
 #include "save_data.h"
 #include "structs.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 #include "textures_sprites.h"
 #include "thread3_main.h"
 #include "tracks.h"
@@ -4290,6 +4293,12 @@ void update_player_racer(Object *obj, s32 updateRate) {
         }
         tempVar = tempRacer->playerIndex;
         if (tempRacer->playerIndex != PLAYER_COMPUTER) {
+#ifdef TARGET_PORT
+            if (port_autorun_drives() && tempRacer->exitObj == 0) {
+                // DKR_AUTORUN: the AI drives the player's kart, as it does after the finish line.
+                racer_AI_pathing_inputs(obj, tempRacer, updateRate);
+            } else
+#endif
             if (tempRacer->exitObj == 0) {
                 if (is_race_started_by_player_two()) {
                     tempVar = 1 - tempVar;

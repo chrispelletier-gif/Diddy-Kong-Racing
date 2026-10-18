@@ -111,16 +111,22 @@ static inline s32 port_atoi(const char *s) {
     return neg ? -v : v;
 }
 
-/* Simple profiling: accumulated time per category, logged periodically by port_profile_frame(). */
-enum { PORT_PROFILE_GFX, PORT_PROFILE_AUDIO, PORT_PROFILE_COUNT };
-void port_profile_add(s32 category, unsigned long long ns);
-void port_profile_frame(void);
-
 /* Test helpers (port/src/game/port_test.c). */
 s32 port_warp_next(s32 levelId, s32 *cutsceneId, s16 *timer);
 s32 port_warp_active(void);
 s32 port_gfx_frame_count(void);
 s32 port_apply_test_save(void *settings);
+
+/* Unattended test run (port/src/game/port_autorun.c). */
+s32 port_autorun_enabled(void);
+s32 port_autorun_active(void);
+s32 port_autorun_title(void);
+s32 port_autorun_drives(void);
+s32 port_autorun_quit_race(void);
+void port_autorun_request(s32 start);
+void port_autorun_frame(s32 updateRate);
+/* Sets up a one player tracks mode race as the menus would, and returns the menu result that starts it (menu.c). */
+s32 port_autorun_setup_race(s32 levelId, s32 character, s32 vehicle);
 
 /* Logging. */
 void port_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

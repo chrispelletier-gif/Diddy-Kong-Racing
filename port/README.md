@@ -67,8 +67,9 @@ runs silently.
 | SELECT        | L                   |                         |
 | START         | START               | Pause                   |
 
-The menus are driven by the stick, as on the N64. Touching the bottom screen saves a snapshot of the frame (see
-below); holding SELECT while touching it sends a bug report.
+The menus are driven by the stick, as on the N64. At the bottom of the bottom screen are three buttons: Bug report,
+Test run and Updates (see below). The rest of the touch screen does nothing, so a stray tap can't interrupt a race;
+holding SELECT while touching anywhere also sends a bug report.
 
 ## How it works
 
@@ -132,8 +133,9 @@ controls) work there, as do these renderer switches:
 ## Bug reports
 
 The 3DS build can send a bug report over Wi-Fi as an issue on this repository, labelled `3ds-bug-report`:
-- Hold SELECT and touch the bottom screen. The game saves a snapshot of the frame and sends it with the log. This
-  also works when the game has frozen, without the snapshot if the renderer has stopped.
+- Tap Bug report at the bottom of the bottom screen, or hold SELECT and touch the screen anywhere. The game saves a
+  snapshot of the frame and sends it with the log. This also works when the game has frozen, without the snapshot
+  if the renderer has stopped.
 - If the game crashes it writes `sdmc:/3ds/dkr/crash.txt` (the registers, the stack and the recent log) and goes
   back to the Homebrew Launcher. The next time it starts, and also after a freeze that needed the power button, it
   offers to send the last run's log and crash report (A sends, B skips).
@@ -167,7 +169,7 @@ A crash report gives `pc` and `lr`; with the `dkr.elf` of the same build (the `B
 ## Updates
 
 CI publishes every 3DS build as a pre-release: `3ds-newest` is the latest push to any branch, `3ds-master` the
-latest build of master. Tap Check for updates at the bottom of the bottom screen; the game lists both builds (the
+latest build of master. Tap Updates at the bottom of the bottom screen; the game lists both builds (the
 one running is marked "this") and offers master, newest or cancel. The chosen build is downloaded next to the
 running `.3dsx`, checked against its size and sha256, and replaces it; tap Quit to finish the update, or keep
 playing and the new build runs next time. It only works when the game was started from the SD card (not over
@@ -175,6 +177,54 @@ playing and the new build runs next time. It only works when the game was starte
 
 While the repository is public no token is needed. For a private repository the token in
 `sdmc:/3ds/dkr/bugreport.txt` is used, and it needs Contents set to Read-only as well (step 4 above).
+
+## Profiler
+
+`DKR_PROFILE=1` in `env.txt` (and the test run below) shows a profiler on the bottom screen, updated every second:
+
+| Line | Meaning |
+| ---- | ------- |
+| `PROFILER 29.8 fps limit: GPU` | Frames per second, and which part limits them: the game CPU, the renderer CPU or the GPU. |
+| `30fps 97% 20fps 3% slower 0%` | Share of frames shown at 30 fps, at 20 fps, and slower. |
+| `worst frame 61 ms hitches 2` | The longest frame, and frames over 50 ms. |
+| `game logic / scene / wait` | Game thread, ms per frame: object updates (racers, AI), building the display list, waiting for the renderer. |
+| `rend rdp / tex / gpuwait` | Renderer thread: interpreting the display list and sending it to the GPU, decoding textures, waiting for the GPU. |
+| `gpu draw / audio / idle` | The GPU's drawing time, the audio mixing, and how much of the main core is idle. |
+| `tris / draws / tex+` | Triangles and draw batches per frame, textures decoded in the last second. |
+
+On a New 3DS the game thread, the renderer and the GPU work in parallel, so whichever of `logic + scene`,
+`rdp + tex` and `gpu draw` is largest sets the frame rate (33.3 ms per frame is 30 fps). Every few seconds a summary
+line also goes to the log.
+
+## Unattended test run
+
+Tap Test run at the bottom of the bottom screen, then Start test, and leave the console on its charger. From the
+title screen, the game races every track with every character (200 races, some 8 hours), with the AI driving your
+kart. Each race is profiled and checked: a race that doesn't finish within 5 minutes, a kart that stops reaching
+checkpoints for a minute, a crash or a freeze are all recorded. The bottom screen shows the profiler, the race, and a
+progress bar. Your saves are not written while it runs. Tap Stop test to end it early.
+
+- Results go to `sdmc:/3ds/dkr/`: `autorun_results.csv` (one line per race: outcome, frame rate, the profiler's
+  stages, worst frames) and `autorun_problems.txt`.
+- When the run ends or is stopped, and bug reports are set up, the results are sent as an issue titled
+  "[3DS test run]". `python3 port/tools/bugreport_fetch.py <issue>` saves its files, and
+  `python3 port/tools/autorun_report.py bugreport_<issue>/autorun_results.csv` turns them into tables by track and
+  by character, the slowest races and the problems.
+- If the game crashes or freezes, start it again: it sends the crash report without asking and carries on with the
+  next race. (A freeze is noticed when nothing has been drawn for 20 seconds.)
+
+`env.txt` settings change what it runs (the same settings work on the host build):
+
+| Setting | Effect |
+| ------- | ------ |
+| `DKR_AUTORUN=1` | Run at every start, without the button. |
+| `DKR_AUTORUN_TRACKS=5,3` | Only these tracks (`ASSET_LEVEL_*` ids; default: the 20 of the tracks menu). |
+| `DKR_AUTORUN_CHARACTERS=3,9` | Only these characters: Krunch 0, Bumper 1, Tiptup 2, Conker 3, Timber 4, Banjo 5, Drumstick 6, Pipsy 7, T.T. 8, Diddy 9. |
+| `DKR_AUTORUN_VEHICLES=all` | Also each other vehicle a track allows. |
+| `DKR_AUTORUN_TIMEOUT=300` | Seconds before an unfinished race counts as a timeout. |
+| `DKR_AUTORUN_LOOP=1` | Start over after the last race. |
+| `DKR_AUTORUN_RESTART=1` | Start from the first race instead of resuming. |
+| `DKR_AUTORUN_SNAPSHOT=1` | Save a snapshot (GPU and reference images) after each race, for `diff_frames.py`. |
 
 ## Automated testing
 
@@ -227,10 +277,9 @@ For sound in Azahar, put any file at `sdmc/3ds/dspfirm.cdc`; Azahar's emulated D
 
 - **Tested in Azahar:** the intro, attract mode and menus, the adventure hub and races.
 - **Performance in Azahar:** races run at the game's 30 fps cap in both Old 3DS and New 3DS mode, with time to
-  spare (`DKR_PROFILE=1` in `env.txt` logs the frame rate, graphics and audio time, and idle time).
+  spare (see the profiler above).
 - **Untested:** real hardware. Azahar does not model CPU timing exactly, so expect the real frame rate to be lower,
   especially on an Old 3DS.
 - **Known gaps:**
   - Only the US 1.0 ROM is tested.
   - Rumble isn't supported.
-  - The bottom screen is unused.

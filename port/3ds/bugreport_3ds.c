@@ -1,7 +1,9 @@
 /*
  * Bug reports straight from the console, as GitHub issues (src/plat/bugreport.c does the sending).
  *
- * - Holding SELECT and touching the bottom screen takes a snapshot and sends it with the log.
+ * - Holding SELECT and touching the bottom screen, or the "Bug report" button on it, takes a snapshot and sends it
+ *   with the log.
+ * - The unattended test run sends its results when it ends, and its crashes without asking at the next start.
  * - A crash writes sdmc:/3ds/dkr/crash.txt (registers, stack, recent log) and ends the program.
  * - If the last run did not end normally (a crash, a freeze that needed the power button), the next start offers to
  *   send its log and crash.txt.
@@ -40,6 +42,7 @@ enum ReportKind {
     REPORT_BUTTON,       /* SELECT + touch during the game. */
     REPORT_LAST_CRASHED, /* The last run crashed (crash.txt). */
     REPORT_LAST_UNENDED, /* The last run never reached its normal exit. */
+    REPORT_TEST_RUN,     /* The results of the unattended test run (port_autorun.c). */
 };
 
 typedef struct ReportConfig {
@@ -173,6 +176,7 @@ typedef struct Report {
     int kind;
     char title[160];
     char *body;
+    const char *extra; /* REPORT_TEST_RUN: the run's summary. */
     BugReportFile files[MAX_FILES];
     int fileCount;
 } Report;
@@ -250,7 +254,9 @@ static void build_body(Report *report, const char *crashText, const char *recent
         "Sent from the game (SELECT + touch)",
         "The last run crashed; sent at the next start",
         "The last run did not end normally (a freeze, or the power button); sent at the next start",
+        "Results of the unattended test run",
     };
+    static const char *const sKindNames[] = { "button", "crash", "unended", "testrun" };
     size_t capacity = 60000, length = 0;
     char *body = malloc(capacity);
     bool isNew3DS = false;
@@ -268,8 +274,7 @@ static void build_body(Report *report, const char *crashText, const char *recent
             length += snprintf(body + length, capacity - length, __VA_ARGS__);                                         \
         }                                                                                                              \
     } while (0)
-    ADD("<!-- dkr-bug-report v1 kind=%s -->\n",
-        report->kind == REPORT_BUTTON ? "button" : (report->kind == REPORT_LAST_CRASHED ? "crash" : "unended"));
+    ADD("<!-- dkr-bug-report v1 kind=%s -->\n", sKindNames[report->kind]);
     ADD("**What:** %s\n", sKinds[report->kind]);
     ADD("**Build:** `%s`\n", PORT_BUILD_VERSION);
     ADD("**Console:** %s\n", isNew3DS ? "New 3DS" : "Old 3DS");
@@ -287,6 +292,9 @@ static void build_body(Report *report, const char *crashText, const char *recent
             gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]);
         ADD("**Free memory:** gpu %lu KB, heap %lu KB\n", (unsigned long) (linearSpaceFree() / 1024),
             (unsigned long) ((info.fordblks + (__ctru_heap_size - info.arena)) / 1024));
+    }
+    if (report->extra != NULL) {
+        ADD("\n### Test run\n\n%s\n", report->extra);
     }
     if (crashText != NULL) {
         ADD("\n### Crash\n\n```\n%s\n```\n", tail(crashText, 12000));
@@ -386,10 +394,21 @@ static void show_console(const char *text) {
     gspWaitForVBlank();
 }
 
+/* The unattended test run is going (port_autorun.c): reports are sent without asking, as nobody is there to answer. */
+static int test_run_active(void) {
+    char text[200];
+    int length = plat_load_file_start(DATA_DIR "/autorun_state.txt", text, sizeof(text) - 1);
+    if (length <= 0) {
+        return 0;
+    }
+    text[length] = '\0';
+    return strncmp(text, "active=1", 8) == 0;
+}
+
 /* Returns nonzero if anything was shown on the bottom screen. */
 int bugreport_boot(void) {
     int lastUnended = file_exists(RUNNING_PATH);
-    int crashed;
+    int crashed, unattended;
     ReportConfig config;
     FILE *marker;
 
@@ -410,9 +429,14 @@ int bugreport_boot(void) {
 
     crashed = file_exists(DATA_DIR "/last_crash.txt");
     printf("\n  %s\n\n", crashed ? "The game crashed last time." : "The game did not exit normally last time.");
-    printf("  Send a bug report with its log?\n\n");
-    printf("  A  Send       B  Skip\n\n");
-    for (;;) {
+    unattended = test_run_active();
+    if (unattended) {
+        printf("  The test run goes on: sending a report.\n\n");
+    } else {
+        printf("  Send a bug report with its log?\n\n");
+        printf("  A  Send       B  Skip\n\n");
+    }
+    while (!unattended) {
         u32 down;
         if (!aptMainLoop()) {
             return 1;
@@ -475,8 +499,10 @@ int bugreport_boot(void) {
         }
         free_report(&report);
         show_console("");
-        show_console("Press A to start the game.");
-        while (aptMainLoop()) {
+        if (!unattended) {
+            show_console("Press A to start the game.");
+        }
+        while (!unattended && aptMainLoop()) {
             hidScanInput();
             if (hidKeysDown() & (KEY_A | KEY_START)) {
                 break;
@@ -582,16 +608,66 @@ static void report_now(void) {
     free_report(&report);
 }
 
+static volatile int sReportRequested;
+static volatile int sResultsRequested;
+static char sResultsTitle[160];
+static char sResultsSummary[1024];
+
+/* The "Bug report" button on the bottom screen (update_3ds.c): the same as SELECT + touch. */
+void bugreport_request(void) {
+    sReportRequested = 1;
+}
+
+/* Called by the test run when it ends; the report is sent from the button thread. */
+void plat_send_test_results(const char *title, const char *summary) {
+    if (sResultsRequested) {
+        return; // The previous one is still being sent.
+    }
+    snprintf(sResultsTitle, sizeof(sResultsTitle), "%s", title);
+    snprintf(sResultsSummary, sizeof(sResultsSummary), "%s", summary);
+    sResultsRequested = 1;
+}
+
+static void send_test_results(void) {
+    ReportConfig config;
+    Report report;
+    static char recent[16 * 1024];
+
+    if (!load_config(&config)) {
+        show_status("Test run results: no token in bugreport.txt, so they stay on the SD card");
+        return;
+    }
+    memset(&report, 0, sizeof(report));
+    report.kind = REPORT_TEST_RUN;
+    report.extra = sResultsSummary;
+    snprintf(report.title, sizeof(report.title), "%s", sResultsTitle);
+    add_file(&report, "autorun_results.csv");
+    add_file(&report, "autorun_problems.txt");
+    add_file(&report, "env.txt");
+    plat_log_recent(recent, sizeof(recent));
+    build_body(&report, NULL, recent);
+    sShow = show_status;
+    send_and_show(&config, &report);
+    free_report(&report);
+}
+
 static void button_thread(void *arg) {
     u32 last = 0;
     (void) arg;
     bugreport_watch_thread("bug report");
     for (;;) {
         u32 keys = peek_keys();
-        // SELECT held, and the touch just started.
-        if ((keys & KEY_SELECT) && (keys & KEY_TOUCH) && !(last & KEY_TOUCH) && !sBusy) {
+        // SELECT held and the touch just started, or the button on the bottom screen.
+        if ((((keys & KEY_SELECT) && (keys & KEY_TOUCH) && !(last & KEY_TOUCH)) || sReportRequested) && !sBusy) {
             sBusy = 1;
             report_now();
+            sReportRequested = 0;
+            sBusy = 0;
+        }
+        if (sResultsRequested && !sBusy) {
+            sBusy = 1;
+            send_test_results();
+            sResultsRequested = 0;
             sBusy = 0;
         }
         last = keys;
