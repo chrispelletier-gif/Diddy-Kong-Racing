@@ -13,6 +13,17 @@
  *   DKR_AUTORUN_RESTART=1           Start from the first race instead of resuming.
  *   DKR_AUTORUN_SNAPSHOT=1          Also save a snapshot (GPU and reference images) after each race finishes.
  *
+ * The anti-aliasing benchmark (roadmap item G0) is a short run instead: the heaviest races of the hardware test runs,
+ * each raced four times with anti-aliasing off, on, on, off (so warming up or a hot console favours neither), with
+ * the profiler's numbers for the two set side by side in the results. About half an hour. It is started with the "AA
+ * bench" button in the Test run confirmation, or always runs with:
+ *   DKR_AUTORUN_BENCH=1               Turns it on (instead of the full run).
+ *   DKR_AUTORUN_BENCH_TRACKS=id,...   Tracks (default: Whale Bay, Jungle Falls and Frosty Village, the slowest
+ *                                     tracks of hardware test run issue #10, two renderer-bound and one GPU-bound).
+ *   DKR_AUTORUN_BENCH_CHARACTER=n     Character (default Bumper, whose races were the heaviest there).
+ * It keeps its own files (aa_bench_state.txt, aa_bench_results.csv with an "aa" column), so a full run it interrupts
+ * carries on afterwards. DKR_AUTORUN_TIMEOUT, _LOOP and _RESTART apply to it too.
+ *
  * The order is character by character, each over every track, so stopping early still covers every track.
  * Progress is saved before each race (autorun_state.txt), so after a crash or a hang the next launch resumes with the
  * race after the one that failed, and records that race's failure. Each race adds a line to autorun_results.csv,
@@ -45,11 +56,15 @@
 #define RESULTS_FILE "autorun_results.csv"
 #define PROBLEMS_FILE "autorun_problems.txt"
 #define HANG_FILE "autorun_hang.txt"
+#define BENCH_STATE_FILE "aa_bench_state.txt"
+#define BENCH_RESULTS_FILE "aa_bench_results.csv"
+#define BENCH_PASSES 4
 
 typedef struct Race {
     s8 track;
     s8 character;
     s8 vehicle;
+    s8 aa; // Anti-aliasing for the race (the benchmark), or -1 to leave it as it is.
 } Race;
 
 static void set_phase(s32 phase);
@@ -70,9 +85,10 @@ static const char *const sCharacterNames[NUMBER_OF_CHARACTERS] = {
 };
 static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
-enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP };
+enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH };
 
 static s32 sEnabled = -1;
+static s32 sBench; // The anti-aliasing benchmark rather than the full run.
 static s32 sInitialised;
 static volatile s32 sRequest;
 static s32 sQuitPending;
@@ -108,6 +124,14 @@ static s32 str_equal(const char *a, const char *b) {
 
 static void make_path(char *out, s32 size, const char *name) {
     plat_snprintf(out, size, "%s/%s", plat_data_dir(), name);
+}
+
+static const char *state_file(void) {
+    return sBench ? BENCH_STATE_FILE : STATE_FILE;
+}
+
+static const char *results_file(void) {
+    return sBench ? BENCH_RESULTS_FILE : RESULTS_FILE;
 }
 
 /* Appends text to a file in the data directory. */
@@ -162,12 +186,48 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
     return count;
 }
 
+/* The benchmark: each track BENCH_PASSES times, anti-aliasing off, on, on, off. */
+static void build_bench_list(void) {
+    static const s8 sDefaultTracks[] = { 8, 29, 28 }; // Whale Bay, Jungle Falls, Frosty Village
+    s8 tracks[MAX_TRACKS], character[1];
+    s32 numTracks, numLevels, numWorlds, t, pass;
+
+    numTracks = parse_list(plat_getenv("DKR_AUTORUN_BENCH_TRACKS"), tracks, MAX_TRACKS);
+    if (numTracks < 0) {
+        for (numTracks = 0; numTracks < (s32) ARRAY_COUNT(sDefaultTracks); numTracks++) {
+            tracks[numTracks] = sDefaultTracks[numTracks];
+        }
+    }
+    if (parse_list(plat_getenv("DKR_AUTORUN_BENCH_CHARACTER"), character, 1) != 1 || character[0] < 0 ||
+        character[0] >= NUMBER_OF_CHARACTERS) {
+        character[0] = 1; // Bumper
+    }
+    level_count(&numLevels, &numWorlds);
+    sNumRaces = 0;
+    for (t = 0; t < numTracks; t++) {
+        if (tracks[t] < 0 || tracks[t] >= numLevels) {
+            continue;
+        }
+        for (pass = 0; pass < BENCH_PASSES; pass++) {
+            sRaces[sNumRaces].track = tracks[t];
+            sRaces[sNumRaces].character = character[0];
+            sRaces[sNumRaces].vehicle = leveltable_vehicle_default(tracks[t]);
+            sRaces[sNumRaces].aa = (pass == 1 || pass == 2);
+            sNumRaces++;
+        }
+    }
+}
+
 static void build_race_list(void) {
     s8 tracks[MAX_TRACKS], characters[NUMBER_OF_CHARACTERS];
     s32 numTracks, numCharacters, c, t, v, usable, i;
     s32 numLevels, numWorlds;
     s32 allVehicles = plat_getenv("DKR_AUTORUN_VEHICLES") != NULL && plat_getenv("DKR_AUTORUN_VEHICLES")[0] == 'a';
 
+    if (sBench) {
+        build_bench_list();
+        return;
+    }
     numTracks = parse_list(plat_getenv("DKR_AUTORUN_TRACKS"), tracks, MAX_TRACKS);
     if (numTracks < 0) {
         // The tracks menu's own list (every world's four tracks, Future Fun Land included).
@@ -203,6 +263,7 @@ static void build_race_list(void) {
                     sRaces[sNumRaces].track = tracks[t];
                     sRaces[sNumRaces].character = characters[c];
                     sRaces[sNumRaces].vehicle = v;
+                    sRaces[sNumRaces].aa = -1;
                     sNumRaces++;
                 }
             }
@@ -217,7 +278,7 @@ static void save_state(s32 running) {
                   "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nfinished=%d\nproblems=%d\n",
                   (int) (sEnabled > 0), (unsigned int) sConfigHash, (int) sRun, (int) sNext, (int) running,
                   (int) sFinished, (int) sProblems);
-    make_path(path, sizeof(path), STATE_FILE);
+    make_path(path, sizeof(path), state_file());
     plat_save_file(path, text, strlen(text));
 }
 
@@ -278,15 +339,20 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     Race *race = &sRaces[sNext];
     ProfStats empty;
     u32 slow, i;
+    s32 length;
 
-    make_path(path, sizeof(path), RESULTS_FILE);
+    make_path(path, sizeof(path), results_file());
     existing = plat_load_file(path, &size);
     if (existing == NULL) {
-        append_file(RESULTS_FILE,
-                    "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,pct_30fps,"
-                    "pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,rdp_ms,texture_ms,"
-                    "gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,worst_gpu_ms,triangles,draws,"
-                    "texture_uploads,idle_pct,limit,unsticks,unstuck_at\n");
+        append_file(results_file(),
+                    sBench ? "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
+                             "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
+                             "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
+                             "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at,aa\n"
+                           : "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
+                             "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
+                             "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
+                             "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at\n");
     }
     plat_free(existing);
     if (stats == NULL) {
@@ -299,7 +365,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     plat_snprintf(
         line, sizeof(line),
         "%d,%d,%d,%s,%s,%s,%s,%.1f,%d,%.1f,%u,%.2f,%d,%d,%d,%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,"
-        "%u,%u,%d,%s,%d,%s\n",
+        "%u,%u,%d,%s,%d,%s",
         (int) sRun, (int) sNext + 1, (int) race->track, track_name(race->track),
         sCharacterNames[(s32) race->character], sVehicleNames[(s32) race->vehicle], outcome, sRaceRetraces / 60.0,
         (int) position, sLoadNs / 1e9, stats->gameFrames,
@@ -315,7 +381,14 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         stats->renderedFrames ? stats->counters[PROF_DRAWS] / stats->renderedFrames : 0,
         stats->counters[PROF_TEXTURE_UPLOADS], (int) pct((u32) (stats->idleNs / 1000), (u32) (stats->elapsedNs / 1000)),
         stats->gameFrames ? prof_limit(stats) : "-", (int) sUnsticks, sUnstuckAt);
-    append_file(RESULTS_FILE, line);
+    if (sBench) {
+        // What the race was drawn with (a race that never got going: what it was meant to be).
+        length = strlen(line);
+        plat_snprintf(line + length, sizeof(line) - length, ",%d", stats == &empty ? (int) race->aa : plat_antialias());
+    }
+    length = strlen(line);
+    plat_snprintf(line + length, sizeof(line) - length, "\n");
+    append_file(results_file(), line);
     port_log("autorun: %s", line);
     if (str_equal(outcome, "finished")) {
         sFinished++;
@@ -335,7 +408,19 @@ s32 port_autorun_enabled(void) {
         char text[200];
         s32 length;
 
-        sEnabled = value != NULL && value[0] != '0';
+        const char *bench = plat_getenv("DKR_AUTORUN_BENCH");
+
+        // The benchmark first (asked for, or one that hasn't ended), then the full run.
+        sBench = bench != NULL && bench[0] != '0';
+        if (!sBench) {
+            make_path(path, sizeof(path), BENCH_STATE_FILE);
+            length = plat_load_file_start(path, text, sizeof(text) - 1);
+            if (length > 0) {
+                text[length] = '\0';
+                sBench = state_value(text, "active", 0) != 0;
+            }
+        }
+        sEnabled = sBench || (value != NULL && value[0] != '0');
         make_path(path, sizeof(path), STATE_FILE);
         length = plat_load_file_start(path, text, sizeof(text) - 1);
         if (!sEnabled && length > 0) {
@@ -351,12 +436,20 @@ static void init(void) {
     unsigned int size;
     char *state, *hang;
     const char *names[] = { "DKR_AUTORUN_TRACKS", "DKR_AUTORUN_CHARACTERS", "DKR_AUTORUN_VEHICLES" };
+    const char *benchNames[] = { "DKR_AUTORUN_BENCH_TRACKS", "DKR_AUTORUN_BENCH_CHARACTER" };
     s32 i;
 
     sInitialised = TRUE;
     sConfigHash = 0;
-    for (i = 0; i < (s32) ARRAY_COUNT(names); i++) {
-        hash_text(plat_getenv(names[i]));
+    if (sBench) {
+        hash_text("aa bench");
+        for (i = 0; i < (s32) ARRAY_COUNT(benchNames); i++) {
+            hash_text(plat_getenv(benchNames[i]));
+        }
+    } else {
+        for (i = 0; i < (s32) ARRAY_COUNT(names); i++) {
+            hash_text(plat_getenv(names[i]));
+        }
     }
     build_race_list();
     sTimeoutSeconds = plat_getenv("DKR_AUTORUN_TIMEOUT") ? port_atoi(plat_getenv("DKR_AUTORUN_TIMEOUT")) : 300;
@@ -367,7 +460,7 @@ static void init(void) {
     sFpsSum = 0.0;
     sFpsCount = 0;
 
-    make_path(path, sizeof(path), STATE_FILE);
+    make_path(path, sizeof(path), state_file());
     state = plat_load_file(path, &size);
     if (state != NULL && plat_getenv("DKR_AUTORUN_RESTART") == NULL) {
         char *text = plat_malloc(size + 1);
@@ -444,9 +537,12 @@ s32 port_autorun_active(void) {
     return sEnabled && sPhase != PHASE_OFF;
 }
 
-/* From any thread (the bottom screen's button): start (1) or stop (0) the test run, at the next game frame. */
+/*
+ * From any thread (the bottom screen's buttons): start the test run (1) or the anti-aliasing benchmark (2), or stop
+ * whichever is going (0), at the next game frame.
+ */
 void port_autorun_request(s32 start) {
-    sRequest = start ? REQUEST_START : REQUEST_STOP;
+    sRequest = start == 2 ? REQUEST_BENCH : start ? REQUEST_START : REQUEST_STOP;
 }
 
 static void set_phase(s32 phase) {
@@ -490,10 +586,15 @@ static void show_status(void) {
             what = (plat_time_ns() - sPhaseStartNs > 3000000000ULL) ? "(go to the title screen)" : "next";
             break;
     }
-    plat_snprintf(line[0], sizeof(line[0]), "TEST RUN %d  race %d/%d  ok %d bad %d", (int) sRun, (int) sNext + 1,
-                  (int) sNumRaces, (int) sFinished, (int) sProblems);
-    plat_snprintf(line[1], sizeof(line[1]), "%s %s %s %s", sCharacterNames[(s32) race->character],
-                  track_name(race->track), sVehicleNames[(s32) race->vehicle], what);
+    plat_snprintf(line[0], sizeof(line[0]), "%s %d  race %d/%d  ok %d bad %d", sBench ? "AA BENCH" : "TEST RUN",
+                  (int) sRun, (int) sNext + 1, (int) sNumRaces, (int) sFinished, (int) sProblems);
+    if (sBench) {
+        plat_snprintf(line[1], sizeof(line[1]), "%s AA %s %s", track_name(race->track), race->aa ? "on" : "off",
+                      what);
+    } else {
+        plat_snprintf(line[1], sizeof(line[1]), "%s %s %s %s", sCharacterNames[(s32) race->character],
+                      track_name(race->track), sVehicleNames[(s32) race->vehicle], what);
+    }
     // The progress bar: green for the races done, grey for the rest, with the percentage after it.
     filled = sNext * 32 / sNumRaces;
     length = plat_snprintf(bar, sizeof(bar), "\x1b[42m");
@@ -533,6 +634,9 @@ s32 port_autorun_title(void) {
     port_log("autorun: race %d/%d: %s, %s, %s", (int) sNext + 1, (int) sNumRaces, track_name(race->track),
              sCharacterNames[(s32) race->character], sVehicleNames[(s32) race->vehicle]);
     save_state(sNext);
+    if (race->aa >= 0) {
+        plat_set_antialias(race->aa); // The renderer switches while the race loads.
+    }
     set_phase(PHASE_LOADING);
     sRaceRetraces = 0;
     sStuckRetraces = 0;
@@ -549,17 +653,192 @@ s32 port_autorun_drives(void) {
     return sEnabled > 0 && sPhase >= PHASE_LOADING && sPhase <= PHASE_FINISHED;
 }
 
+/* A plain decimal number ("27.86"), as the results file has them. */
+static double parse_decimal(const char *text) {
+    double value = 0.0, scale = 1.0;
+    s32 negative = *text == '-';
+    if (negative) {
+        text++;
+    }
+    for (; *text >= '0' && *text <= '9'; text++) {
+        value = value * 10 + (*text - '0');
+    }
+    if (*text == '.') {
+        for (text++; *text >= '0' && *text <= '9'; text++) {
+            scale /= 10;
+            value += (*text - '0') * scale;
+        }
+    }
+    return negative ? -value : value;
+}
+
+/* Columns of the benchmark's results file that its summary uses. */
+enum BenchColumn {
+    COL_RUN = 0,
+    COL_TRACK = 3,
+    COL_OUTCOME = 6,
+    COL_FPS = 11,
+    COL_PCT_30FPS = 12,
+    COL_WORST_FRAME = 15, // ms
+    COL_RDP = 20,
+    COL_GPU_DRAW = 23,
+    COL_WORST_GPU = 27,
+    COL_LIMIT = 32,
+    COL_AA = 35, // After the test run's unsticks and unstuck_at
+    COL_COUNT
+};
+
+#define BENCH_MAX_TRACKS 8
+#define BENCH_LIMITS 3
+
+typedef struct BenchGroup {
+    char track[32];
+    s32 races;
+    double fps, pct30, rdp, gpu;
+    s32 worstFrame, worstGpu;
+    s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
+} BenchGroup;
+
+static const char *const sLimitNames[BENCH_LIMITS] = { "GPU", "renderer CPU", "game CPU" };
+
+static double bench_avg(double sum, s32 count) {
+    return count ? sum / count : 0.0;
+}
+
+/*
+ * The benchmark's side-by-side table, from this run's finished races in the results file (so races from before a
+ * crash count too), as Markdown: one line per track for anti-aliasing off and one for on, then what AA costs.
+ */
+static void bench_summary(char *out, s32 size) {
+    static BenchGroup groups[BENCH_MAX_TRACKS][2];
+    char path[256];
+    char *data, *line, *next;
+    const char *fields[COL_COUNT + 1];
+    unsigned int dataSize;
+    s32 numTracks = 0, length, t, aa, i, numFields;
+
+    bzero(groups, sizeof(groups));
+    make_path(path, sizeof(path), BENCH_RESULTS_FILE);
+    data = plat_load_file(path, &dataSize);
+    if (data == NULL) {
+        return;
+    }
+    // Made into one string, then split into lines and fields in place.
+    line = plat_malloc(dataSize + 1);
+    if (line == NULL) {
+        plat_free(data);
+        return;
+    }
+    bcopy(data, line, dataSize);
+    line[dataSize] = '\0';
+    plat_free(data);
+    data = line;
+    for (; line != NULL && *line; line = next) {
+        BenchGroup *g;
+        char *c;
+        next = strchr(line, '\n');
+        if (next != NULL) {
+            *next++ = '\0';
+        }
+        numFields = 0;
+        fields[numFields++] = line;
+        for (c = line; *c && numFields <= COL_COUNT; c++) {
+            if (*c == ',') {
+                *c = '\0';
+                fields[numFields++] = c + 1;
+            }
+        }
+        if (numFields < COL_COUNT || port_atoi(fields[COL_RUN]) != sRun || !str_equal(fields[COL_OUTCOME], "finished")) {
+            continue; // The header, an earlier run, or a race that didn't finish.
+        }
+        aa = port_atoi(fields[COL_AA]) != 0;
+        for (t = 0; t < numTracks && !str_equal(groups[t][0].track, fields[COL_TRACK]); t++) {}
+        if (t == numTracks) {
+            if (numTracks == BENCH_MAX_TRACKS) {
+                continue;
+            }
+            numTracks++;
+            plat_snprintf(groups[t][0].track, sizeof(groups[t][0].track), "%s", fields[COL_TRACK]);
+        }
+        g = &groups[t][aa];
+        g->races++;
+        g->fps += parse_decimal(fields[COL_FPS]);
+        g->pct30 += parse_decimal(fields[COL_PCT_30FPS]);
+        g->rdp += parse_decimal(fields[COL_RDP]);
+        g->gpu += parse_decimal(fields[COL_GPU_DRAW]);
+        if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
+            g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
+        }
+        if (port_atoi(fields[COL_WORST_GPU]) > g->worstGpu) {
+            g->worstGpu = port_atoi(fields[COL_WORST_GPU]);
+        }
+        for (i = 0; i < BENCH_LIMITS; i++) {
+            if (str_equal(fields[COL_LIMIT], sLimitNames[i])) {
+                g->limits[i]++;
+            }
+        }
+    }
+    plat_free(data);
+
+    length = plat_snprintf(out, size,
+                           "\n### Anti-aliasing off vs on (averages of the finished races)\n\n"
+                           "| track | AA | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame | limit |\n"
+                           "|---|---|--:|--:|--:|--:|--:|--:|--:|---|\n");
+    for (t = 0; t < numTracks; t++) {
+        for (aa = 0; aa < 2; aa++) {
+            BenchGroup *g = &groups[t][aa];
+            s32 limit = 0;
+            if (g->races == 0) {
+                continue;
+            }
+            for (i = 1; i < BENCH_LIMITS; i++) {
+                if (g->limits[i] > g->limits[limit]) {
+                    limit = i;
+                }
+            }
+            if (length >= size) {
+                return;
+            }
+            length += plat_snprintf(out + length, size - length,
+                                    "| %s | %s | %d | %.1f | %.0f%% | %.1f | %d | %.1f | %d | %s |\n",
+                                    groups[t][0].track, aa ? "on" : "off", (int) g->races,
+                                    bench_avg(g->fps, g->races), bench_avg(g->pct30, g->races),
+                                    bench_avg(g->gpu, g->races), (int) g->worstGpu, bench_avg(g->rdp, g->races),
+                                    (int) g->worstFrame, sLimitNames[limit]);
+        }
+    }
+    for (t = 0; t < numTracks && length < size; t++) {
+        BenchGroup *off = &groups[t][0], *on = &groups[t][1];
+        if (off->races == 0 || on->races == 0) {
+            continue;
+        }
+        length += plat_snprintf(out + length, size - length,
+                                "%s%s: AA costs %.1f ms of GPU time per frame and %.1f fps (30 fps on %.0f%% of "
+                                "frames instead of %.0f%%).\n",
+                                t == 0 ? "\n" : "", groups[t][0].track,
+                                bench_avg(on->gpu, on->races) - bench_avg(off->gpu, off->races),
+                                bench_avg(off->fps, off->races) - bench_avg(on->fps, on->races),
+                                bench_avg(on->pct30, on->races), bench_avg(off->pct30, off->races));
+    }
+}
+
 /* Sends the results so far as a GitHub issue (when bug reports are set up), and says so on the bottom screen. */
 static void send_results(const char *why) {
     char title[128];
-    char summary[512];
-    plat_snprintf(title, sizeof(title), "[3DS test run] run %d: %d of %d races, %d problems (%s)", (int) sRun,
-                  (int) (sFinished + sProblems), (int) sNumRaces, (int) sProblems, why);
-    plat_snprintf(summary, sizeof(summary),
-                  "Run %d %s after %d of %d races: %d finished, %d with problems.\n"
-                  "Average frame rate of the races finished since the game started: %.1f fps (%d races).\n",
-                  (int) sRun, why, (int) (sFinished + sProblems), (int) sNumRaces, (int) sFinished, (int) sProblems,
-                  sFpsCount ? sFpsSum / sFpsCount : 0.0, (int) sFpsCount);
+    static char summary[2048];
+    s32 length;
+    plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
+                  sBench ? "AA benchmark " : "", (int) sRun, (int) (sFinished + sProblems), (int) sNumRaces,
+                  (int) sProblems, why);
+    length = plat_snprintf(summary, sizeof(summary),
+                           "%s %d %s after %d of %d races: %d finished, %d with problems.\n"
+                           "Average frame rate of the races finished since the game started: %.1f fps (%d races).\n",
+                           sBench ? "Anti-aliasing benchmark run" : "Run", (int) sRun, why,
+                           (int) (sFinished + sProblems), (int) sNumRaces, (int) sFinished, (int) sProblems,
+                           sFpsCount ? sFpsSum / sFpsCount : 0.0, (int) sFpsCount);
+    if (sBench && length > 0 && length < (s32) sizeof(summary)) {
+        bench_summary(summary + length, sizeof(summary) - length);
+    }
     plat_status("Test run %s: %d races, %d problems", why, (int) (sFinished + sProblems), (int) sProblems);
     plat_send_test_results(title, summary);
 }
@@ -571,6 +850,10 @@ static void turn_off(const char *why) {
     sInitialised = FALSE;
     set_phase(PHASE_OFF);
     save_state(-1);
+    if (sBench) {
+        plat_set_antialias(-1); // Back to the player's setting.
+        sBench = FALSE;
+    }
     prof_set_status(NULL);
 }
 
@@ -627,14 +910,16 @@ static void end_race(const char *outcome, s32 position) {
 static void handle_request(void) {
     s32 request = sRequest;
     sRequest = REQUEST_NONE;
-    if (request == REQUEST_START && !port_autorun_active()) {
+    if ((request == REQUEST_START || request == REQUEST_BENCH) && !port_autorun_active()) {
+        sBench = request == REQUEST_BENCH;
         sEnabled = 1;
         sInitialised = FALSE;
         if (!port_autorun_active()) {
             return; // Nothing to race.
         }
         prof_window_start(PROF_WINDOW_OVERLAY);
-        plat_status("Test run started: race %d of %d", (int) sNext + 1, (int) sNumRaces);
+        plat_status("%s started: race %d of %d", sBench ? "AA benchmark" : "Test run", (int) sNext + 1,
+                    (int) sNumRaces);
         if (get_game_mode() == GAMEMODE_INGAME) {
             sQuitPending = TRUE; // Out of the game, to the title screen where the races start.
         }

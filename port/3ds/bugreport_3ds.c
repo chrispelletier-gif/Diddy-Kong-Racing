@@ -611,7 +611,7 @@ static void report_now(void) {
 static volatile int sReportRequested;
 static volatile int sResultsRequested;
 static char sResultsTitle[160];
-static char sResultsSummary[1024];
+static char sResultsSummary[2048];
 
 /* The "Bug report" button on the bottom screen (update_3ds.c): the same as SELECT + touch. */
 void bugreport_request(void) {
@@ -642,6 +642,7 @@ static void send_test_results(void) {
     report.extra = sResultsSummary;
     snprintf(report.title, sizeof(report.title), "%s", sResultsTitle);
     add_file(&report, "autorun_results.csv");
+    add_file(&report, "aa_bench_results.csv");
     add_file(&report, "autorun_problems.txt");
     add_file(&report, "env.txt");
     plat_log_recent(recent, sizeof(recent));
