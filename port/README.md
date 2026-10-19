@@ -67,8 +67,8 @@ runs silently.
 | SELECT        | L                   |                         |
 | START         | START               | Pause                   |
 
-The menus are driven by the stick, as on the N64. At the bottom of the bottom screen are three buttons: Bug report,
-Test run and Updates (see below). The rest of the touch screen does nothing, so a stray tap can't interrupt a race;
+The menus are driven by the stick, as on the N64. At the bottom of the bottom screen are four buttons: Bug rep.,
+Test run, Profiler and Updates (see below). The rest of the touch screen does nothing, so a stray tap can't interrupt a race;
 holding SELECT while touching anywhere also sends a bug report.
 
 ## How it works
@@ -133,7 +133,7 @@ controls) work there, as do these renderer switches:
 ## Bug reports
 
 The 3DS build can send a bug report over Wi-Fi as an issue on this repository, labelled `3ds-bug-report`:
-- Tap Bug report at the bottom of the bottom screen, or hold SELECT and touch the screen anywhere. The game saves a
+- Tap Bug rep. at the bottom of the bottom screen, or hold SELECT and touch the screen anywhere. The game saves a
   snapshot of the frame and sends it with the log. This also works when the game has frozen, without the snapshot
   if the renderer has stopped.
 - If the game crashes it writes `sdmc:/3ds/dkr/crash.txt` (the registers, the stack and the recent log) and goes
@@ -180,7 +180,9 @@ While the repository is public no token is needed. For a private repository the 
 
 ## Profiler
 
-`DKR_PROFILE=1` in `env.txt` (and the test run below) shows a profiler on the bottom screen, updated every second:
+Tap Profiler at the bottom of the bottom screen to show the profiler on the bottom screen, updated every second; the
+button turns green while it is on, and the game remembers the setting. `DKR_PROFILE=1` in `env.txt` and the test run
+below turn it on as well. While it is off it costs nothing measurable (each timing hook returns after one check).
 
 | Line | Meaning |
 | ---- | ------- |

@@ -556,7 +556,7 @@ static void send_results(const char *why) {
     plat_send_test_results(title, summary);
 }
 
-/* Ends the test run: saves are written again and the profiler goes away (unless DKR_PROFILE is set). */
+/* Ends the test run: saves are written again and the profiler goes away (unless DKR_PROFILE or its button is on). */
 static void turn_off(const char *why) {
     send_results(why);
     sEnabled = 0;
@@ -564,9 +564,6 @@ static void turn_off(const char *why) {
     set_phase(PHASE_OFF);
     save_state(-1);
     prof_set_status(NULL);
-    if (!prof_enabled()) {
-        plat_overlay_show("");
-    }
 }
 
 /* Called in races: nonzero asks the game to quit to the title screen. */

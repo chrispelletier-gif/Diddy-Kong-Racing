@@ -2,8 +2,8 @@
 #define PORT_PROFILE_H
 
 /*
- * Per-stage frame profiler (port/src/game/port_profile.c). Turned on by DKR_PROFILE=1 or by the unattended test run
- * (DKR_AUTORUN). Only builtin C types, so it can be used from game code, the OS layer and the 3DS backend alike.
+ * Per-stage frame profiler (port/src/game/port_profile.c). Turned on by DKR_PROFILE=1, the bottom screen's Profiler
+ * button, or the unattended test run (DKR_AUTORUN). Only builtin C types, so it can be used from game code, the OS layer and the 3DS backend alike.
  *
  * A frame passes through two threads, which on a New 3DS run on different CPU cores:
  *  - the game thread (main core) runs the game logic, then builds the display list ("scene"), then waits for the
@@ -44,6 +44,9 @@ enum ProfMark { PROF_MARK_LOOP_START, PROF_MARK_BUILT, PROF_MARK_WAITED, PROF_MA
 #define PROF_RATE_BUCKETS 7
 
 int prof_enabled(void);
+/* The bottom screen's Profiler button: on or off, remembered across launches. */
+int prof_user_enabled(void);
+void prof_set_user_enabled(int on);
 void prof_add(int stage, unsigned long long ns);
 void prof_count(int counter, unsigned int n);
 /* Game thread: called at the marks above. updateRate (retraces this frame took) is only read at PROF_MARK_END. */

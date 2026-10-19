@@ -36,14 +36,16 @@ void bugreport_watch_thread(const char *name);
 void bugreport_request(void);
 long port_autorun_enabled(void);
 void port_autorun_request(long start);
+int prof_user_enabled(void);
+void prof_set_user_enabled(int on);
 
 /*
- * The panel's buttons also start the other bottom screen actions: in the idle state they are "Bug report" (the same
- * as SELECT + touch), "Test run" (port_autorun.c, after a confirmation) and "Updates". Touches anywhere else on the
- * screen do nothing.
+ * The panel's buttons also start the other bottom screen actions: in the idle state they are "Bug rep." (the same
+ * as SELECT + touch), "Test run" (port_autorun.c, after a confirmation), "Profiler" (turns the profiler readout on
+ * or off; green while on) and "Updates". Touches anywhere else on the screen do nothing.
  */
 enum UpdateState {
-    STATE_IDLE,     /* Bug report / Test run / Updates. */
+    STATE_IDLE,     /* Bug report / Test run / Profiler / Updates. */
     STATE_CONFIRM,  /* Start or stop the test run / - / cancel. */
     STATE_BUSY,     /* Checking or downloading; taps are ignored. */
     STATE_CHOOSE,   /* master / newest / cancel. */
@@ -80,23 +82,29 @@ static int sChosen;
 #define BUTTON_TOP 200
 #define BUTTON_BOTTOM 224
 
-/* Blue blocks three rows high; a label starting with '-' is a button that cannot be tapped, drawn grey. */
+static volatile int sButtonCount; // Buttons now shown, each a space then a block of (40 / count - 1) characters.
+
+/*
+ * Blue blocks three rows high; a label starting with '-' is a button that cannot be tapped, drawn grey, and one
+ * starting with '+' is a switch that is on, drawn green.
+ */
 static void draw_buttons(const char *const *labels, int count) {
-    int width = count == 1 ? 38 : 12, i, r;
+    int width = count == 1 ? 38 : 40 / count - 1, i, r;
 
     for (r = 0; r < 3; r++) {
         char row[160];
         int length = 0;
         for (i = 0; i < count; i++) {
-            int enabled = labels[i][0] != '-';
-            const char *text = r == 1 ? labels[i] + !enabled : "";
+            int enabled = labels[i][0] != '-', on = labels[i][0] == '+';
+            const char *text = r == 1 ? labels[i] + (!enabled || on) : "";
             int left = (width - (int) strlen(text)) / 2;
-            const char *colour = enabled ? "\x1b[37;44m" : "\x1b[30;47m";
+            const char *colour = on ? "\x1b[30;42m" : enabled ? "\x1b[37;44m" : "\x1b[30;47m";
             length += snprintf(row + length, sizeof(row) - length, " %s%*s%-*s\x1b[0m", colour, left, "", width - left,
                                text);
         }
         plat_3ds_panel_print(r + 1, row);
     }
+    sButtonCount = count;
 }
 
 static void draw_text_button(const char *label) {
@@ -106,12 +114,13 @@ static void draw_text_button(const char *label) {
 static int sTestRunShown = -1; // Whether the idle buttons say "Stop test" (1) or "Test run" (0).
 
 static void draw_home(void) {
-    const char *labels[3];
+    const char *labels[4];
     sTestRunShown = port_autorun_enabled() != 0;
-    labels[0] = "Bug report";
+    labels[0] = "Bug rep.";
     labels[1] = sTestRunShown ? "Stop test" : "Test run";
-    labels[2] = "Updates";
-    draw_buttons(labels, 3);
+    labels[2] = prof_user_enabled() ? "+Profiler" : "Profiler";
+    labels[3] = "Updates";
+    draw_buttons(labels, 4);
 }
 
 static void draw_confirm(void) {
@@ -565,13 +574,13 @@ static int install(Channel *channel) {
 
 /* The touch screen, from the game's controller polling (input_3ds.c). Returns nonzero if the touch was a button. */
 int update_3ds_touch(int x, int y) {
-    int button;
+    int button, count = sButtonCount, cell = count > 1 ? 40 / count : 40;
     if (!sStarted || y < BUTTON_TOP || y >= BUTTON_BOTTOM) {
         return 0;
     }
-    // Columns: one wide button, or three of 12 characters with a space before each (8 pixels a character).
-    button = sState == STATE_INSTALLED ? 0 : (x / 8 - 1) / 13;
-    if (sState == STATE_BUSY || button < 0 || button > 2 || (x / 8) % 13 == 0) {
+    // Columns: one wide button, or several, each a space then a block (8 pixels a character).
+    button = sState == STATE_INSTALLED ? 0 : (x / 8) / cell;
+    if (sState == STATE_BUSY || button >= count || (count > 1 && (x / 8) % cell == 0)) {
         return 1;
     }
     sTappedButton = button;
@@ -599,6 +608,9 @@ static void update_thread(void *arg) {
                 } else if (button == 1) {
                     sState = STATE_CONFIRM;
                     draw_confirm();
+                } else if (button == 2) {
+                    prof_set_user_enabled(!prof_user_enabled());
+                    draw_home();
                 } else {
                     sState = STATE_BUSY;
                     if (check()) {
