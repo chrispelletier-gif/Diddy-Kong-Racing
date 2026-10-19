@@ -5,6 +5,8 @@ with bugreport_fetch.py) as a Markdown report.
     python3 port/tools/autorun_report.py autorun_results.csv [--run N] [--out report.md]
 
 The anti-aliasing benchmark's aa_bench_results.csv (it has an "aa" column) also gets a table by track and AA setting.
+The quick test's quick_test_results.csv (it has a "build" column) also gets a table by track and build over every
+run in the file, to see whether a build made the slow tracks faster.
 
 Only finished races count towards the performance tables; every other outcome is listed under Problems.
 """
@@ -76,6 +78,7 @@ def main():
             rows.extend(csv.DictReader(f))
     if not rows:
         sys.exit("no results")
+    all_finished = [r for r in rows if r["outcome"] == "finished"]
     run = args.run if args.run is not None else max(int(r["run"]) for r in rows)
     rows = [r for r in rows if int(r["run"]) == run]
     # A race that was repeated (a resumed run) counts once: its last line wins.
@@ -110,6 +113,10 @@ def main():
                 row["track and AA"] = f"{row['track']}, AA {'on' if row.get('aa') == '1' else 'off'}"
             lines += group_table(finished, "track and AA", "track and AA") + [""]
         lines += group_table(finished, "character", "character") + [""]
+        if any(r.get("build") not in (None, "") for r in all_finished):
+            for row in all_finished:
+                row["track and build"] = f"{row['track']}, run {row['run']} ({row.get('build') or '?'})"
+            lines += group_table(all_finished, "track and build", "track and build") + [""]
         lines += ["## Slowest races", "", "| race | track | character | vehicle | fps | worst frame | limit |",
                   "|---:|---|---|---|---:|---:|---|"]
         for row in sorted(finished, key=lambda r: num(r, "fps"))[:10]:

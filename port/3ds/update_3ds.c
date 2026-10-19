@@ -123,18 +123,19 @@ static void draw_home(void) {
     draw_buttons(labels, 4);
 }
 
+/* Running: Stop test / - / cancel. Otherwise: Full test / Quick / AA bench / cancel (9 characters a button). */
 static void draw_confirm(void) {
-    const char *labels[3];
-    labels[0] = sTestRunShown ? "Stop test" : "Start test";
-    labels[1] = sTestRunShown ? "-" : "AA bench";
-    labels[2] = "cancel";
-    draw_buttons(labels, 3);
+    static const char *const sRunning[3] = { "Stop test", "-", "cancel" };
+    static const char *const sStart[4] = { "Full test", "Quick", "AA bench", "cancel" };
     if (sTestRunShown) {
+        draw_buttons(sRunning, 3);
         plat_status("Stop the test run? The results so far are sent as a report.");
     } else {
-        plat_status("Test run: the AI races every track with every character (some 8 hours), recording a profile");
-        plat_status("of each race and any crash. Saves aren't written meanwhile. It starts from the title screen.");
-        plat_status("AA bench: the heaviest races, 4 times each with anti-aliasing off and on (half an hour).");
+        draw_buttons(sStart, 4);
+        plat_status("Full: the AI races every track with every character (some 8 hours), recording a profile of");
+        plat_status("each race and any crash. Quick: the 5 slowest tracks twice (20 min), compared with the last");
+        plat_status("quick test. AA bench: the heaviest races with anti-aliasing off and on (half an hour).");
+        plat_status("Saves aren't written meanwhile. Each starts from the title screen.");
     }
 }
 
@@ -624,15 +625,22 @@ static void update_thread(void *arg) {
                 }
                 break;
             case STATE_CONFIRM:
-                if (button == 0 || (button == 1 && !sTestRunShown)) {
-                    // 2 is the anti-aliasing benchmark. The run turns on or off at the game's next frame.
-                    port_autorun_request(!sTestRunShown ? (button == 1 ? 2 : 1) : 0);
-                    svcSleepThread(200 * 1000 * 1000);
+                if (sTestRunShown) {
+                    if (button == 1) {
+                        break; // The grey button.
+                    }
+                    if (button == 0) {
+                        port_autorun_request(0);
+                    }
+                } else if (button < 3) {
+                    // port_autorun_request: 1 the full run, 3 the quick test, 2 the anti-aliasing benchmark.
+                    static const long sRequests[3] = { 1, 3, 2 };
+                    port_autorun_request(sRequests[button]);
                 }
-                if (button != 1 || !sTestRunShown) {
-                    sState = STATE_IDLE;
-                    draw_home();
-                }
+                // The run turns on or off at the game's next frame.
+                svcSleepThread(200 * 1000 * 1000);
+                sState = STATE_IDLE;
+                draw_home();
                 break;
             case STATE_CHOOSE:
                 if (button == 2) {

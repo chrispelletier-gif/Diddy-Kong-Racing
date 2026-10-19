@@ -200,7 +200,7 @@ line also goes to the log.
 
 ## Unattended test run
 
-Tap Test run at the bottom of the bottom screen, then Start test, and leave the console on its charger. From the
+Tap Test run at the bottom of the bottom screen, then Full test, and leave the console on its charger. From the
 title screen, the game races every track with every character (200 races, some 8 hours), with the AI driving your
 kart. Each race is profiled and checked: a race that doesn't finish within 5 minutes, a kart that stops reaching
 checkpoints for a minute, a crash or a freeze are all recorded. When the AI wedges your kart somewhere for 10 s,
@@ -228,6 +228,18 @@ progress bar. Your saves are not written while it runs. Tap Stop test to end it 
 | `DKR_AUTORUN_LOOP=1` | Start over after the last race. |
 | `DKR_AUTORUN_RESTART=1` | Start from the first race instead of resuming. |
 | `DKR_AUTORUN_SNAPSHOT=1` | Save a snapshot (GPU and reference images) after each race, for `diff_frames.py`. |
+
+### Quick test
+
+Tap Test run, then Quick. It races only the slowest tracks of the full run (Haunted Woods, Jungle Falls, Crescent
+Island, Whale Bay and EverFrost Peak, from hardware test run #12), twice each with Bumper and your own anti-aliasing
+setting: about 20 minutes. Use it to tell whether a new build made the slow spots faster: run it on the old build,
+install the new one, run it again. The results issue ("[3DS test run] quick test ...") compares each track with the
+quick test before it on the same console, with both builds named, and gives the change in frame rate, share of
+frames at 30 fps, GPU and renderer time and worst frame. The races are in `quick_test_results.csv` (the test run's
+columns plus `build`), which `autorun_report.py` also splits by track and build. `DKR_AUTORUN_QUICK=1` runs it at
+every start; `DKR_AUTORUN_QUICK_TRACKS`, `DKR_AUTORUN_QUICK_CHARACTER` and `DKR_AUTORUN_QUICK_PASSES` change the
+tracks, the character and the races per track.
 
 ### Anti-aliasing benchmark
 

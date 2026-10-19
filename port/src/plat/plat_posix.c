@@ -42,9 +42,9 @@ void plat_overlay_show(const char *text) {
     (void) text;
 }
 
+/* No bug reports on the host: the results summary goes to the log instead. */
 void plat_send_test_results(const char *title, const char *summary) {
-    (void) title;
-    (void) summary;
+    fprintf(stderr, "test results: %s\n%s\n", title, summary);
 }
 
 static int sAntialias = 1;

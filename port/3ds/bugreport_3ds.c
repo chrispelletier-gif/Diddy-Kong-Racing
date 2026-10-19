@@ -643,6 +643,7 @@ static void send_test_results(void) {
     snprintf(report.title, sizeof(report.title), "%s", sResultsTitle);
     add_file(&report, "autorun_results.csv");
     add_file(&report, "aa_bench_results.csv");
+    add_file(&report, "quick_test_results.csv");
     add_file(&report, "autorun_problems.txt");
     add_file(&report, "env.txt");
     plat_log_recent(recent, sizeof(recent));

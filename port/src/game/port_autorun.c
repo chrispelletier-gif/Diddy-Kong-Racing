@@ -24,6 +24,18 @@
  * It keeps its own files (aa_bench_state.txt, aa_bench_results.csv with an "aa" column), so a full run it interrupts
  * carries on afterwards. DKR_AUTORUN_TIMEOUT, _LOOP and _RESTART apply to it too.
  *
+ * The quick test is the other short run: the slowest tracks of the full run, twice each with one character and the
+ * player's own anti-aliasing setting, about 20 minutes. It is for telling whether a change made the slow spots
+ * faster: its results compare each track with the quick test before it (usually the previous build). It is started
+ * with the "Quick test" button in the Test run confirmation, or always runs with:
+ *   DKR_AUTORUN_QUICK=1               Turns it on (instead of the full run).
+ *   DKR_AUTORUN_QUICK_TRACKS=id,...   Tracks (default: Haunted Woods, Jungle Falls, Crescent Island, Whale Bay and
+ *                                     EverFrost Peak, the slowest of hardware test run issue #12: three GPU-bound car
+ *                                     tracks, one renderer-bound hover and one plane track).
+ *   DKR_AUTORUN_QUICK_CHARACTER=n     Character (default Bumper, as the anti-aliasing benchmark).
+ *   DKR_AUTORUN_QUICK_PASSES=n        Races per track (2).
+ * Its files are quick_test_state.txt and quick_test_results.csv (with a "build" column).
+ *
  * The order is character by character, each over every track, so stopping early still covers every track.
  * Progress is saved before each race (autorun_state.txt), so after a crash or a hang the next launch resumes with the
  * race after the one that failed, and records that race's failure. Each race adds a line to autorun_results.csv,
@@ -59,6 +71,9 @@
 #define BENCH_STATE_FILE "aa_bench_state.txt"
 #define BENCH_RESULTS_FILE "aa_bench_results.csv"
 #define BENCH_PASSES 4
+#define QUICK_STATE_FILE "quick_test_state.txt"
+#define QUICK_RESULTS_FILE "quick_test_results.csv"
+#define QUICK_PASSES 2
 
 typedef struct Race {
     s8 track;
@@ -85,10 +100,27 @@ static const char *const sCharacterNames[NUMBER_OF_CHARACTERS] = {
 };
 static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
-enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH };
+enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK };
+
+/* Which run: the full test run, the anti-aliasing benchmark or the quick test. */
+enum Mode { MODE_FULL, MODE_BENCH, MODE_QUICK, MODE_COUNT };
+
+typedef struct ModeInfo {
+    const char *name;        // For the bottom screen and the results.
+    const char *stateFile;
+    const char *resultsFile;
+    const char *extraColumn; // The results file's column after the full run's ones, or NULL.
+    const char *env;         // Turns it on at every start.
+} ModeInfo;
+
+static const ModeInfo sModes[MODE_COUNT] = {
+    { "Test run", STATE_FILE, RESULTS_FILE, NULL, "DKR_AUTORUN" },
+    { "AA benchmark", BENCH_STATE_FILE, BENCH_RESULTS_FILE, "aa", "DKR_AUTORUN_BENCH" },
+    { "Quick test", QUICK_STATE_FILE, QUICK_RESULTS_FILE, "build", "DKR_AUTORUN_QUICK" },
+};
 
 static s32 sEnabled = -1;
-static s32 sBench; // The anti-aliasing benchmark rather than the full run.
+static s32 sMode; // enum Mode
 static s32 sInitialised;
 static volatile s32 sRequest;
 static s32 sQuitPending;
@@ -127,11 +159,11 @@ static void make_path(char *out, s32 size, const char *name) {
 }
 
 static const char *state_file(void) {
-    return sBench ? BENCH_STATE_FILE : STATE_FILE;
+    return sModes[sMode].stateFile;
 }
 
 static const char *results_file(void) {
-    return sBench ? BENCH_RESULTS_FILE : RESULTS_FILE;
+    return sModes[sMode].resultsFile;
 }
 
 /* Appends text to a file in the data directory. */
@@ -186,21 +218,36 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
     return count;
 }
 
-/* The benchmark: each track BENCH_PASSES times, anti-aliasing off, on, on, off. */
-static void build_bench_list(void) {
-    static const s8 sDefaultTracks[] = { 8, 29, 28 }; // Whale Bay, Jungle Falls, Frosty Village
+/*
+ * The short runs: each track a number of times with one character. The benchmark races BENCH_PASSES times with
+ * anti-aliasing off, on, on, off; the quick test leaves anti-aliasing as it is.
+ */
+static void build_short_list(void) {
+    static const s8 sBenchTracks[] = { 8, 29, 28 };         // Whale Bay, Jungle Falls, Frosty Village
+    static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
+                                                            // Whale Bay, EverFrost Peak
+    s32 quick = sMode == MODE_QUICK;
+    const s8 *defaultTracks = quick ? sQuickTracks : sBenchTracks;
+    s32 numDefault = quick ? (s32) ARRAY_COUNT(sQuickTracks) : (s32) ARRAY_COUNT(sBenchTracks);
     s8 tracks[MAX_TRACKS], character[1];
-    s32 numTracks, numLevels, numWorlds, t, pass;
+    s32 numTracks, numLevels, numWorlds, t, pass, passes;
 
-    numTracks = parse_list(plat_getenv("DKR_AUTORUN_BENCH_TRACKS"), tracks, MAX_TRACKS);
+    numTracks = parse_list(plat_getenv(quick ? "DKR_AUTORUN_QUICK_TRACKS" : "DKR_AUTORUN_BENCH_TRACKS"), tracks,
+                           MAX_TRACKS);
     if (numTracks < 0) {
-        for (numTracks = 0; numTracks < (s32) ARRAY_COUNT(sDefaultTracks); numTracks++) {
-            tracks[numTracks] = sDefaultTracks[numTracks];
+        for (numTracks = 0; numTracks < numDefault; numTracks++) {
+            tracks[numTracks] = defaultTracks[numTracks];
         }
     }
-    if (parse_list(plat_getenv("DKR_AUTORUN_BENCH_CHARACTER"), character, 1) != 1 || character[0] < 0 ||
-        character[0] >= NUMBER_OF_CHARACTERS) {
+    if (parse_list(plat_getenv(quick ? "DKR_AUTORUN_QUICK_CHARACTER" : "DKR_AUTORUN_BENCH_CHARACTER"), character,
+                   1) != 1 ||
+        character[0] < 0 || character[0] >= NUMBER_OF_CHARACTERS) {
         character[0] = 1; // Bumper
+    }
+    passes = BENCH_PASSES;
+    if (quick) {
+        passes = plat_getenv("DKR_AUTORUN_QUICK_PASSES") ? port_atoi(plat_getenv("DKR_AUTORUN_QUICK_PASSES"))
+                                                         : QUICK_PASSES;
     }
     level_count(&numLevels, &numWorlds);
     sNumRaces = 0;
@@ -208,11 +255,11 @@ static void build_bench_list(void) {
         if (tracks[t] < 0 || tracks[t] >= numLevels) {
             continue;
         }
-        for (pass = 0; pass < BENCH_PASSES; pass++) {
+        for (pass = 0; pass < passes && sNumRaces < MAX_RACES; pass++) {
             sRaces[sNumRaces].track = tracks[t];
             sRaces[sNumRaces].character = character[0];
             sRaces[sNumRaces].vehicle = leveltable_vehicle_default(tracks[t]);
-            sRaces[sNumRaces].aa = (pass == 1 || pass == 2);
+            sRaces[sNumRaces].aa = quick ? -1 : (pass == 1 || pass == 2);
             sNumRaces++;
         }
     }
@@ -224,8 +271,8 @@ static void build_race_list(void) {
     s32 numLevels, numWorlds;
     s32 allVehicles = plat_getenv("DKR_AUTORUN_VEHICLES") != NULL && plat_getenv("DKR_AUTORUN_VEHICLES")[0] == 'a';
 
-    if (sBench) {
-        build_bench_list();
+    if (sMode != MODE_FULL) {
+        build_short_list();
         return;
     }
     numTracks = parse_list(plat_getenv("DKR_AUTORUN_TRACKS"), tracks, MAX_TRACKS);
@@ -344,15 +391,15 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     make_path(path, sizeof(path), results_file());
     existing = plat_load_file(path, &size);
     if (existing == NULL) {
-        append_file(results_file(),
-                    sBench ? "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
-                             "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
-                             "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
-                             "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at,aa\n"
-                           : "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
-                             "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
-                             "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
-                             "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at\n");
+        char header[512];
+        plat_snprintf(header, sizeof(header),
+                      "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
+                      "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
+                      "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
+                      "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s\n",
+                      sModes[sMode].extraColumn ? "," : "",
+                      sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
+        append_file(results_file(), header);
     }
     plat_free(existing);
     if (stats == NULL) {
@@ -381,10 +428,12 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         stats->renderedFrames ? stats->counters[PROF_DRAWS] / stats->renderedFrames : 0,
         stats->counters[PROF_TEXTURE_UPLOADS], (int) pct((u32) (stats->idleNs / 1000), (u32) (stats->elapsedNs / 1000)),
         stats->gameFrames ? prof_limit(stats) : "-", (int) sUnsticks, sUnstuckAt);
-    if (sBench) {
+    length = strlen(line);
+    if (sMode == MODE_BENCH) {
         // What the race was drawn with (a race that never got going: what it was meant to be).
-        length = strlen(line);
         plat_snprintf(line + length, sizeof(line) - length, ",%d", stats == &empty ? (int) race->aa : plat_antialias());
+    } else if (sMode == MODE_QUICK) {
+        plat_snprintf(line + length, sizeof(line) - length, ",%s", plat_build_version());
     }
     length = strlen(line);
     plat_snprintf(line + length, sizeof(line) - length, "\n");
@@ -408,19 +457,27 @@ s32 port_autorun_enabled(void) {
         char text[200];
         s32 length;
 
-        const char *bench = plat_getenv("DKR_AUTORUN_BENCH");
+        s32 mode;
 
-        // The benchmark first (asked for, or one that hasn't ended), then the full run.
-        sBench = bench != NULL && bench[0] != '0';
-        if (!sBench) {
-            make_path(path, sizeof(path), BENCH_STATE_FILE);
+        // A short run first (asked for, or one that hasn't ended), then the full run.
+        sMode = MODE_FULL;
+        for (mode = MODE_FULL + 1; mode < MODE_COUNT && sMode == MODE_FULL; mode++) {
+            const char *env = plat_getenv(sModes[mode].env);
+            if (env != NULL && env[0] != '0') {
+                sMode = mode;
+            }
+        }
+        for (mode = MODE_FULL + 1; mode < MODE_COUNT && sMode == MODE_FULL; mode++) {
+            make_path(path, sizeof(path), sModes[mode].stateFile);
             length = plat_load_file_start(path, text, sizeof(text) - 1);
             if (length > 0) {
                 text[length] = '\0';
-                sBench = state_value(text, "active", 0) != 0;
+                if (state_value(text, "active", 0) != 0) {
+                    sMode = mode;
+                }
             }
         }
-        sEnabled = sBench || (value != NULL && value[0] != '0');
+        sEnabled = sMode != MODE_FULL || (value != NULL && value[0] != '0');
         make_path(path, sizeof(path), STATE_FILE);
         length = plat_load_file_start(path, text, sizeof(text) - 1);
         if (!sEnabled && length > 0) {
@@ -437,14 +494,21 @@ static void init(void) {
     char *state, *hang;
     const char *names[] = { "DKR_AUTORUN_TRACKS", "DKR_AUTORUN_CHARACTERS", "DKR_AUTORUN_VEHICLES" };
     const char *benchNames[] = { "DKR_AUTORUN_BENCH_TRACKS", "DKR_AUTORUN_BENCH_CHARACTER" };
+    const char *quickNames[] = { "DKR_AUTORUN_QUICK_TRACKS", "DKR_AUTORUN_QUICK_CHARACTER",
+                                 "DKR_AUTORUN_QUICK_PASSES" };
     s32 i;
 
     sInitialised = TRUE;
     sConfigHash = 0;
-    if (sBench) {
+    if (sMode == MODE_BENCH) {
         hash_text("aa bench");
         for (i = 0; i < (s32) ARRAY_COUNT(benchNames); i++) {
             hash_text(plat_getenv(benchNames[i]));
+        }
+    } else if (sMode == MODE_QUICK) {
+        hash_text("quick test");
+        for (i = 0; i < (s32) ARRAY_COUNT(quickNames); i++) {
+            hash_text(plat_getenv(quickNames[i]));
         }
     } else {
         for (i = 0; i < (s32) ARRAY_COUNT(names); i++) {
@@ -538,11 +602,11 @@ s32 port_autorun_active(void) {
 }
 
 /*
- * From any thread (the bottom screen's buttons): start the test run (1) or the anti-aliasing benchmark (2), or stop
- * whichever is going (0), at the next game frame.
+ * From any thread (the bottom screen's buttons): start the test run (1), the anti-aliasing benchmark (2) or the quick
+ * test (3), or stop whichever is going (0), at the next game frame.
  */
 void port_autorun_request(s32 start) {
-    sRequest = start == 2 ? REQUEST_BENCH : start ? REQUEST_START : REQUEST_STOP;
+    sRequest = start == 3 ? REQUEST_QUICK : start == 2 ? REQUEST_BENCH : start ? REQUEST_START : REQUEST_STOP;
 }
 
 static void set_phase(s32 phase) {
@@ -586,9 +650,10 @@ static void show_status(void) {
             what = (plat_time_ns() - sPhaseStartNs > 3000000000ULL) ? "(go to the title screen)" : "next";
             break;
     }
-    plat_snprintf(line[0], sizeof(line[0]), "%s %d  race %d/%d  ok %d bad %d", sBench ? "AA BENCH" : "TEST RUN",
-                  (int) sRun, (int) sNext + 1, (int) sNumRaces, (int) sFinished, (int) sProblems);
-    if (sBench) {
+    plat_snprintf(line[0], sizeof(line[0]), "%s %d  race %d/%d  ok %d bad %d",
+                  sMode == MODE_BENCH ? "AA BENCH" : sMode == MODE_QUICK ? "QUICK TEST" : "TEST RUN", (int) sRun,
+                  (int) sNext + 1, (int) sNumRaces, (int) sFinished, (int) sProblems);
+    if (sMode == MODE_BENCH) {
         plat_snprintf(line[1], sizeof(line[1]), "%s AA %s %s", track_name(race->track), race->aa ? "on" : "off",
                       what);
     } else {
@@ -672,7 +737,7 @@ static double parse_decimal(const char *text) {
     return negative ? -value : value;
 }
 
-/* Columns of the benchmark's results file that its summary uses. */
+/* Columns of the short runs' results files that their summaries use. */
 enum BenchColumn {
     COL_RUN = 0,
     COL_TRACK = 3,
@@ -684,7 +749,7 @@ enum BenchColumn {
     COL_GPU_DRAW = 23,
     COL_WORST_GPU = 27,
     COL_LIMIT = 32,
-    COL_AA = 35, // After the test run's unsticks and unstuck_at
+    COL_EXTRA = 35, // After the test run's unsticks and unstuck_at: "aa" (benchmark) or "build" (quick test)
     COL_COUNT
 };
 
@@ -693,6 +758,7 @@ enum BenchColumn {
 
 typedef struct BenchGroup {
     char track[32];
+    char build[40]; // Quick test: the run and its build.
     s32 races;
     double fps, pct30, rdp, gpu;
     s32 worstFrame, worstGpu;
@@ -705,53 +771,93 @@ static double bench_avg(double sum, s32 count) {
     return count ? sum / count : 0.0;
 }
 
+/* Splits a results line into fields in place. Returns the number of fields. */
+static s32 split_fields(char *line, const char **fields) {
+    s32 numFields = 0;
+    char *c;
+    fields[numFields++] = line;
+    for (c = line; *c && numFields <= COL_COUNT; c++) {
+        if (*c == ',') {
+            *c = '\0';
+            fields[numFields++] = c + 1;
+        }
+    }
+    return numFields;
+}
+
 /*
- * The benchmark's side-by-side table, from this run's finished races in the results file (so races from before a
- * crash count too), as Markdown: one line per track for anti-aliasing off and one for on, then what AA costs.
+ * A short run's summary, from the finished races in its results file (so races from before a crash count too), as
+ * Markdown. The benchmark: one line per track for anti-aliasing off and one for on, then what AA costs. The quick
+ * test: one line per track for the quick test before this one and one for this one, then the difference.
  */
 static void bench_summary(char *out, s32 size) {
     static BenchGroup groups[BENCH_MAX_TRACKS][2];
     char path[256];
-    char *data, *line, *next;
+    char *data, *copy, *line, *next;
     const char *fields[COL_COUNT + 1];
     unsigned int dataSize;
-    s32 numTracks = 0, length, t, aa, i, numFields;
+    s32 numTracks = 0, length, t, k, i, run, previousRun = 0;
+    s32 quick = sMode == MODE_QUICK;
 
     bzero(groups, sizeof(groups));
-    make_path(path, sizeof(path), BENCH_RESULTS_FILE);
+    make_path(path, sizeof(path), results_file());
     data = plat_load_file(path, &dataSize);
     if (data == NULL) {
         return;
     }
-    // Made into one string, then split into lines and fields in place.
+    // Made into one string, then split into lines and fields in place (twice for the quick test: first to find the
+    // run before this one).
     line = plat_malloc(dataSize + 1);
-    if (line == NULL) {
+    copy = plat_malloc(dataSize + 1);
+    if (line == NULL || copy == NULL) {
+        plat_free(line);
+        plat_free(copy);
         plat_free(data);
         return;
     }
     bcopy(data, line, dataSize);
     line[dataSize] = '\0';
+    bcopy(data, copy, dataSize);
+    copy[dataSize] = '\0';
     plat_free(data);
     data = line;
-    for (; line != NULL && *line; line = next) {
+    if (quick) {
+        for (line = copy; line != NULL && *line; line = next) {
+            next = strchr(line, '\n');
+            if (next != NULL) {
+                *next++ = '\0';
+            }
+            if (split_fields(line, fields) < COL_COUNT || !str_equal(fields[COL_OUTCOME], "finished")) {
+                continue;
+            }
+            run = port_atoi(fields[COL_RUN]);
+            if (run < sRun && run > previousRun) {
+                previousRun = run;
+            }
+        }
+    }
+    plat_free(copy);
+    for (line = data; line != NULL && *line; line = next) {
         BenchGroup *g;
-        char *c;
         next = strchr(line, '\n');
         if (next != NULL) {
             *next++ = '\0';
         }
-        numFields = 0;
-        fields[numFields++] = line;
-        for (c = line; *c && numFields <= COL_COUNT; c++) {
-            if (*c == ',') {
-                *c = '\0';
-                fields[numFields++] = c + 1;
+        if (split_fields(line, fields) < COL_COUNT || !str_equal(fields[COL_OUTCOME], "finished")) {
+            continue; // The header, or a race that didn't finish.
+        }
+        run = port_atoi(fields[COL_RUN]);
+        if (quick) {
+            if (run != sRun && (run != previousRun || previousRun == 0)) {
+                continue;
             }
+            k = run == sRun;
+        } else {
+            if (run != sRun) {
+                continue;
+            }
+            k = port_atoi(fields[COL_EXTRA]) != 0;
         }
-        if (numFields < COL_COUNT || port_atoi(fields[COL_RUN]) != sRun || !str_equal(fields[COL_OUTCOME], "finished")) {
-            continue; // The header, an earlier run, or a race that didn't finish.
-        }
-        aa = port_atoi(fields[COL_AA]) != 0;
         for (t = 0; t < numTracks && !str_equal(groups[t][0].track, fields[COL_TRACK]); t++) {}
         if (t == numTracks) {
             if (numTracks == BENCH_MAX_TRACKS) {
@@ -760,7 +866,11 @@ static void bench_summary(char *out, s32 size) {
             numTracks++;
             plat_snprintf(groups[t][0].track, sizeof(groups[t][0].track), "%s", fields[COL_TRACK]);
         }
-        g = &groups[t][aa];
+        g = &groups[t][k];
+        if (quick) {
+            for (i = 0; fields[COL_EXTRA][i] != '\0' && fields[COL_EXTRA][i] != '\r' && i < 24; i++) {}
+            plat_snprintf(g->build, sizeof(g->build), "run %d, %.*s", (int) run, (int) i, fields[COL_EXTRA]);
+        }
         g->races++;
         g->fps += parse_decimal(fields[COL_FPS]);
         g->pct30 += parse_decimal(fields[COL_PCT_30FPS]);
@@ -780,13 +890,29 @@ static void bench_summary(char *out, s32 size) {
     }
     plat_free(data);
 
-    length = plat_snprintf(out, size,
-                           "\n### Anti-aliasing off vs on (averages of the finished races)\n\n"
-                           "| track | AA | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame | limit |\n"
-                           "|---|---|--:|--:|--:|--:|--:|--:|--:|---|\n");
+    if (quick) {
+        if (previousRun == 0) {
+            length = plat_snprintf(out, size,
+                                   "\n### Quick test (averages of the finished races)\n\n"
+                                   "No earlier quick test on this console to compare with; the next one will be.\n\n"
+                                   "| track | run, build | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame "
+                                   "| limit |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|\n");
+        } else {
+            length = plat_snprintf(out, size,
+                                   "\n### Quick test: run %d against run %d (averages of the finished races)\n\n"
+                                   "| track | run, build | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame "
+                                   "| limit |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|\n",
+                                   (int) sRun, (int) previousRun);
+        }
+    } else {
+        length = plat_snprintf(out, size,
+                               "\n### Anti-aliasing off vs on (averages of the finished races)\n\n"
+                               "| track | AA | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame | limit |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|---|\n");
+    }
     for (t = 0; t < numTracks; t++) {
-        for (aa = 0; aa < 2; aa++) {
-            BenchGroup *g = &groups[t][aa];
+        for (k = 0; k < 2; k++) {
+            BenchGroup *g = &groups[t][k];
             s32 limit = 0;
             if (g->races == 0) {
                 continue;
@@ -801,7 +927,7 @@ static void bench_summary(char *out, s32 size) {
             }
             length += plat_snprintf(out + length, size - length,
                                     "| %s | %s | %d | %.1f | %.0f%% | %.1f | %d | %.1f | %d | %s |\n",
-                                    groups[t][0].track, aa ? "on" : "off", (int) g->races,
+                                    groups[t][0].track, quick ? g->build : k ? "on" : "off", (int) g->races,
                                     bench_avg(g->fps, g->races), bench_avg(g->pct30, g->races),
                                     bench_avg(g->gpu, g->races), (int) g->worstGpu, bench_avg(g->rdp, g->races),
                                     (int) g->worstFrame, sLimitNames[limit]);
@@ -812,13 +938,25 @@ static void bench_summary(char *out, s32 size) {
         if (off->races == 0 || on->races == 0) {
             continue;
         }
-        length += plat_snprintf(out + length, size - length,
-                                "%s%s: AA costs %.1f ms of GPU time per frame and %.1f fps (30 fps on %.0f%% of "
-                                "frames instead of %.0f%%).\n",
-                                t == 0 ? "\n" : "", groups[t][0].track,
-                                bench_avg(on->gpu, on->races) - bench_avg(off->gpu, off->races),
-                                bench_avg(off->fps, off->races) - bench_avg(on->fps, on->races),
-                                bench_avg(on->pct30, on->races), bench_avg(off->pct30, off->races));
+        if (quick) {
+            length += plat_snprintf(out + length, size - length,
+                                    "%s%s: %+.1f fps, 30 fps on %+.0f%% of frames, GPU %+.1f ms, rdp %+.1f ms, worst "
+                                    "frame %+d ms.\n",
+                                    t == 0 ? "\n" : "", groups[t][0].track,
+                                    bench_avg(on->fps, on->races) - bench_avg(off->fps, off->races),
+                                    bench_avg(on->pct30, on->races) - bench_avg(off->pct30, off->races),
+                                    bench_avg(on->gpu, on->races) - bench_avg(off->gpu, off->races),
+                                    bench_avg(on->rdp, on->races) - bench_avg(off->rdp, off->races),
+                                    (int) (on->worstFrame - off->worstFrame));
+        } else {
+            length += plat_snprintf(out + length, size - length,
+                                    "%s%s: AA costs %.1f ms of GPU time per frame and %.1f fps (30 fps on %.0f%% of "
+                                    "frames instead of %.0f%%).\n",
+                                    t == 0 ? "\n" : "", groups[t][0].track,
+                                    bench_avg(on->gpu, on->races) - bench_avg(off->gpu, off->races),
+                                    bench_avg(off->fps, off->races) - bench_avg(on->fps, on->races),
+                                    bench_avg(on->pct30, on->races), bench_avg(off->pct30, off->races));
+        }
     }
 }
 
@@ -828,18 +966,19 @@ static void send_results(const char *why) {
     static char summary[2048];
     s32 length;
     plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
-                  sBench ? "AA benchmark " : "", (int) sRun, (int) (sFinished + sProblems), (int) sNumRaces,
+                  sMode == MODE_BENCH ? "AA benchmark " : sMode == MODE_QUICK ? "quick test " : "", (int) sRun, (int) (sFinished + sProblems), (int) sNumRaces,
                   (int) sProblems, why);
     length = plat_snprintf(summary, sizeof(summary),
                            "%s %d %s after %d of %d races: %d finished, %d with problems.\n"
                            "Average frame rate of the races finished since the game started: %.1f fps (%d races).\n",
-                           sBench ? "Anti-aliasing benchmark run" : "Run", (int) sRun, why,
+                           sMode == MODE_BENCH ? "Anti-aliasing benchmark run" : sMode == MODE_QUICK ? "Quick test run" : "Run",
+                           (int) sRun, why,
                            (int) (sFinished + sProblems), (int) sNumRaces, (int) sFinished, (int) sProblems,
                            sFpsCount ? sFpsSum / sFpsCount : 0.0, (int) sFpsCount);
-    if (sBench && length > 0 && length < (s32) sizeof(summary)) {
+    if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
         bench_summary(summary + length, sizeof(summary) - length);
     }
-    plat_status("Test run %s: %d races, %d problems", why, (int) (sFinished + sProblems), (int) sProblems);
+    plat_status("%s %s: %d races, %d problems", sModes[sMode].name, why, (int) (sFinished + sProblems), (int) sProblems);
     plat_send_test_results(title, summary);
 }
 
@@ -850,10 +989,10 @@ static void turn_off(const char *why) {
     sInitialised = FALSE;
     set_phase(PHASE_OFF);
     save_state(-1);
-    if (sBench) {
+    if (sMode == MODE_BENCH) {
         plat_set_antialias(-1); // Back to the player's setting.
-        sBench = FALSE;
     }
+    sMode = MODE_FULL;
     prof_set_status(NULL);
 }
 
@@ -910,15 +1049,15 @@ static void end_race(const char *outcome, s32 position) {
 static void handle_request(void) {
     s32 request = sRequest;
     sRequest = REQUEST_NONE;
-    if ((request == REQUEST_START || request == REQUEST_BENCH) && !port_autorun_active()) {
-        sBench = request == REQUEST_BENCH;
+    if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK) && !port_autorun_active()) {
+        sMode = request == REQUEST_BENCH ? MODE_BENCH : request == REQUEST_QUICK ? MODE_QUICK : MODE_FULL;
         sEnabled = 1;
         sInitialised = FALSE;
         if (!port_autorun_active()) {
             return; // Nothing to race.
         }
         prof_window_start(PROF_WINDOW_OVERLAY);
-        plat_status("%s started: race %d of %d", sBench ? "AA benchmark" : "Test run", (int) sNext + 1,
+        plat_status("%s started: race %d of %d", sModes[sMode].name, (int) sNext + 1,
                     (int) sNumRaces);
         if (get_game_mode() == GAMEMODE_INGAME) {
             sQuitPending = TRUE; // Out of the game, to the title screen where the races start.

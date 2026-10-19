@@ -133,6 +133,8 @@ void plat_send_test_results(const char *title, const char *summary);
  */
 void plat_set_antialias(int on);
 int plat_antialias(void);
+/* The build's version (git describe), as bug reports show it; "host" for a host build without one. */
+const char *plat_build_version(void);
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
