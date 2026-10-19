@@ -226,6 +226,18 @@ progress bar. Your saves are not written while it runs. Tap Stop test to end it 
 | `DKR_AUTORUN_RESTART=1` | Start from the first race instead of resuming. |
 | `DKR_AUTORUN_SNAPSHOT=1` | Save a snapshot (GPU and reference images) after each race, for `diff_frames.py`. |
 
+### Anti-aliasing benchmark
+
+Tap Test run, then AA bench. It is a short test run (about half an hour) that measures what anti-aliasing costs on
+the heaviest races: Whale Bay, Jungle Falls and Frosty Village, the slowest tracks of hardware test run #10, raced
+by Bumper four times each with anti-aliasing off, on, on, off (so neither setting gets the cooler console or the warm
+caches). The game switches anti-aliasing itself before each race and puts your own setting back at the end. The
+results issue ("[3DS test run] AA benchmark ...") has a table of the two settings side by side for each track and
+what AA costs in GPU time and frame rate; the races are in `aa_bench_results.csv` (the test run's columns plus
+`aa`), which `autorun_report.py` also splits by track and AA. It keeps its own progress file, so a full test run it
+interrupts carries on afterwards. `DKR_AUTORUN_BENCH=1` runs it at every start instead; `DKR_AUTORUN_BENCH_TRACKS`
+and `DKR_AUTORUN_BENCH_CHARACTER` change the tracks and the character.
+
 ## Automated testing
 
 These settings work on both builds (in `env.txt` on the 3DS, as environment variables on the host):

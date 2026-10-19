@@ -117,7 +117,7 @@ static void draw_home(void) {
 static void draw_confirm(void) {
     const char *labels[3];
     labels[0] = sTestRunShown ? "Stop test" : "Start test";
-    labels[1] = "-";
+    labels[1] = sTestRunShown ? "-" : "AA bench";
     labels[2] = "cancel";
     draw_buttons(labels, 3);
     if (sTestRunShown) {
@@ -125,6 +125,7 @@ static void draw_confirm(void) {
     } else {
         plat_status("Test run: the AI races every track with every character (some 8 hours), recording a profile");
         plat_status("of each race and any crash. Saves aren't written meanwhile. It starts from the title screen.");
+        plat_status("AA bench: the heaviest races, 4 times each with anti-aliasing off and on (half an hour).");
     }
 }
 
@@ -611,12 +612,12 @@ static void update_thread(void *arg) {
                 }
                 break;
             case STATE_CONFIRM:
-                if (button == 0) {
-                    port_autorun_request(!sTestRunShown);
-                    // The run turns on or off at the game's next frame.
+                if (button == 0 || (button == 1 && !sTestRunShown)) {
+                    // 2 is the anti-aliasing benchmark. The run turns on or off at the game's next frame.
+                    port_autorun_request(!sTestRunShown ? (button == 1 ? 2 : 1) : 0);
                     svcSleepThread(200 * 1000 * 1000);
                 }
-                if (button != 1) {
+                if (button != 1 || !sTestRunShown) {
                     sState = STATE_IDLE;
                     draw_home();
                 }

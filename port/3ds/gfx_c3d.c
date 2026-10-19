@@ -42,6 +42,8 @@ typedef struct C3DTexture {
 static C3D_RenderTarget *sTarget;
 /* Render target size relative to the screen: 2 draws at twice the resolution and downsamples (anti-aliasing). */
 static int sRenderScale = 1;
+static int sDefaultScale = 2;          // From DKR_AA.
+static volatile int sWantedScale = 2;  // plat_set_antialias, applied by the renderer between frames.
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
 static C3DVertex *sVbo;
@@ -245,6 +247,55 @@ static void gpu_self_test(void) {
     plat_status("GPU test passed");
 }
 
+/* The render target for the top screen. The doubled one needs 3MB of VRAM, so fall back if it does not fit. */
+static void create_target(int scale) {
+    sTarget = NULL;
+    if (scale == 2) {
+        sTarget = C3D_RenderTargetCreate(TOP_HEIGHT * 2, TOP_WIDTH * 2, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        sRenderScale = 2;
+    }
+    if (sTarget == NULL) {
+        sTarget = C3D_RenderTargetCreate(TOP_HEIGHT, TOP_WIDTH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        sRenderScale = 1;
+    }
+    C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT,
+                              DISPLAY_TRANSFER_FLAGS(sRenderScale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO));
+}
+
+/* From any thread (the AA benchmark): anti-aliasing on (1), off (0) or back to DKR_AA (-1), from the next frame. */
+void plat_set_antialias(int on) {
+    sWantedScale = on < 0 ? sDefaultScale : on ? 2 : 1;
+}
+
+/* Whether the frames being drawn now are anti-aliased. */
+int plat_antialias(void) {
+    return sRenderScale == 2;
+}
+
+/*
+ * Renderer thread, between frames: makes a new render target if the anti-aliasing setting changed. A target can only
+ * be deleted outside a frame with the GPU idle, so this waits for the GPU (an empty frame) first. The new target is
+ * cleared like the very first one.
+ */
+static void apply_render_scale(void) {
+    int scale = sWantedScale;
+    if (scale == sRenderScale || sTarget == NULL) {
+        return;
+    }
+    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_BUSY);
+        plat_sleep_ns(250000);
+    }
+    C3D_FrameEnd(0);
+    C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
+    create_target(scale);
+    sFrameStarted = 0;
+    plat_log("render target now %dx (anti-aliasing %s)", sRenderScale, sRenderScale == 2 ? "on" : "off");
+    if (sRenderScale != scale) {
+        sWantedScale = sRenderScale; // Didn't fit: don't try again every frame.
+    }
+}
+
 void gfxb_init(void) {
     static int sDone;
     C3D_AttrInfo *attr;
@@ -259,19 +310,11 @@ void gfxb_init(void) {
     sDone = 1;
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
     {
-        // Anti-aliasing is on unless DKR_AA=0. The doubled target needs 3MB of VRAM, so fall back if it does not fit.
+        // Anti-aliasing is on unless DKR_AA=0.
         const char *aa = plat_getenv("DKR_AA");
-        sTarget = NULL;
-        if (aa == NULL || atoi(aa) != 0) {
-            sTarget = C3D_RenderTargetCreate(TOP_HEIGHT * 2, TOP_WIDTH * 2, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-            sRenderScale = 2;
-        }
-        if (sTarget == NULL) {
-            sTarget = C3D_RenderTargetCreate(TOP_HEIGHT, TOP_WIDTH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-            sRenderScale = 1;
-        }
-        C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT,
-                                  DISPLAY_TRANSFER_FLAGS(sRenderScale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO));
+        sDefaultScale = (aa == NULL || atoi(aa) != 0) ? 2 : 1;
+        sWantedScale = sDefaultScale;
+        create_target(sDefaultScale);
         plat_status("Graphics started%s", sRenderScale == 2 ? " (anti-aliased)" : "");
     }
 
@@ -506,6 +549,7 @@ void gfxb_start_frame(void) {
     // No vblank throttling here: the emulated VI already paces the game. Beginning a frame still waits for the GPU
     // to finish the previous one, after which its textures can be deleted and the vertex buffer reused.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
+    apply_render_scale();
     if (sFrameCount < 3) {
         plat_log("frame %d: waiting for the GPU", sFrameCount);
     }

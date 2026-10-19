@@ -4,6 +4,8 @@ with bugreport_fetch.py) as a Markdown report.
 
     python3 port/tools/autorun_report.py autorun_results.csv [--run N] [--out report.md]
 
+The anti-aliasing benchmark's aa_bench_results.csv (it has an "aa" column) also gets a table by track and AA setting.
+
 Only finished races count towards the performance tables; every other outcome is listed under Problems.
 """
 import argparse
@@ -103,6 +105,10 @@ def main():
             "",
         ]
         lines += group_table(finished, "track", "track") + [""]
+        if any(r.get("aa") not in (None, "") for r in finished):
+            for row in finished:
+                row["track and AA"] = f"{row['track']}, AA {'on' if row.get('aa') == '1' else 'off'}"
+            lines += group_table(finished, "track and AA", "track and AA") + [""]
         lines += group_table(finished, "character", "character") + [""]
         lines += ["## Slowest races", "", "| race | track | character | vehicle | fps | worst frame | limit |",
                   "|---:|---|---|---|---:|---:|---|"]

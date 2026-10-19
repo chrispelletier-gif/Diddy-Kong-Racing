@@ -47,6 +47,16 @@ void plat_send_test_results(const char *title, const char *summary) {
     (void) summary;
 }
 
+static int sAntialias = 1;
+
+void plat_set_antialias(int on) {
+    sAntialias = on < 0 ? 1 : on;
+}
+
+int plat_antialias(void) {
+    return sAntialias;
+}
+
 static void *thread_entry(void *arg) {
     PlatThread *thread = (PlatThread *) arg;
     thread->func(thread->arg);
