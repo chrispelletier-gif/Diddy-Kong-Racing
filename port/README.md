@@ -203,7 +203,8 @@ line also goes to the log.
 Tap Test run at the bottom of the bottom screen, then Start test, and leave the console on its charger. From the
 title screen, the game races every track with every character (200 races, some 8 hours), with the AI driving your
 kart. Each race is profiled and checked: a race that doesn't finish within 5 minutes, a kart that stops reaching
-checkpoints for a minute, a crash or a freeze are all recorded. The bottom screen shows the profiler, the race, and a
+checkpoints for a minute, a crash or a freeze are all recorded. When the AI wedges your kart somewhere for 10 s,
+the kart is put at the next checkpoint and the race goes on; the spot is noted in the results. The bottom screen shows the profiler, the race, and a
 progress bar. Your saves are not written while it runs. Tap Stop test to end it early.
 
 - Results go to `sdmc:/3ds/dkr/`: `autorun_results.csv` (one line per race: outcome, frame rate, the profiler's
