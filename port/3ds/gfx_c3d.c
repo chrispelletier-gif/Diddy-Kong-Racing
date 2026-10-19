@@ -64,6 +64,32 @@ static float sScreenScaleX = 320.0f / 400.0f;
 static C3DTexture **sPendingFrees;
 static int sNumPendingFrees, sPendingFreesCapacity;
 
+/*
+ * Each citro3d setter marks its group of GPU settings for writing to the command list, even when the value does not
+ * change, and a batch used to call all of them: six combiner stages, blending, depth, culling, scissor, fog colour
+ * and both textures, although most batches only change their texture. So the settings last passed to citro3d are
+ * kept here and a setter is only called when its value changes (roadmap item P4). This mirrors citro3d's own copy
+ * of the settings, not the GPU's registers, so citro3d still rewrites everything itself after the HOME menu.
+ * Forgotten at the start of each frame (binding the render target resets the scissor) and when a texture is
+ * uploaded (its settings may change in place). DKR_STATE_CACHE=0 sets everything for every batch, as before.
+ */
+static struct {
+    int known; // The fields below hold what citro3d has.
+    C3D_Tex *tex[2];
+    C3D_TexEnv texEnv[6];
+    u32 fogColor;
+    u8 blend;
+    u8 alphaTest, alphaRef;
+    u8 depthEnable, depthFunc, depthMask;
+    u8 decal;
+    u8 cull;
+    short scissor[4];
+} sGpu;
+
+static void forget_gpu_state(void) {
+    sGpu.known = 0;
+}
+
 /******************************** Setup ********************************/
 
 /*
@@ -549,6 +575,7 @@ void gfxb_start_frame(void) {
         C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
     }
     C3D_FrameDrawOn(sTarget);
+    forget_gpu_state();
     sVboUsed = 0;
     if (sFrameStarted < 0) {
         static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
@@ -759,6 +786,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
         C3D_TexSetFilter(&t->tex, GPU_LINEAR, GPU_LINEAR);
     }
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
+    forget_gpu_state();
 }
 
 /* For snapshots: logs a texture whose memory no longer holds what was uploaded. */
@@ -1022,7 +1050,11 @@ static void apply_fog(const GfxDrawState *state) {
         sLutOffset = state->fogOffset;
     }
     if (on) {
-        C3D_FogColor(state->fog[0] | (state->fog[1] << 8) | (state->fog[2] << 16));
+        u32 color = state->fog[0] | (state->fog[1] << 8) | (state->fog[2] << 16);
+        if (!sGpu.known || color != sGpu.fogColor) {
+            C3D_FogColor(color);
+            sGpu.fogColor = color;
+        }
     }
     if (on != sFogOn) {
         C3D_FogGasMode(on ? GPU_FOG : GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
@@ -1085,16 +1117,45 @@ static u32 const_value(const GfxDrawState *state, int source, int channel) {
     return c[channel];
 }
 
+/* What the combiner stages are made from. */
+typedef struct CombinerInputs {
+    GfxCombiner combiner;
+    unsigned char prim[4], env[4], fog[4];
+    unsigned char primLodFrac;
+    unsigned char fogStage;
+} CombinerInputs;
+
 static void apply_combiner(const GfxDrawState *state) {
-    TevProgram prog;
+    // The last combiner compiled, which most batches share with the one before.
+    static TevProgram sProg;
+    static CombinerInputs sLast;
+    static int sCompiled;
+    CombinerInputs in;
     int i;
 
-    compile_combiner(state, &prog);
+    memset(&in, 0, sizeof(in));
+    in.combiner = state->combiner;
+    memcpy(in.prim, state->prim, 4);
+    memcpy(in.env, state->env, 4);
+    memcpy(in.fog, state->fog, 4);
+    in.primLodFrac = state->primLodFrac;
+    in.fogStage = state->fogEnabled && fog_mode() == FOG_VERTEX;
+    if (sCompiled && memcmp(&in, &sLast, sizeof(in)) == 0) {
+        if (sGpu.known) {
+            return; // Same stages as the last batch.
+        }
+    } else if (!sCompiled || memcmp(&in.combiner, &sLast.combiner, sizeof(in.combiner)) != 0 ||
+               in.fogStage != sLast.fogStage) {
+        compile_combiner(state, &sProg);
+        sCompiled = 1;
+    }
+    sLast = in;
     for (i = 0; i < 6; i++) {
-        C3D_TexEnv *env = C3D_GetTexEnv(i);
+        C3D_TexEnv stage;
+        C3D_TexEnv *env = &stage;
         C3D_TexEnvInit(env);
-        if (i < prog.numStages) {
-            const TevStage *st = &prog.stages[i];
+        if (i < sProg.numStages) {
+            const TevStage *st = &sProg.stages[i];
             u32 r, g, b, a;
             C3D_TexEnvSrc(env, C3D_RGB, st->rgbSrc[0], st->rgbSrc[1], st->rgbSrc[2]);
             C3D_TexEnvSrc(env, C3D_Alpha, st->alphaSrc[0], st->alphaSrc[1], st->alphaSrc[2]);
@@ -1115,6 +1176,10 @@ static void apply_combiner(const GfxDrawState *state) {
             C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
             C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
         }
+        if (!sGpu.known || memcmp(&stage, &sGpu.texEnv[i], sizeof(stage)) != 0) {
+            C3D_SetTexEnv(i, &stage);
+            sGpu.texEnv[i] = stage;
+        }
     }
 }
 
@@ -1122,15 +1187,13 @@ static void apply_combiner(const GfxDrawState *state) {
 
 static void bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV) {
     C3DTexture *t = (tex != NULL) ? (C3DTexture *) tex->backendData : NULL;
-    if (t != NULL) {
-        C3D_TexBind(unit, &t->tex);
-        *scaleU = t->scaleU;
-        *scaleV = t->scaleV;
-    } else {
-        C3D_TexBind(unit, &sWhiteTex);
-        *scaleU = 1.0f;
-        *scaleV = 1.0f;
+    C3D_Tex *bind = (t != NULL) ? &t->tex : &sWhiteTex;
+    if (!sGpu.known || bind != sGpu.tex[unit]) {
+        C3D_TexBind(unit, bind);
+        sGpu.tex[unit] = bind;
     }
+    *scaleU = (t != NULL) ? t->scaleU : 1.0f;
+    *scaleV = (t != NULL) ? t->scaleV : 1.0f;
 }
 
 /* Converts a scissor rectangle on the N64 screen to the rotated framebuffer. */
@@ -1226,7 +1289,7 @@ static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
  * are drawn half transparent. A box that comes out grey has the right blending but an opaque texture; one that shows
  * the letter or shadow shape at full brightness has the right texture but no blending.
  */
-static void apply_alpha_diagnostic(const GfxDrawState *state) {
+static int apply_alpha_diagnostic(const GfxDrawState *state) {
     static int sOn = -1;
     int i;
 
@@ -1234,7 +1297,7 @@ static void apply_alpha_diagnostic(const GfxDrawState *state) {
         sOn = plat_getenv("DKR_DIAG_ALPHA") != NULL;
     }
     if (!sOn || !IS_BLENDED(state->blend)) {
-        return;
+        return 0;
     }
     for (i = 0; i < 6; i++) {
         C3D_TexEnv *env = C3D_GetTexEnv(i);
@@ -1250,50 +1313,91 @@ static void apply_alpha_diagnostic(const GfxDrawState *state) {
             C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
         }
     }
+    return 1;
 }
 
 static void set_draw_state(const GfxDrawState *state) {
-    switch (state->blend) {
-        case GFX_BLEND_ALPHA:
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
-            break;
-        case GFX_BLEND_ADD:
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ONE, GPU_ZERO);
-            break;
-        default:
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-            break;
-    }
-    C3D_AlphaTest(state->alphaTest, GPU_GEQUAL, state->alphaRef);
-    if (sDepthOnly) {
-        C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_DEPTH);
-    } else if (state->depthTest || state->depthWrite) {
-        C3D_DepthTest(true, state->depthTest ? GPU_GEQUAL : GPU_ALWAYS,
-                      state->depthWrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
-    } else {
-        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
-    }
-    C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f : 0.0f);
-    {
-        static int sNoCull = -1;
-        if (sNoCull < 0) {
-            sNoCull = plat_getenv("DKR_NO_CULL") != NULL;
+    static int sNoCull = -1;
+    u8 depthEnable, depthFunc, depthMask, cull;
+
+    if (!sGpu.known || state->blend != sGpu.blend) {
+        switch (state->blend) {
+            case GFX_BLEND_ALPHA:
+                C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
+                break;
+            case GFX_BLEND_ADD:
+                C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ONE, GPU_ZERO);
+                break;
+            default:
+                C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+                break;
         }
-        C3D_CullFace((sNoCull || state->cullMode == 0) ? GPU_CULL_NONE
-                     : state->cullMode == 1                ? GPU_CULL_BACK_CCW
-                                                           : GPU_CULL_FRONT_CCW);
+        sGpu.blend = state->blend;
     }
-    set_scissor(state->scissor);
+    if (!sGpu.known || state->alphaTest != sGpu.alphaTest || state->alphaRef != sGpu.alphaRef) {
+        C3D_AlphaTest(state->alphaTest, GPU_GEQUAL, state->alphaRef);
+        sGpu.alphaTest = state->alphaTest;
+        sGpu.alphaRef = state->alphaRef;
+    }
+    if (sDepthOnly) {
+        depthEnable = true;
+        depthFunc = GPU_ALWAYS;
+        depthMask = GPU_WRITE_DEPTH;
+    } else if (state->depthTest || state->depthWrite) {
+        depthEnable = true;
+        depthFunc = state->depthTest ? GPU_GEQUAL : GPU_ALWAYS;
+        depthMask = state->depthWrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR;
+    } else {
+        depthEnable = false;
+        depthFunc = GPU_ALWAYS;
+        depthMask = GPU_WRITE_COLOR;
+    }
+    if (!sGpu.known || depthEnable != sGpu.depthEnable || depthFunc != sGpu.depthFunc ||
+        depthMask != sGpu.depthMask) {
+        C3D_DepthTest(depthEnable, depthFunc, depthMask);
+        sGpu.depthEnable = depthEnable;
+        sGpu.depthFunc = depthFunc;
+        sGpu.depthMask = depthMask;
+    }
+    if (!sGpu.known || state->decal != sGpu.decal) {
+        C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f : 0.0f);
+        sGpu.decal = state->decal;
+    }
+    if (sNoCull < 0) {
+        sNoCull = plat_getenv("DKR_NO_CULL") != NULL;
+    }
+    cull = (sNoCull || state->cullMode == 0) ? GPU_CULL_NONE
+           : state->cullMode == 1             ? GPU_CULL_BACK_CCW
+                                              : GPU_CULL_FRONT_CCW;
+    if (!sGpu.known || cull != sGpu.cull) {
+        C3D_CullFace(cull);
+        sGpu.cull = cull;
+    }
+    if (!sGpu.known || memcmp(state->scissor, sGpu.scissor, sizeof(sGpu.scissor)) != 0) {
+        set_scissor(state->scissor);
+        memcpy(sGpu.scissor, state->scissor, sizeof(sGpu.scissor));
+    }
 }
 
 /* Sets every GPU setting a draw uses. */
 static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
+    static int sCache = -1;
+
+    if (sCache < 0) {
+        const char *env = plat_getenv("DKR_STATE_CACHE");
+        sCache = env == NULL || atoi(env) != 0;
+        plat_log("GPU settings: %s", sCache ? "only changes are set" : "all set for every draw");
+    }
     bind_texture(0, state->textures[0], su0, sv0);
     bind_texture(1, state->textures[1], su1, sv1);
     apply_combiner(state);
-    apply_alpha_diagnostic(state);
     apply_fog(state);
     set_draw_state(state);
+    sGpu.known = sCache;
+    if (apply_alpha_diagnostic(state)) {
+        // It wrote the combiner stages itself.
+        forget_gpu_state();
+    }
 }
 
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
@@ -1342,10 +1446,14 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
                  verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
     }
     first = drain_before_draw(state, numTriangles);
+    if (first) {
+        forget_gpu_state();
+    }
     set_all_state(state, &su0, &sv0, &su1, &sv1);
     if (first) {
         // Write all the settings now, then mark them changed so that the draw writes them a second time.
         C3Di_UpdateContext();
+        forget_gpu_state();
         set_all_state(state, &su0, &sv0, &su1, &sv1);
     }
 

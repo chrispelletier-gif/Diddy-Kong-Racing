@@ -127,6 +127,7 @@ controls) work there, as do these renderer switches:
 - `DKR_NO_FOG=1`
 - `DKR_VERTEX_FOG=1` (the old per vertex fog, for comparison)
 - `DKR_GFX_TEST=1` (draws a reference quad)
+- `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_SINGLE_CORE=1` (on a New 3DS, keeps the renderer on the main core as on an Old 3DS)
 
 ## Bug reports
