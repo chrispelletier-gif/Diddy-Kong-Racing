@@ -61,6 +61,7 @@ static struct {
     u32 omH, omL;
     u32 combineW0, combineW1;
     GfxCombiner combiner;
+    u8 combinerTextures[3]; // Indexed by the number of cycles: bit 0 if the combiner reads texel 0, bit 1 texel 1
     u8 prim[4], env[4], fogColor[4], blendColor[4];
     u8 primLodFrac;
     u32 fillColor;
@@ -271,6 +272,30 @@ static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
     return sBatchCount > 0 && (&e->tex == sBatchState.textures[0] || &e->tex == sBatchState.textures[1]);
 }
 
+/*
+ * sample_hash() for this frame. The same texture is often loaded many times in a frame, and RDRAM doesn't change
+ * while a display list runs, so its hash is only worked out the first time.
+ */
+typedef struct HashCacheEntry {
+    const u8 *data;
+    u32 size, frame, hash;
+} HashCacheEntry;
+
+#define HASH_CACHE_SIZE 256
+
+static HashCacheEntry sHashCache[HASH_CACHE_SIZE];
+
+static u32 frame_hash(const u8 *data, u32 size) {
+    HashCacheEntry *h = &sHashCache[(((uintptr_t) data >> 3) ^ size) % HASH_CACHE_SIZE];
+    if (h->frame != (u32) sFrameCount || h->data != data || h->size != size) {
+        h->data = data;
+        h->size = size;
+        h->frame = (u32) sFrameCount;
+        h->hash = sample_hash(data, size);
+    }
+    return h->hash;
+}
+
 /* Returns the texture for the given tile, decoding it if it isn't in the cache. */
 static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     Tile *tile = &g.tiles[tileIndex & 7];
@@ -319,9 +344,9 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
         }
     }
     size = load->rowStride ? load->rowStride * height : load->size;
-    hash = sample_hash(load->addr, size);
+    hash = frame_hash(load->addr, size);
     if (tlut != NULL) {
-        hash ^= sample_hash(tlut, (tile->siz == G_IM_SIZ_4b) ? 32 : 512) * 31;
+        hash ^= frame_hash(tlut, (tile->siz == G_IM_SIZ_4b) ? 32 : 512) * 31;
     }
     filter = ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT) ? GFX_FILTER_POINT : GFX_FILTER_BILINEAR;
     wrapS = wrap_mode(tile->cms, tile->masks);
@@ -446,6 +471,7 @@ static const u8 sCCAlphaC[8] = { GFX_CC_LOD_FRACTION, GFX_CC_TEXEL0, GFX_CC_TEXE
 static void decode_combiner(void) {
     u32 w0 = g.combineW0, w1 = g.combineW1;
     GfxCombiner *cc = &g.combiner;
+    s32 i;
 
     cc->rgb[0].a = sCCRgbA[(w0 >> 20) & 0xF];
     cc->rgb[0].b = sCCRgbB[(w1 >> 28) & 0xF];
@@ -463,6 +489,27 @@ static void decode_combiner(void) {
     cc->alpha[1].b = sCCAlphaABD[(w1 >> 3) & 0x7];
     cc->alpha[1].c = sCCAlphaC[(w1 >> 18) & 0x7];
     cc->alpha[1].d = sCCAlphaABD[(w1 >> 0) & 0x7];
+
+    // Which textures the combiner reads, so draws don't have to work it out each time.
+    g.combinerTextures[0] = 0;
+    for (i = 0; i < 2; i++) {
+        const GfxCCEquation *eqs[2] = { &cc->rgb[i], &cc->alpha[i] };
+        u8 uses = 0;
+        s32 j;
+        for (j = 0; j < 2; j++) {
+            u8 in[4] = { eqs[j]->a, eqs[j]->b, eqs[j]->c, eqs[j]->d };
+            s32 k;
+            for (k = 0; k < 4; k++) {
+                if (in[k] == GFX_CC_TEXEL0 || in[k] == GFX_CC_TEXEL0_ALPHA) {
+                    uses |= 1;
+                }
+                if (in[k] == GFX_CC_TEXEL1 || in[k] == GFX_CC_TEXEL1_ALPHA) {
+                    uses |= 2;
+                }
+            }
+        }
+        g.combinerTextures[i + 1] = g.combinerTextures[i] | uses;
+    }
 }
 
 static inline u32 cycle_type(void) {
@@ -498,22 +545,12 @@ static void build_draw_state(GfxDrawState *s, s32 isRect) {
     s->fogOffset = g.fogOffset;
     s->primLodFrac = g.primLodFrac;
 
-    // Which textures does the combiner read?
-    for (i = 0; i < s->combiner.numCycles; i++) {
-        const GfxCCEquation *eqs[2] = { &s->combiner.rgb[i], &s->combiner.alpha[i] };
-        s32 j;
-        for (j = 0; j < 2; j++) {
-            u8 in[4] = { eqs[j]->a, eqs[j]->b, eqs[j]->c, eqs[j]->d };
-            s32 k;
-            for (k = 0; k < 4; k++) {
-                if (in[k] == GFX_CC_TEXEL0 || in[k] == GFX_CC_TEXEL0_ALPHA) {
-                    usesTex0 = TRUE;
-                }
-                if (in[k] == GFX_CC_TEXEL1 || in[k] == GFX_CC_TEXEL1_ALPHA) {
-                    usesTex1 = TRUE;
-                }
-            }
-        }
+    // Which textures does the combiner read? Copy mode reads texel 0, as set up above.
+    if (cyc == G_CYC_COPY) {
+        usesTex0 = TRUE;
+    } else {
+        usesTex0 = (g.combinerTextures[s->combiner.numCycles] & 1) != 0;
+        usesTex1 = (g.combinerTextures[s->combiner.numCycles] & 2) != 0;
     }
     s->textures[0] = NULL;
     s->textures[1] = NULL;
