@@ -116,6 +116,16 @@ def main():
             lines.append(f"| {row['race']} | {row['track']} | {row['character']} | {row['vehicle']} | "
                          f"{num(row, 'fps'):.1f} | {num(row, 'worst_frame_ms'):.0f} ms | {row['limit']} |")
         lines.append("")
+    unstuck = [r for r in rows if int(r.get("unsticks") or 0) > 0]
+    if unstuck:
+        lines += ["## Kart put back on course", "",
+                  "The AI driving the player's kart made no progress for 10 s, so it was put at the next checkpoint "
+                  "(lap:checkpoint). Spots that repeat are worth a look.", "",
+                  "| race | track | character | vehicle | times | where | outcome |", "|---:|---|---|---|---:|---|---|"]
+        for row in unstuck:
+            lines.append(f"| {row['race']} | {row['track']} | {row['character']} | {row['vehicle']} | "
+                         f"{row['unsticks']} | {row.get('unstuck_at') or ''} | {row['outcome']} |")
+        lines.append("")
     lines += ["## Problems", ""]
     if problems:
         lines += ["| race | track | character | vehicle | outcome | after |", "|---:|---|---|---|---|---:|"]

@@ -39,6 +39,9 @@
 #include "menu.h"
 #include "objects.h"
 #include "thread3_main.h"
+#include "camera.h"
+#include "math_util.h"
+#include "tracks.h"
 #include "port.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
@@ -47,7 +50,8 @@
 #define MAX_RACES 1024
 #define MAX_TRACKS 64
 #define FINISH_LINGER_SECONDS 8 // After the finish line: the post-race camera and results, then on to the next.
-#define STUCK_SECONDS 60        // No checkpoint passed for this long counts as stuck.
+#define UNSTICK_SECONDS 10      // No checkpoint passed for this long: the kart is put at the next checkpoint.
+#define STUCK_SECONDS 60        // No checkpoint passed for this long (even so) counts as stuck.
 #define STATE_FILE "autorun_state.txt"
 #define RESULTS_FILE "autorun_results.csv"
 #define PROBLEMS_FILE "autorun_problems.txt"
@@ -103,6 +107,8 @@ static unsigned long long sLoadNs;
 static s32 sRaceRetraces;  // Game time while racing, in 60ths of a second.
 static s32 sStuckRetraces; // Game time since the kart last reached a new checkpoint.
 static s32 sLastProgress;
+static s32 sUnsticks;      // Times this race the kart was put at the next checkpoint.
+static char sUnstuckAt[64]; // Where, as "lap:checkpoint" pairs.
 static s32 sLingerRetraces;
 static const char *sOutcome;
 static s32 sFinished, sProblems;
@@ -342,11 +348,11 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                     sBench ? "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
                              "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
                              "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
-                             "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,aa\n"
+                             "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at,aa\n"
                            : "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
                              "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
                              "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
-                             "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit\n");
+                             "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at\n");
     }
     plat_free(existing);
     if (stats == NULL) {
@@ -359,7 +365,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     plat_snprintf(
         line, sizeof(line),
         "%d,%d,%d,%s,%s,%s,%s,%.1f,%d,%.1f,%u,%.2f,%d,%d,%d,%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,"
-        "%u,%u,%d,%s",
+        "%u,%u,%d,%s,%d,%s",
         (int) sRun, (int) sNext + 1, (int) race->track, track_name(race->track),
         sCharacterNames[(s32) race->character], sVehicleNames[(s32) race->vehicle], outcome, sRaceRetraces / 60.0,
         (int) position, sLoadNs / 1e9, stats->gameFrames,
@@ -374,7 +380,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         stats->renderedFrames ? stats->counters[PROF_TRIANGLES] / stats->renderedFrames : 0,
         stats->renderedFrames ? stats->counters[PROF_DRAWS] / stats->renderedFrames : 0,
         stats->counters[PROF_TEXTURE_UPLOADS], (int) pct((u32) (stats->idleNs / 1000), (u32) (stats->elapsedNs / 1000)),
-        stats->gameFrames ? prof_limit(stats) : "-");
+        stats->gameFrames ? prof_limit(stats) : "-", (int) sUnsticks, sUnstuckAt);
     if (sBench) {
         // What the race was drawn with (a race that never got going: what it was meant to be).
         length = strlen(line);
@@ -635,6 +641,8 @@ s32 port_autorun_title(void) {
     sRaceRetraces = 0;
     sStuckRetraces = 0;
     sLastProgress = -1;
+    sUnsticks = 0;
+    sUnstuckAt[0] = '\0';
     sLingerRetraces = 0;
     show_status();
     return port_autorun_setup_race(race->track, race->character, race->vehicle);
@@ -676,7 +684,7 @@ enum BenchColumn {
     COL_GPU_DRAW = 23,
     COL_WORST_GPU = 27,
     COL_LIMIT = 32,
-    COL_AA = 33,
+    COL_AA = 35, // After the test run's unsticks and unstuck_at
     COL_COUNT
 };
 
@@ -924,6 +932,65 @@ static void handle_request(void) {
     }
 }
 
+/*
+ * The AI that drives the player's kart sometimes wedges it somewhere a CPU racer never goes (CPU racers use simpler
+ * physics, and the AI's own reverse-out only works on the ground). After UNSTICK_SECONDS without a new checkpoint
+ * the kart is put just before the next checkpoint, facing along the course, the way the game resets a racer to the
+ * start line (func_800230D0). Each time is noted in the results and in autorun_problems.txt, so the spot is known.
+ */
+static void unstick(Object *obj, Object_Racer *racer) {
+    CheckpointNode *node = find_next_checkpoint_node(racer->nextCheckpoint, racer->isOnAlternateRoute);
+    Camera *camera;
+    char what[128];
+    s32 i, length;
+
+    if (node == NULL) {
+        return;
+    }
+    plat_snprintf(what, sizeof(what), "note: put at checkpoint %d of lap %d after %d s without progress, from %.0f,%.0f,%.0f",
+                  (int) racer->nextCheckpoint, (int) racer->lap + 1, UNSTICK_SECONDS, obj->trans.x_position,
+                  obj->trans.y_position, obj->trans.z_position);
+    record_problem(what);
+    length = strlen(sUnstuckAt);
+    plat_snprintf(sUnstuckAt + length, sizeof(sUnstuckAt) - length, "%s%d:%d", length ? " " : "", (int) racer->lap + 1,
+                  (int) racer->nextCheckpoint);
+    sUnsticks++;
+    obj->trans.x_position = node->x - node->rotationXFrac * 20.0f;
+    obj->trans.y_position = node->y;
+    obj->trans.z_position = node->z - node->rotationZFrac * 20.0f;
+    obj->segmentID = get_level_segment_index_from_position(obj->trans.x_position, obj->trans.y_position,
+                                                           obj->trans.z_position);
+    racer->prev_x_position = obj->trans.x_position;
+    racer->prev_y_position = obj->trans.y_position;
+    racer->prev_z_position = obj->trans.z_position;
+    racer->steerVisualRotation = arctan2_f(node->rotationXFrac, node->rotationZFrac);
+    obj->trans.rotation.y_rotation = racer->steerVisualRotation;
+    obj->trans.rotation.x_rotation = 0;
+    obj->trans.rotation.z_rotation = 0;
+    for (i = 0; i < 4; i++) {
+        racer->unkD8[i * 3 + 0] = obj->trans.x_position;
+        racer->unkD8[i * 3 + 1] = obj->trans.y_position;
+        racer->unkD8[i * 3 + 2] = obj->trans.z_position;
+    }
+    obj->interactObj->x_position = obj->trans.x_position;
+    obj->interactObj->y_position = obj->trans.y_position;
+    obj->interactObj->z_position = obj->trans.z_position;
+    racer->velocity = 0.0f;
+    racer->lateral_velocity = 0.0f;
+    racer->y_rotation_vel = 0;
+    racer->x_rotation_vel = 0;
+    racer->z_rotation_vel = 0;
+    obj->x_velocity = 0.0f;
+    obj->y_velocity = 0.0f;
+    obj->z_velocity = 0.0f;
+    racer->vehicleID = racer->vehicleIDPrev;
+    set_active_camera(racer->playerIndex);
+    camera = cam_get_active_camera_no_cutscenes();
+    camera->trans.x_position = obj->trans.x_position;
+    camera->trans.y_position = obj->trans.y_position;
+    camera->trans.z_position = obj->trans.z_position;
+}
+
 /* Called once per game frame, with the number of retraces it took. */
 void port_autorun_frame(s32 updateRate) {
     Object *obj;
@@ -971,6 +1038,9 @@ void port_autorun_frame(s32 updateRate) {
                 end_race("finished", racer->finishPosition);
             } else if (sStuckRetraces >= STUCK_SECONDS * 60) {
                 end_race("stuck", racer->racePosition);
+            } else if (sStuckRetraces >= UNSTICK_SECONDS * 60 &&
+                       (sStuckRetraces - updateRate) / (UNSTICK_SECONDS * 60) < sStuckRetraces / (UNSTICK_SECONDS * 60)) {
+                unstick(obj, racer);
             } else if (sRaceRetraces >= sTimeoutSeconds * 60) {
                 end_race("timeout", racer->racePosition);
             }
