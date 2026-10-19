@@ -2,7 +2,9 @@
  * Per-stage frame profiler (see plat/profile.h for the stages).
  *
  *   DKR_PROFILE=1   Shows the profiler on the bottom screen (updated every second) and logs a summary line every
- *                   few seconds. The unattended test run (DKR_AUTORUN) turns it on as well.
+ *                   few seconds. The unattended test run (DKR_AUTORUN) turns it on as well, and so does the
+ *                   bottom screen's "Profiler" button, which is remembered in profiler.txt in the data directory.
+ * While it is off, every hook returns after one check.
  *
  * Each stage has exactly one writer thread, which keeps a running total in microseconds; readers take the difference
  * between two snapshots, so nothing is ever reset under a writer's feet. 32-bit totals are read and written in one
@@ -14,7 +16,11 @@
 #include "plat/plat.h"
 #include "plat/profile.h"
 
-static s32 sEnabled = -1;
+#define USER_FILE "profiler.txt"
+
+static s32 sEnabled = -1;      // DKR_PROFILE.
+static volatile s32 sUserOn;   // The bottom screen button.
+static s32 sGameThreadOn;      // Whether the game thread is profiling (it starts and stops at the top of a frame).
 
 /* Running totals (only ever increased, by the stage's own thread). */
 static volatile u32 sTotalUs[PROF_STAGE_COUNT];
@@ -56,12 +62,36 @@ static Window sWindows[PROF_WINDOW_COUNT];
 static char sStatus[96];
 static s32 sLogCounter;
 
-/* On with DKR_PROFILE, and during the unattended test run (which can start and stop at any time). */
+static void user_file_path(char *path, s32 size) {
+    plat_snprintf(path, size, "%s/" USER_FILE, plat_data_dir());
+}
+
+/* On with DKR_PROFILE, the Profiler button, and during the unattended test run (which can start and stop at any time). */
 int prof_enabled(void) {
     if (sEnabled < 0) {
+        char path[256];
+        char text[16];
+        int length;
+        user_file_path(path, sizeof(path));
+        length = plat_load_file_start(path, text, sizeof(text) - 1);
+        text[length > 0 ? length : 0] = '\0';
+        sUserOn = text[0] == '1';
         sEnabled = plat_getenv("DKR_PROFILE") != NULL;
     }
-    return sEnabled || port_autorun_enabled();
+    return sEnabled || sUserOn || port_autorun_enabled();
+}
+
+int prof_user_enabled(void) {
+    prof_enabled();
+    return sUserOn;
+}
+
+void prof_set_user_enabled(int on) {
+    char path[256];
+    prof_enabled();
+    sUserOn = on != 0;
+    user_file_path(path, sizeof(path));
+    plat_save_file(path, on ? "1\n" : "0\n", 2);
 }
 
 void prof_add(int stage, unsigned long long ns) {
@@ -255,7 +285,21 @@ void prof_game_mark(int mark, int updateRate) {
     s32 w;
 
     if (!prof_enabled()) {
+        if (sGameThreadOn) {
+            // Turned off: clear the readout, and start afresh if it is turned on again.
+            sGameThreadOn = FALSE;
+            sWindows[PROF_WINDOW_OVERLAY].startNs = 0;
+            sLastFrameEndNs = 0;
+            plat_overlay_show("");
+        }
         return;
+    }
+    if (!sGameThreadOn) {
+        // Turned on part way through a frame: wait for the next one, so no stage is timed from a stale mark.
+        if (mark != PROF_MARK_LOOP_START) {
+            return;
+        }
+        sGameThreadOn = TRUE;
     }
     now = plat_time_ns();
     sMarkNs[mark] = now;
