@@ -385,16 +385,34 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     return &e->tex;
 }
 
-/* Converts a texture coordinate in 10.5 texels to the normalised coordinate of the tile's texture. */
-static inline float tex_coord(s32 coord, u8 shift, u16 tileStart, u32 size) {
-    float c = coord * (1.0f / 32.0f);
+/*
+ * Converts texture coordinates in 10.5 texels to normalised coordinates of the tile's texture. The per-draw part is
+ * worked out once, so there are no divisions per vertex (slow on the 3DS's VFP), and the results are the same as
+ * dividing each time: the shift and the 1/32 are powers of two, so one combined factor is exact, and so is the
+ * reciprocal of a power of two texture size (other sizes still divide).
+ */
+typedef struct TexAxis {
+    float scale, offset, size, invSize;
+    s32 divide;
+} TexAxis;
+
+static void tex_axis_init(TexAxis *a, u8 shift, u16 tileStart, u32 size) {
+    float scale = 1.0f / 32.0f;
     if (shift > 10) {
-        c *= (float) (1 << (16 - shift));
+        scale *= (float) (1 << (16 - shift));
     } else if (shift > 0) {
-        c /= (float) (1 << shift);
+        scale /= (float) (1 << shift);
     }
-    c -= tileStart * 0.25f;
-    return c / (float) size;
+    a->scale = scale;
+    a->offset = tileStart * 0.25f;
+    a->size = (float) size;
+    a->divide = (size & (size - 1)) != 0;
+    a->invSize = 1.0f / (float) size;
+}
+
+static inline float tex_axis_coord(const TexAxis *a, s32 coord) {
+    float c = coord * a->scale - a->offset;
+    return a->divide ? c / a->size : c * a->invSize;
 }
 
 /******************************** Combiner and blender ********************************/
@@ -633,13 +651,6 @@ static void load_matrix(const Mtx *mtx, s32 index) {
     }
 }
 
-/* Folds the N64 viewport into clip space coordinates (see gfx_backend.h). */
-static inline void apply_viewport(float *x, float *y, float w) {
-    const float halfW = GFX_SCREEN_WIDTH / 2.0f, halfH = GFX_SCREEN_HEIGHT / 2.0f;
-    *x = *x * (g.vpScale[0] / halfW) + w * (g.vpTrans[0] / halfW - 1.0f);
-    *y = *y * (g.vpScale[1] / halfH) + w * (1.0f - g.vpTrans[1] / halfH);
-}
-
 static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float(*m)[4] = g.matrices[g.curMatrix];
     s32 i;
@@ -672,24 +683,39 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     }
 }
 
+/* Folds the N64 viewport into clip space coordinates (see gfx_backend.h), with the factors worked out once per draw. */
+typedef struct Viewport {
+    float scaleX, transX, scaleY, transY;
+} Viewport;
+
+static void viewport_init(Viewport *vp) {
+    const float halfW = GFX_SCREEN_WIDTH / 2.0f, halfH = GFX_SCREEN_HEIGHT / 2.0f;
+    vp->scaleX = g.vpScale[0] / halfW;
+    vp->transX = g.vpTrans[0] / halfW - 1.0f;
+    vp->scaleY = g.vpScale[1] / halfH;
+    vp->transY = 1.0f - g.vpTrans[1] / halfH;
+}
+
 /* With G_FOG set the RSP replaces the shade alpha with the fog factor. */
-static void finish_vertex(GfxVertex *out, const RspVertex *in) {
-    out->x = in->x;
-    out->y = in->y;
+static void finish_vertex(GfxVertex *out, const RspVertex *in, const Viewport *vp, s32 fog) {
+    out->x = in->x * vp->scaleX + in->w * vp->transX;
+    out->y = in->y * vp->scaleY + in->w * vp->transY;
     out->z = in->z;
     out->w = in->w;
-    apply_viewport(&out->x, &out->y, in->w);
     out->r = in->r;
     out->g = in->g;
     out->b = in->b;
-    out->a = (g.geometryMode & G_FOG) ? in->fog : in->a;
+    out->a = fog ? in->fog : in->a;
 }
 
 static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
-    s32 i, k;
+    s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
     Tile *tile0 = &g.tiles[0], *tile1 = &g.tiles[1];
     float w0 = 1.0f, h0 = 1.0f, w1 = 1.0f, h1 = 1.0f;
+    TexAxis u0, v0, u1, v1;
+    Viewport vp;
+    u8 batchedCull = 0xFF;
 
     build_draw_state(&state, FALSE);
     if (!textured) {
@@ -704,6 +730,13 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         w1 = state.textures[1]->width;
         h1 = state.textures[1]->height;
     }
+    viewport_init(&vp);
+    if (textured) {
+        tex_axis_init(&u0, tile0->shifts, tile0->uls, (u32) w0);
+        tex_axis_init(&v0, tile0->shiftt, tile0->ult, (u32) h0);
+        tex_axis_init(&u1, tile1->shifts, tile1->uls, (u32) w1);
+        tex_axis_init(&v1, tile1->shiftt, tile1->ult, (u32) h1);
+    }
     for (i = 0; i < count; i++) {
         const Triangle *t = &tris[i];
         const TexCoords *uv[3] = { &t->uv0, &t->uv1, &t->uv2 };
@@ -715,14 +748,20 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         }
         // Backface culling: flag 0x40 means double sided. The game mirrors the viewport for mirror mode.
         state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : (g.vpScale[0] < 0.0f ? 2 : 1);
-        out = batch_triangle(&state);
+        if (state.cullMode == batchedCull && sBatchCount > 0 && sBatchCount < MAX_BATCH_TRIANGLES) {
+            // Only the culling changes from one triangle to the next, so the batch's state is still this one.
+            out = &sBatchVerts[sBatchCount++ * 3];
+        } else {
+            out = batch_triangle(&state);
+            batchedCull = state.cullMode;
+        }
         for (k = 0; k < 3; k++) {
-            finish_vertex(&out[k], &g.verts[idx[k]]);
+            finish_vertex(&out[k], &g.verts[idx[k]], &vp, fog);
             if (textured) {
-                out[k].u0 = tex_coord(uv[k]->u, tile0->shifts, tile0->uls, (u32) w0);
-                out[k].v0 = tex_coord(uv[k]->v, tile0->shiftt, tile0->ult, (u32) h0);
-                out[k].u1 = tex_coord(uv[k]->u, tile1->shifts, tile1->uls, (u32) w1);
-                out[k].v1 = tex_coord(uv[k]->v, tile1->shiftt, tile1->ult, (u32) h1);
+                out[k].u0 = tex_axis_coord(&u0, uv[k]->u);
+                out[k].v0 = tex_axis_coord(&v0, uv[k]->v);
+                out[k].u1 = tex_axis_coord(&u1, uv[k]->u);
+                out[k].v1 = tex_axis_coord(&v1, uv[k]->v);
             } else {
                 out[k].u0 = out[k].v0 = out[k].u1 = out[k].v1 = 0.0f;
             }
