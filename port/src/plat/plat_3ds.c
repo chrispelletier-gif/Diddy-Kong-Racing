@@ -397,6 +397,13 @@ static FILE *log_file(void) {
         sFile = fopen("sdmc:/3ds/dkr/log.txt", "w");
     }
     if (!sLogDebug && sLogLines >= LOG_BOOT_LINES) {
+        if (sFile != NULL && sLogLines == LOG_BOOT_LINES) {
+            // Said in the file, so that its end is not taken for the moment the game stopped.
+            fprintf(sFile, "(log.txt ends here; bug reports carry the latest lines, and a hang saves them to "
+                           "hang_log.txt)\n");
+            fflush(sFile);
+            sLogLines++;
+        }
         return NULL;
     }
     return sFile;
@@ -566,17 +573,21 @@ void plat_status(const char *fmt, ...) {
 long port_autorun_enabled(void);
 
 /*
- * During the unattended test run, a renderer that has drawn nothing for 20 seconds (outside the HOME menu) is taken
- * as a hang, and written down for the next launch to record (port_autorun.c); the file goes again if drawing resumes.
+ * A renderer that has drawn nothing for 20 seconds (outside the HOME menu) is taken as a hang: the recent log is saved
+ * to hang_log.txt, which the bug report on the next launch sends, and during the unattended test run the hang is
+ * written down for the next launch to record (port_autorun.c). Both files go again if drawing resumes.
  */
 static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written) {
-    char path[256], text[160];
+    static char sRecent[40 * 1024];
+    char path[256], logPath[256], text[160];
     snprintf(path, sizeof(path), "%s/autorun_hang.txt", plat_data_dir());
-    if (framesDrawn || sPauseRequested || !port_autorun_enabled()) {
+    snprintf(logPath, sizeof(logPath), "%s/hang_log.txt", plat_data_dir());
+    if (framesDrawn || sPauseRequested) {
         *stalledSeconds = 0;
         if (*written) {
             *written = 0;
             remove(path);
+            remove(logPath);
         }
         return;
     }
@@ -584,8 +595,12 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written) {
         snprintf(text, sizeof(text), "renderer stuck while %s (gfx %u/%u, vi %u)\n",
                  gPlatGfxStage != NULL ? gPlatGfxStage : "-", gPlatCounters[PLAT_COUNTER_GFX_QUEUED],
                  gPlatCounters[PLAT_COUNTER_GFX_DONE], gPlatCounters[PLAT_COUNTER_VI]);
-        *written = plat_save_file(path, text, strlen(text));
         log_line("watchdog: ", text);
+        *written = 1;
+        if (port_autorun_enabled()) {
+            plat_save_file(path, text, strlen(text));
+        }
+        plat_save_file(logPath, sRecent, plat_log_recent(sRecent, sizeof(sRecent)));
     }
 }
 

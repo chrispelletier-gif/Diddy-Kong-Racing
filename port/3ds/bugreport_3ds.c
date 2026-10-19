@@ -413,12 +413,22 @@ int bugreport_boot(void) {
     FILE *marker;
 
     // Nothing has been logged yet, so log.txt is still the last run's.
+    // So are the files a hang leaves (gfx_c3d.c and the watchdog in plat_3ds.c).
     if (lastUnended) {
         move_file(DATA_DIR "/log.txt", DATA_DIR "/last_log.txt");
         move_file(DATA_DIR "/crash.txt", DATA_DIR "/last_crash.txt");
+        move_file(DATA_DIR "/hang_log.txt", DATA_DIR "/last_hang_log.txt");
+        move_file(DATA_DIR "/gpu_hang.txt", DATA_DIR "/last_gpu_hang.txt");
+        move_file(DATA_DIR "/gpu_hang_cmd.bin", DATA_DIR "/last_gpu_hang_cmd.bin");
     } else {
         remove(DATA_DIR "/crash.txt");
+        remove(DATA_DIR "/last_hang_log.txt");
+        remove(DATA_DIR "/last_gpu_hang.txt");
+        remove(DATA_DIR "/last_gpu_hang_cmd.bin");
     }
+    remove(DATA_DIR "/hang_log.txt");
+    remove(DATA_DIR "/gpu_hang.txt");
+    remove(DATA_DIR "/gpu_hang_cmd.bin");
     marker = fopen(RUNNING_PATH, "w");
     if (marker != NULL) {
         fclose(marker);
@@ -469,7 +479,10 @@ int bugreport_boot(void) {
             }
         }
         snprintf(report.title, sizeof(report.title), "[3DS bug report] %s",
-                 crashed ? "crash" : "the game did not exit normally");
+                 crashed                                         ? "crash"
+                 : file_exists(DATA_DIR "/last_gpu_hang.txt")    ? "GPU hang"
+                 : file_exists(DATA_DIR "/last_hang_log.txt")    ? "the game hung"
+                                                                 : "the game did not exit normally");
         if (crashText != NULL) {
             // The first line says what crashed.
             char first[100];
@@ -480,10 +493,17 @@ int bugreport_boot(void) {
         add_file(&report, "last_log.txt");
         add_file(&report, "last_crash.txt");
         add_file(&report, "env.txt");
+        add_file(&report, "last_hang_log.txt");
+        add_file(&report, "last_gpu_hang.txt");
+        add_file(&report, "last_gpu_hang_cmd.bin");
         {
-            // The log file stops after the start-up lines, so its end is in the body too.
+            // The log file stops after the start-up lines, so its end is in the body too. After a hang, the
+            // watchdog saved the latest lines, which are the ones that matter.
             unsigned int logSize;
-            char *log = plat_load_file(DATA_DIR "/last_log.txt", &logSize);
+            char *log = plat_load_file(DATA_DIR "/last_hang_log.txt", &logSize);
+            if (log == NULL) {
+                log = plat_load_file(DATA_DIR "/last_log.txt", &logSize);
+            }
             if (log != NULL) {
                 log = realloc(log, logSize + 1);
                 log[logSize] = '\0';
@@ -602,6 +622,8 @@ static void report_now(void) {
     }
     add_file(&report, "log.txt");
     add_file(&report, "env.txt");
+    add_file(&report, "gpu_hang.txt");
+    add_file(&report, "gpu_hang_cmd.bin");
     build_body(&report, NULL, recent);
     sShow = show_status;
     send_and_show(&config, &report);

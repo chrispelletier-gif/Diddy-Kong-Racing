@@ -155,7 +155,11 @@ is kept as `sdmc:/3ds/dkr/bugreport_unsent.txt`.
 
 The issue body has the build, the console, the counters and the end of the log. The files (the snapshot's
 `diff_N_ref.png`, `diff_N_gpu.bin` and `diff_N_log.txt`, `log.txt`, `env.txt`, or `last_log.txt` and
-`last_crash.txt` after a crash) are posted as compressed comments on the issue. To get them back:
+`last_crash.txt` after a crash) are posted as compressed comments on the issue. `log.txt` stops after the start-up
+lines; the body has the latest ones. When the GPU stops responding, the game saves `gpu_hang.txt` (the GPU's command
+queue, marking the command list it stopped in, and every draw of the stuck frame, those in that list starred) and
+`gpu_hang_cmd.bin` (the frame's command list), and 20 seconds into any hang `hang_log.txt` (the latest log lines).
+They go with a report sent right away, or as `last_*` files with the report on the next launch. To get them back:
 
 ```sh
 python3 port/tools/bugreport_fetch.py --list        # open reports

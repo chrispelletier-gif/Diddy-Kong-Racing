@@ -520,6 +520,165 @@ static void save_command_list(void) {
              f != NULL ? path : "nowhere (could not open the file)");
 }
 
+/*
+ * For a GPU hang. Each draw of a frame is noted in a few words, always: if the GPU then stops responding, the frame it
+ * is stuck on is still the last one drawn, and gpu_hang.txt lists its draws next to the GPU's command queue, which
+ * shows the command list the GPU was working on. gpu_hang_cmd.bin holds the frame's whole command list.
+ */
+typedef struct HangDraw {
+    u32 cmdStart, cmdEnd; // Word offsets of the draw's commands in the frame's command list
+    u16 triangles;
+    u8 blend, alphaTest, alphaRef, depthTest, depthWrite, decal, fog, cull, cycles;
+    u8 cc[2][8]; // Per cycle: rgb a, b, c, d, then alpha a, b, c, d
+    const C3D_Tex *tex[2];
+} HangDraw;
+#define HANG_DRAWS 1024
+static HangDraw sHangDraws[HANG_DRAWS];
+static int sHangDrawCount; // Draws in the frame, which can be more than HANG_DRAWS
+static u32 *sFrameCmdBase; // The frame's command list
+static int sHangSaved;
+
+/* The start of citro3d's context, which is not in its public header: the GPU command queue comes first. */
+typedef struct C3DContextStart {
+    gxCmdQueue_s gxQueue;
+    u32 *cmdBuf;
+    size_t cmdBufSize;
+} C3DContextStart;
+extern C3DContextStart __C3D_Context;
+
+static u32 cmd_position(void) {
+    return (u32) (gpuCmdBuf + gpuCmdBufOffset - sFrameCmdBase);
+}
+
+static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
+    HangDraw *d;
+    int i;
+    if (sHangDrawCount >= HANG_DRAWS) {
+        sHangDrawCount++;
+        return NULL;
+    }
+    d = &sHangDraws[sHangDrawCount++];
+    d->cmdStart = cmd_position();
+    d->cmdEnd = d->cmdStart;
+    d->triangles = numTriangles;
+    d->blend = state->blend;
+    d->alphaTest = state->alphaTest;
+    d->alphaRef = state->alphaRef;
+    d->depthTest = state->depthTest;
+    d->depthWrite = state->depthWrite;
+    d->decal = state->decal;
+    d->fog = state->fogEnabled;
+    d->cull = state->cullMode;
+    d->cycles = state->combiner.numCycles;
+    for (i = 0; i < 2; i++) {
+        const GfxCCEquation *rgb = &state->combiner.rgb[i], *alpha = &state->combiner.alpha[i];
+        const u8 cc[8] = { rgb->a, rgb->b, rgb->c, rgb->d, alpha->a, alpha->b, alpha->c, alpha->d };
+        memcpy(d->cc[i], cc, sizeof(cc));
+        d->tex[i] = (state->textures[i] != NULL && state->textures[i]->backendData != NULL)
+                        ? &((const C3DTexture *) state->textures[i]->backendData)->tex
+                        : NULL;
+    }
+    return d;
+}
+
+/* Writes gpu_hang.txt and gpu_hang_cmd.bin, once, when the GPU stops responding during the frame after `frame`. */
+static void save_gpu_hang(int frame) {
+    const gxCmdQueue_s *queue = &__C3D_Context.gxQueue;
+    char path[256];
+    char *text;
+    int size = 64 * 1024 + 48 * 1024, length = 0, i, stuckEntry = -1;
+    u32 listStart = 0, listEnd = 0, words = 0;
+    FILE *f;
+
+    if (sHangSaved || sFrameCmdBase == NULL || __C3D_Context.cmdBuf != sFrameCmdBase) {
+        return;
+    }
+    sHangSaved = 1;
+    text = malloc(size);
+    if (text == NULL) {
+        return;
+    }
+#define ADD(...)                                                                                                       \
+    do {                                                                                                               \
+        if (length < size) {                                                                                           \
+            length += snprintf(text + length, size - length, __VA_ARGS__);                                            \
+        }                                                                                                              \
+    } while (0)
+    ADD("GPU not responding after frame %d (%d draws, %d triangles, AA %s)\n\n", frame, sHangDrawCount,
+        sLastFrameTriangles, sRenderScale == 2 ? "on" : "off");
+    // The queue's entries before lastEntry are done; GX runs them in order, so the first one after is where it stopped.
+    ADD("GPU command queue: %u entries, %u sent, %u done (the first not done is marked)\n", queue->numEntries,
+        queue->curEntry, queue->lastEntry);
+    for (i = 0; i < queue->numEntries && queue->entries != NULL; i++) {
+        const u32 *data = queue->entries[i].data;
+        const char *mark = (i == queue->lastEntry) ? " <-" : "";
+        if ((data[0] & 0xFF) == 0x01) {
+            u32 start = (u32) ((const u32 *) data[1] - sFrameCmdBase), end = start + data[2] / 4;
+            ADD("  %2d: command list, words %lu to %lu%s\n", i, (unsigned long) start, (unsigned long) end, mark);
+            if (end > words && end <= __C3D_Context.cmdBufSize) {
+                words = end;
+            }
+            if (i == queue->lastEntry) {
+                stuckEntry = i;
+                listStart = start;
+                listEnd = end;
+            }
+        } else {
+            ADD("  %2d: GX command %lu (%08lX %08lX %08lX)%s\n", i, (unsigned long) (data[0] & 0xFF),
+                (unsigned long) data[1], (unsigned long) data[2], (unsigned long) data[3], mark);
+        }
+    }
+    ADD("\nDraws (cmd = word offsets in gpu_hang_cmd.bin; cc = combiner rgb/alpha per cycle; tex = GPU size, format, "
+        "address; '*' = in the command list the GPU stopped in)\n");
+    for (i = 0; i < sHangDrawCount && i < HANG_DRAWS; i++) {
+        const HangDraw *d = &sHangDraws[i];
+        int inStuck = stuckEntry >= 0 && d->cmdEnd > listStart && d->cmdStart < listEnd;
+        int t;
+        ADD("%c%4d cmd %5lu-%5lu tris %3u blend %u at %u/%u z %u/%u dec %u fog %u cull %u cyc %u", inStuck ? '*' : ' ',
+            i, (unsigned long) d->cmdStart, (unsigned long) d->cmdEnd, d->triangles, d->blend, d->alphaTest,
+            d->alphaRef, d->depthTest, d->depthWrite, d->decal, d->fog, d->cull, d->cycles);
+        for (t = 0; t < d->cycles && t < 2; t++) {
+            const u8 *c = d->cc[t];
+            ADD(" cc %u,%u,%u,%u/%u,%u,%u,%u", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+        }
+        for (t = 0; t < 2; t++) {
+            if (d->tex[t] != NULL) {
+                ADD(" tex%d %ux%u f%u %p", t, d->tex[t]->width, d->tex[t]->height, (unsigned) d->tex[t]->fmt,
+                    d->tex[t]->data);
+            }
+        }
+        ADD("\n");
+    }
+    if (sHangDrawCount > HANG_DRAWS) {
+        ADD("(%d more draws not noted)\n", sHangDrawCount - HANG_DRAWS);
+    }
+    ADD("\nRecent log:\n");
+    if (length < size) {
+        length += plat_log_recent(text + length, size - length);
+    }
+#undef ADD
+    if (length > size - 1) {
+        length = size - 1;
+    }
+    plat_snprintf(path, sizeof(path), "%s/gpu_hang.txt", plat_data_dir());
+    plat_save_file(path, text, length);
+    free(text);
+
+    plat_snprintf(path, sizeof(path), "%s/gpu_hang_cmd.bin", plat_data_dir());
+    f = fopen(path, "wb");
+    if (f != NULL) {
+        fwrite(sFrameCmdBase, 4, words, f);
+        fclose(f);
+    }
+    if (stuckEntry >= 0) {
+        plat_log("GPU hang saved to gpu_hang.txt: stopped in queue entry %d, command list words %lu to %lu",
+                 stuckEntry, (unsigned long) listStart, (unsigned long) listEnd);
+    } else {
+        plat_log("GPU hang saved to gpu_hang.txt: stopped at queue entry %u of %u", queue->lastEntry,
+                 queue->numEntries);
+    }
+}
+
 /* Logs every draw of the current frame. */
 void gfxb_log_draws(int snapshotFrame) {
     sLogFrame = sFrameCount;
@@ -565,6 +724,7 @@ void gfxb_start_frame(void) {
                 gPlatGfxStage = "GPU not responding";
                 plat_status("GPU stuck after frame %d (%d triangles, cmd buffer %.0f%%)", sFrameCount - 1,
                             sLastFrameTriangles, sLastFrameUsage * 100.0f);
+                save_gpu_hang(sFrameCount - 1);
             }
             plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_BUSY);
             plat_sleep_ns(250000);
@@ -579,6 +739,8 @@ void gfxb_start_frame(void) {
     }
     // The application is closing: stop here, with the GPU idle and no frame being built, so it can be shut down.
     plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
+    sFrameCmdBase = gpuCmdBuf;
+    sHangDrawCount = 0;
     gPlatGfxStage = "drawing";
     if (sSnapshotPending) {
         // The snapshot's log file is closed here, once the GPU has drawn the frame and its textures are checked.
@@ -1355,6 +1517,7 @@ void C3Di_UpdateContext(void);
 
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
     C3DVertex *out;
+    HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
     int i, first, count = numTriangles * 3;
 
@@ -1395,6 +1558,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
                  (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
                  verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
     }
+    hangDraw = hang_draw_start(state, numTriangles);
     first = drain_before_draw(state, numTriangles);
     set_all_state(state, &su0, &sv0, &su1, &sv1);
     if (first) {
@@ -1418,6 +1582,9 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         out[i].color[3] = v->a * (1.0f / 255.0f);
     }
     C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, count);
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
     sVboUsed += count;
     sFrameTriangles += numTriangles;
 }
