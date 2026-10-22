@@ -1185,15 +1185,18 @@ static void apply_combiner(const GfxDrawState *state) {
 
 /******************************** Drawing ********************************/
 
-static void bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV) {
+/* Returns whether the texture changed. */
+static int bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV) {
     C3DTexture *t = (tex != NULL) ? (C3DTexture *) tex->backendData : NULL;
     C3D_Tex *bind = (t != NULL) ? &t->tex : &sWhiteTex;
-    if (!sGpu.known || bind != sGpu.tex[unit]) {
+    int changed = !sGpu.known || bind != sGpu.tex[unit];
+    if (changed) {
         C3D_TexBind(unit, bind);
         sGpu.tex[unit] = bind;
     }
     *scaleU = (t != NULL) ? t->scaleU : 1.0f;
     *scaleV = (t != NULL) ? t->scaleV : 1.0f;
+    return changed;
 }
 
 /* Converts a scissor rectangle on the N64 screen to the rotated framebuffer. */
@@ -1379,21 +1382,36 @@ static void set_draw_state(const GfxDrawState *state) {
     }
 }
 
+/*
+ * With only changed settings sent, a batch that only changes its texture put the texture unit settings and the
+ * texture cache clear straight after the previous draw in the command list. Twice on a real New 3DS the GPU hung in
+ * a stretch of Crescent Island made of such batches (small cutout trees, 2 to 4 triangles each), which had never
+ * happened in 200 races while every setting was sent for every batch. So a texture change also sends the blending,
+ * depth and culling settings again, which citro3d writes before the texture ones, as it always did before.
+ * DKR_STATE_CACHE=2 leaves that out, for testing.
+ */
+
 /* Sets every GPU setting a draw uses. */
 static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
     static int sCache = -1;
+    int newTexture;
 
     if (sCache < 0) {
         const char *env = plat_getenv("DKR_STATE_CACHE");
-        sCache = env == NULL || atoi(env) != 0;
-        plat_log("GPU settings: %s", sCache ? "only changes are set" : "all set for every draw");
+        sCache = env != NULL ? atoi(env) : 1;
+        plat_log("GPU settings: %s", sCache == 0   ? "all set for every draw"
+                                     : sCache == 2 ? "only changes are set"
+                                                   : "only changes are set, all draw settings with a new texture");
     }
-    bind_texture(0, state->textures[0], su0, sv0);
-    bind_texture(1, state->textures[1], su1, sv1);
+    newTexture = bind_texture(0, state->textures[0], su0, sv0);
+    newTexture |= bind_texture(1, state->textures[1], su1, sv1);
     apply_combiner(state);
     apply_fog(state);
     set_draw_state(state);
-    sGpu.known = sCache;
+    if (newTexture && sGpu.known && sCache == 1) {
+        C3D_CullFace((GPU_CULLMODE) sGpu.cull); // Same value: only marks the group for writing.
+    }
+    sGpu.known = sCache != 0;
     if (apply_alpha_diagnostic(state)) {
         // It wrote the combiner stages itself.
         forget_gpu_state();
