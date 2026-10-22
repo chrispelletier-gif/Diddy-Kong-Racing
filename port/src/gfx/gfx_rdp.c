@@ -23,6 +23,7 @@ typedef struct RspVertex {
     float x, y, z, w; // Clip space, already including the viewport transform (see gfx_backend.h)
     u8 r, g, b, a;
     u8 fog;
+    u8 fogValid; // The fog factor is only worked out while G_FOG is set (see load_vertices)
 } RspVertex;
 
 typedef struct Tile {
@@ -52,6 +53,7 @@ static struct {
     s32 billboard;
     RspVertex verts[MAX_VERTICES];
     s32 vertexIndex;
+    s32 vertsWithoutFog; // Some vertices were loaded with G_FOG off, so they have no fog factor yet
     u32 geometryMode;
     float vpScale[3], vpTrans[3];
     s16 fogMul, fogOffset;
@@ -116,6 +118,14 @@ static s32 sRefInitialised;
 static GfxVertex sBatchVerts[MAX_BATCH_TRIANGLES * 3];
 static s32 sBatchCount;
 static GfxDrawState sBatchState;
+
+/*
+ * The draw state of the last triangle command. Between two triangle commands DKR usually only loads vertices or
+ * matrices, so the next one can reuse it instead of building it (and looking up its textures) again. Any command that
+ * can change the draw state clears sTriStateValid (see state_command).
+ */
+static GfxDrawState sTriState;
+static s32 sTriStateValid;
 static s32 sFrameCount;
 
 /******************************** Helpers ********************************/
@@ -688,9 +698,17 @@ static void load_matrix(const Mtx *mtx, s32 index) {
     }
 }
 
+/* Fog, as the RSP computes it from the normalised depth. */
+static void vertex_fog(RspVertex *v) {
+    float w = (v->w != 0.0f) ? v->w : 0.0001f;
+    // Clamp before converting: out of range float to int conversions differ between CPUs.
+    float fog = (v->z / w) * g.fogMul + g.fogOffset;
+    v->fog = (fog < 0.0f) ? 0 : (fog > 255.0f) ? 255 : (u8) fog;
+}
+
 static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float(*m)[4] = g.matrices[g.curMatrix];
-    s32 i;
+    s32 i, fog = (g.geometryMode & G_FOG) != 0;
 
     for (i = 0; i < count && dest + i < MAX_VERTICES; i++) {
         RspVertex *v = &g.verts[dest + i];
@@ -710,12 +728,13 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
         v->g = src[i].g;
         v->b = src[i].b;
         v->a = src[i].a;
-        // Fog, as the RSP computes it from the normalised depth.
-        {
-            float w = (v->w != 0.0f) ? v->w : 0.0001f;
-            // Clamp before converting: out of range float to int conversions differ between CPUs.
-            float fog = (v->z / w) * g.fogMul + g.fogOffset;
-            v->fog = (fog < 0.0f) ? 0 : (fog > 255.0f) ? 255 : (u8) fog;
+        // The fog factor costs a divide, so it is only worked out for vertices loaded with fog on (all fogged
+        // geometry, in practice); draw_dkr_triangles catches any others if fog is turned on before they are drawn.
+        v->fogValid = fog;
+        if (fog) {
+            vertex_fog(v);
+        } else {
+            g.vertsWithoutFog = TRUE;
         }
     }
 }
@@ -753,8 +772,23 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     TexAxis u0, v0, u1, v1;
     Viewport vp;
     u8 batchedCull = 0xFF;
+    u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
+    s32 tex0, tex1;
 
-    build_draw_state(&state, FALSE);
+    if (!sTriStateValid) {
+        build_draw_state(&sTriState, FALSE);
+        sTriStateValid = TRUE;
+    }
+    state = sTriState;
+    if (fog && g.vertsWithoutFog) {
+        for (i = 0; i < MAX_VERTICES; i++) {
+            if (!g.verts[i].fogValid) {
+                vertex_fog(&g.verts[i]);
+                g.verts[i].fogValid = TRUE;
+            }
+        }
+        g.vertsWithoutFog = FALSE;
+    }
     if (!textured) {
         state.textures[0] = NULL;
         state.textures[1] = NULL;
@@ -768,9 +802,14 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         h1 = state.textures[1]->height;
     }
     viewport_init(&vp);
-    if (textured) {
+    // Texture coordinates are only worked out for the textures the draw uses; the others are left at zero.
+    tex0 = state.textures[0] != NULL;
+    tex1 = state.textures[1] != NULL;
+    if (tex0) {
         tex_axis_init(&u0, tile0->shifts, tile0->uls, (u32) w0);
         tex_axis_init(&v0, tile0->shiftt, tile0->ult, (u32) h0);
+    }
+    if (tex1) {
         tex_axis_init(&u1, tile1->shifts, tile1->uls, (u32) w1);
         tex_axis_init(&v1, tile1->shiftt, tile1->ult, (u32) h1);
     }
@@ -784,7 +823,7 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
             continue;
         }
         // Backface culling: flag 0x40 means double sided. The game mirrors the viewport for mirror mode.
-        state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : (g.vpScale[0] < 0.0f ? 2 : 1);
+        state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : frontCull;
         if (state.cullMode == batchedCull && sBatchCount > 0 && sBatchCount < MAX_BATCH_TRIANGLES) {
             // Only the culling changes from one triangle to the next, so the batch's state is still this one.
             out = &sBatchVerts[sBatchCount++ * 3];
@@ -794,13 +833,17 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         }
         for (k = 0; k < 3; k++) {
             finish_vertex(&out[k], &g.verts[idx[k]], &vp, fog);
-            if (textured) {
+            if (tex0) {
                 out[k].u0 = tex_axis_coord(&u0, uv[k]->u);
                 out[k].v0 = tex_axis_coord(&v0, uv[k]->v);
+            } else {
+                out[k].u0 = out[k].v0 = 0.0f;
+            }
+            if (tex1) {
                 out[k].u1 = tex_axis_coord(&u1, uv[k]->u);
                 out[k].v1 = tex_axis_coord(&v1, uv[k]->v);
             } else {
-                out[k].u0 = out[k].v0 = out[k].u1 = out[k].v1 = 0.0f;
+                out[k].u1 = out[k].v1 = 0.0f;
             }
         }
     }
@@ -949,6 +992,32 @@ static void set_other_mode(u32 *mode, u32 shift, u32 len, u32 data) {
 
 static void run_dl(const Gfx *dl, s32 maxCommands);
 
+/* Whether a command can change what build_draw_state builds. Viewport and matrix changes don't (culling is set per
+ * triangle). */
+static inline s32 state_command(u32 op) {
+    switch (op) {
+        case OP(G_VTX):
+        case OP(G_TRIN):
+        case OP(G_MTX):
+        case OP(G_POPMTX):
+        case OP(G_DL):
+        case OP(G_DMADL):
+        case OP(G_ENDDL):
+        case OP(G_MOVEMEM):
+        case OP(G_SPNOOP):
+        case OP(G_NOOP):
+        case OP(G_RDPLOADSYNC):
+        case OP(G_RDPPIPESYNC):
+        case OP(G_RDPTILESYNC):
+        case OP(G_RDPFULLSYNC):
+            return FALSE;
+        case OP(G_MOVEWORD):
+            return FALSE; // Checked below: only G_MW_FOG matters.
+        default:
+            return TRUE;
+    }
+}
+
 static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
     s32 executed = 0;
 
@@ -959,6 +1028,9 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         dl++;
         executed++;
         TRACE("%*s%08X %08X", (int) (depth * 2), "", (unsigned) w0, (unsigned) w1);
+        if (state_command(op)) {
+            sTriStateValid = FALSE;
+        }
 
         switch (op) {
             case OP(G_SPNOOP):
@@ -1060,6 +1132,7 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                         g.curMatrix = (w1 >> 6) & 3;
                         break;
                     case OP(G_MW_FOG):
+                        sTriStateValid = FALSE;
                         g.fogMul = (s16) (w1 >> 16);
                         g.fogOffset = (s16) (w1 & 0xFFFF);
                         break;
@@ -1278,6 +1351,7 @@ void port_gfx_run_task(void *taskPtr) {
     REF_CALL(refb_start_frame());
     g.vertexIndex = 0;
     g.billboard = 0;
+    sTriStateValid = FALSE;
     if (g.scissor[2] == 0) {
         g.scissor[2] = GFX_SCREEN_WIDTH;
         g.scissor[3] = GFX_SCREEN_HEIGHT;
