@@ -7,6 +7,7 @@
 #include "types.h"
 #include "port.h"
 #include "plat/plat.h"
+#include "plat/profile.h"
 
 #define RCP_QUEUE_SIZE 8
 
@@ -73,7 +74,7 @@ static void gfx_thread(void *arg) {
         port_raise_event(OS_EVENT_SP);
         start = plat_time_ns();
         port_gfx_run_task(task);
-        port_profile_add(PORT_PROFILE_GFX, plat_time_ns() - start);
+        prof_render_task(plat_time_ns() - start);
         gPlatCounters[PLAT_COUNTER_GFX_DONE]++;
         gPlatGfxStage = "raising the DP interrupt";
         plat_klock();
@@ -95,7 +96,7 @@ static void audio_thread(void *arg) {
         if (task->t.type == M_AUDTASK) {
             unsigned long long start = plat_time_ns();
             port_audio_run_task(task);
-            port_profile_add(PORT_PROFILE_AUDIO, plat_time_ns() - start);
+            prof_add(PROF_AUDIO, plat_time_ns() - start);
             gPlatCounters[PLAT_COUNTER_AUDIO]++;
         }
         port_raise_event(OS_EVENT_SP);
@@ -176,45 +177,4 @@ void port_rcp_wait_idle(void) {
     port_kwait_until(gfx_idle);
     plat_kunlock();
     port_int_restore(wasDisabled);
-}
-
-/******************************** Profiling ********************************/
-
-static unsigned long long sProfileTotals[PORT_PROFILE_COUNT];
-static unsigned long long sProfileStart;
-static s32 sProfileFrames;
-static s32 sProfileEnabled = -1;
-static unsigned long long sProfileIdleStart;
-
-void port_profile_add(s32 category, unsigned long long ns) {
-    sProfileTotals[category] += ns;
-}
-
-/* Called once per displayed frame. With DKR_PROFILE set, logs average times every 120 frames. */
-void port_profile_frame(void) {
-    unsigned long long now = plat_time_ns();
-    s32 i;
-    if (sProfileEnabled < 0) {
-        sProfileEnabled = plat_getenv("DKR_PROFILE") != NULL;
-    }
-    if (!sProfileEnabled) {
-        return;
-    }
-    if (sProfileStart == 0) {
-        sProfileStart = now;
-        sProfileIdleStart = plat_idle_ns();
-    }
-    if (++sProfileFrames == 120) {
-        unsigned long long elapsed = now - sProfileStart;
-        unsigned long long idle = plat_idle_ns();
-        port_log("profile: %.1f fps, gfx %.2f ms/frame, audio %.2f ms/frame, core 0 idle %.0f%%",
-                 120.0 * 1e9 / (double) elapsed, sProfileTotals[PORT_PROFILE_GFX] / 120.0 / 1e6,
-                 sProfileTotals[PORT_PROFILE_AUDIO] / 120.0 / 1e6, 100.0 * (idle - sProfileIdleStart) / elapsed);
-        sProfileIdleStart = idle;
-        for (i = 0; i < PORT_PROFILE_COUNT; i++) {
-            sProfileTotals[i] = 0;
-        }
-        sProfileFrames = 0;
-        sProfileStart = now;
-    }
 }

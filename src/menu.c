@@ -3469,6 +3469,14 @@ s32 menu_title_screen_loop(s32 updateRate) {
     s8 playerCount;
 
     sp18 = cam_get_active_camera();
+#ifdef TARGET_PORT
+    if (gMenuDelay == 0) {
+        s32 result = port_autorun_title(); // DKR_AUTORUN: start the next race straight from here.
+        if (result) {
+            return result;
+        }
+    }
+#endif
     gOptionBlinkTimer = (gOptionBlinkTimer + updateRate) & 0x3F;
     menu_input();
     if (osTvType == OS_TV_TYPE_PAL) {
@@ -3627,6 +3635,39 @@ s32 menu_title_screen_loop(s32 updateRate) {
     gIgnorePlayerInputTime = 0;
     return MENU_RESULT_CONTINUE;
 }
+
+#ifdef TARGET_PORT
+/**
+ * DKR_AUTORUN: leaves the title screen for a one player race in tracks mode, set up as the character select and
+ * track menus would. The AI racers are the usual cast minus the player's character.
+ */
+s32 port_autorun_setup_race(s32 levelId, s32 character, s32 vehicle) {
+    static const s8 sCast[] = { CHARACTER_KRUNCH, CHARACTER_BUMPER, CHARACTER_TIPTUP, CHARACTER_CONKER,
+                                CHARACTER_TIMBER, CHARACTER_BANJO,  CHARACTER_PIPSY,  CHARACTER_DIDDY };
+    s32 i, slot;
+
+    titlescreen_free();
+    disable_new_screen_transitions();
+    titlescreen_controller_assign(0);
+    charselect_assign_players(gActivePlayersArray);
+    gCharacterIdSlots[0] = character;
+    for (i = 0, slot = 1; i < ARRAY_COUNT(sCast) && slot < 8; i++) {
+        if (sCast[i] != character) {
+            gCharacterIdSlots[slot++] = sCast[i];
+        }
+    }
+    gIsInTracksMode = TRUE;
+    gIsInAdventureTwo = FALSE;
+    init_racer_headers();
+    gPlayerSelectVehicle[PLAYER_ONE] = vehicle;
+    set_level_default_vehicle(vehicle);
+    set_time_trial_enabled(FALSE);
+    gTrackIdToLoad = levelId;
+    gTrackSpecifiedWithTrackIdToLoad = 1;
+    music_change_on();
+    return gNumberOfActivePlayers;
+}
+#endif
 
 /**
  * Unloads the title screen logo and sets all audio back to default.

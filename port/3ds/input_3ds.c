@@ -71,14 +71,12 @@ void port_input_poll(PortControllerState *state, s32 maxControllers) {
 
     hidScanInput();
     held = hidKeysHeld();
-    // SELECT + touch sends a bug report instead (bugreport_3ds.c), which takes its own snapshot. The buttons at the
-    // bottom of the screen are the update's (update_3ds.c).
+    // Only the buttons at the bottom of the screen respond to touch (update_3ds.c); a stray tap elsewhere does
+    // nothing. SELECT + touch anywhere sends a bug report (bugreport_3ds.c).
     if ((hidKeysDown() & KEY_TOUCH) && !(held & KEY_SELECT)) {
         touchPosition touch;
         hidTouchRead(&touch);
-        if (!update_3ds_touch(touch.px, touch.py)) {
-            gPlatSnapshotRequested = 1;
-        }
+        update_3ds_touch(touch.px, touch.py);
     }
     hidCircleRead(&pad);
 

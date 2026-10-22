@@ -1,0 +1,90 @@
+#ifndef PORT_PROFILE_H
+#define PORT_PROFILE_H
+
+/*
+ * Per-stage frame profiler (port/src/game/port_profile.c). Turned on by DKR_PROFILE=1, the bottom screen's Profiler
+ * button, or the unattended test run (DKR_AUTORUN). Only builtin C types, so it can be used from game code, the OS layer and the 3DS backend alike.
+ *
+ * A frame passes through two threads, which on a New 3DS run on different CPU cores:
+ *  - the game thread (main core) runs the game logic, then builds the display list ("scene"), then waits for the
+ *    renderer to finish the previous frame and for the next retrace;
+ *  - the renderer thread interprets the display list ("rdp", which includes handing the draws to the GPU), decodes
+ *    textures, and waits for the GPU to finish the frame before it. The audio tasks run next to it.
+ * The GPU's own drawing time for each frame comes from citro3d.
+ */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+enum ProfStage {
+    PROF_LOGIC,      /* Game thread: object updates (racers, AI, physics). */
+    PROF_SCENE,      /* Game thread: the rest of the frame, mostly building the display list. */
+    PROF_FRAME_WAIT, /* Game thread: waiting for the renderer to finish the previous frame. */
+    PROF_VSYNC,      /* Game thread: waiting for the retrace that paces the frame rate. */
+    PROF_RDP,        /* Renderer: display list interpretation and GPU command submission. */
+    PROF_TEXTURE,    /* Renderer: texture decoding and upload. */
+    PROF_GPU_WAIT,   /* Renderer: waiting for the GPU to finish the previous frame. */
+    PROF_AUDIO,      /* Audio tasks (synthesis). */
+    PROF_GPU_DRAW,   /* The GPU's drawing time (3DS only). */
+    PROF_STAGE_COUNT
+};
+
+enum ProfCounter {
+    PROF_TRIANGLES,       /* Triangles handed to the backend. */
+    PROF_DRAWS,           /* Draw batches handed to the backend. */
+    PROF_TEXTURE_UPLOADS, /* Textures decoded (texture cache misses). */
+    PROF_COUNTER_COUNT
+};
+
+/* Points in the game thread's frame loop (main_game_loop). */
+enum ProfMark { PROF_MARK_LOOP_START, PROF_MARK_BUILT, PROF_MARK_WAITED, PROF_MARK_END };
+
+/* Retrace counts per game frame that the frame rate histogram distinguishes (1 = 60 fps ... 6+ = 10 fps or less). */
+#define PROF_RATE_BUCKETS 7
+
+int prof_enabled(void);
+/* The bottom screen's Profiler button: on or off, remembered across launches. */
+int prof_user_enabled(void);
+void prof_set_user_enabled(int on);
+void prof_add(int stage, unsigned long long ns);
+void prof_count(int counter, unsigned int n);
+/* Game thread: called at the marks above. updateRate (retraces this frame took) is only read at PROF_MARK_END. */
+void prof_game_mark(int mark, int updateRate);
+void prof_logic_begin(void);
+void prof_logic_end(void);
+/* Renderer: called after each display list, with the whole time it took (PROF_RDP is what the other stages leave). */
+void prof_render_task(unsigned long long totalNs);
+
+/* Statistics over a span of frames (a race, or the last second for the overlay). */
+typedef struct ProfStats {
+    unsigned int gameFrames;      /* Frames the game thread produced. */
+    unsigned int renderedFrames;  /* Frames the renderer drew. */
+    unsigned long long elapsedNs; /* Wall clock time covered. */
+    unsigned long long stageNs[PROF_STAGE_COUNT];
+    unsigned int counters[PROF_COUNTER_COUNT];
+    unsigned int rateFrames[PROF_RATE_BUCKETS]; /* Game frames by retraces taken: [2] = 30 fps, [3] = 20 fps... */
+    unsigned int worstFrameUs;    /* Longest time between two game frames. */
+    unsigned int worstBuildUs;    /* Longest logic + scene time. */
+    unsigned int worstRenderUs;   /* Longest renderer busy time for one frame. */
+    unsigned int worstGpuUs;      /* Longest GPU drawing time for one frame. */
+    unsigned int hitches;         /* Game frames that took longer than 50 ms. */
+    unsigned long long idleNs;    /* Main core idle time (3DS with the idle meter, else 0). */
+} ProfStats;
+
+/* A window of statistics: started with prof_window_start, read (any number of times) with prof_window_read. */
+enum ProfWindow { PROF_WINDOW_OVERLAY, PROF_WINDOW_SESSION, PROF_WINDOW_COUNT };
+void prof_window_start(int window);
+void prof_window_read(int window, ProfStats *out);
+
+/* Which part of the system limits the frame rate, judged from a window's averages: "game CPU", "renderer CPU", "GPU". */
+const char *prof_limit(const ProfStats *stats);
+
+/* Extra text shown under the profiler on the bottom screen (the unattended run's progress). NULL clears it. */
+void prof_set_status(const char *text);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

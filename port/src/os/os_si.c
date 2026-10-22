@@ -37,6 +37,12 @@ static void flush_saves(s32 force) {
     if (!sEepromDirty && !sMempakDirty) {
         return;
     }
+    if (port_autorun_enabled()) {
+        // The unattended test run never touches the player's saves (its races would set track records).
+        sEepromDirty = FALSE;
+        sMempakDirty = FALSE;
+        return;
+    }
     if (!force && plat_time_ns() - sLastSaveWrite < SAVE_FLUSH_DELAY_NS) {
         return;
     }

@@ -1,0 +1,353 @@
+/*
+ * Per-stage frame profiler (see plat/profile.h for the stages).
+ *
+ *   DKR_PROFILE=1   Shows the profiler on the bottom screen (updated every second) and logs a summary line every
+ *                   few seconds. The unattended test run (DKR_AUTORUN) turns it on as well, and so does the
+ *                   bottom screen's "Profiler" button, which is remembered in profiler.txt in the data directory.
+ * While it is off, every hook returns after one check.
+ *
+ * Each stage has exactly one writer thread, which keeps a running total in microseconds; readers take the difference
+ * between two snapshots, so nothing is ever reset under a writer's feet. 32-bit totals are read and written in one
+ * go on every target, and wrap after 71 minutes, far longer than any window.
+ */
+#include <ultra64.h>
+#include "types.h"
+#include "port.h"
+#include "plat/plat.h"
+#include "plat/profile.h"
+
+#define USER_FILE "profiler.txt"
+
+static s32 sEnabled = -1;      // DKR_PROFILE.
+static volatile s32 sUserOn;   // The bottom screen button.
+static s32 sGameThreadOn;      // Whether the game thread is profiling (it starts and stops at the top of a frame).
+
+/* Running totals (only ever increased, by the stage's own thread). */
+static volatile u32 sTotalUs[PROF_STAGE_COUNT];
+static unsigned long long sTotalNs[PROF_STAGE_COUNT]; // Private to each stage's writer.
+static volatile u32 sCounters[PROF_COUNTER_COUNT];
+static volatile u32 sRenderedFrames;
+
+/* Per-window maxima kept by the renderer thread; a window start asks for them to be cleared. */
+static volatile u32 sRenderMaxUs[PROF_WINDOW_COUNT];
+static volatile u32 sGpuMaxUs[PROF_WINDOW_COUNT];
+static volatile u32 sMaxClearRequest[PROF_WINDOW_COUNT];
+static u32 sMaxCleared[PROF_WINDOW_COUNT];
+/* The renderer's waits and texture work during the current task. */
+static unsigned long long sTaskGpuWaitNs;
+static unsigned long long sTaskTextureNs;
+
+/* Game thread state. */
+static unsigned long long sMarkNs[4];
+static unsigned long long sLogicStartNs;
+static unsigned long long sLogicNs; // Logic time of the current frame.
+static unsigned long long sLastFrameEndNs;
+static u32 sGameFrames;
+
+typedef struct Window {
+    u32 startTotalUs[PROF_STAGE_COUNT];
+    u32 startCounters[PROF_COUNTER_COUNT];
+    u32 startRenderedFrames;
+    u32 startGameFrames;
+    unsigned long long startNs;
+    unsigned long long startIdleNs;
+    // Game thread statistics, kept per window directly.
+    u32 rateFrames[PROF_RATE_BUCKETS];
+    u32 worstFrameUs;
+    u32 worstBuildUs;
+    u32 hitches;
+} Window;
+
+static Window sWindows[PROF_WINDOW_COUNT];
+static char sStatus[96];
+static s32 sLogCounter;
+
+static void user_file_path(char *path, s32 size) {
+    plat_snprintf(path, size, "%s/" USER_FILE, plat_data_dir());
+}
+
+/* On with DKR_PROFILE, the Profiler button, and during the unattended test run (which can start and stop at any time). */
+int prof_enabled(void) {
+    if (sEnabled < 0) {
+        char path[256];
+        char text[16];
+        int length;
+        user_file_path(path, sizeof(path));
+        length = plat_load_file_start(path, text, sizeof(text) - 1);
+        text[length > 0 ? length : 0] = '\0';
+        sUserOn = text[0] == '1';
+        sEnabled = plat_getenv("DKR_PROFILE") != NULL;
+    }
+    return sEnabled || sUserOn || port_autorun_enabled();
+}
+
+int prof_user_enabled(void) {
+    prof_enabled();
+    return sUserOn;
+}
+
+void prof_set_user_enabled(int on) {
+    char path[256];
+    prof_enabled();
+    sUserOn = on != 0;
+    user_file_path(path, sizeof(path));
+    plat_save_file(path, on ? "1\n" : "0\n", 2);
+}
+
+void prof_add(int stage, unsigned long long ns) {
+    if (!prof_enabled()) {
+        return;
+    }
+    if (stage == PROF_GPU_WAIT) {
+        sTaskGpuWaitNs += ns;
+    } else if (stage == PROF_TEXTURE) {
+        sTaskTextureNs += ns;
+    }
+    sTotalNs[stage] += ns;
+    sTotalUs[stage] = (u32) (sTotalNs[stage] / 1000);
+    if (stage == PROF_GPU_DRAW) {
+        s32 w;
+        // Cleared together with the renderer maximum, in prof_render_frame (the same thread).
+        for (w = 0; w < PROF_WINDOW_COUNT; w++) {
+            if ((u32) (ns / 1000) > sGpuMaxUs[w]) {
+                sGpuMaxUs[w] = (u32) (ns / 1000);
+            }
+        }
+    }
+}
+
+void prof_count(int counter, unsigned int n) {
+    if (prof_enabled()) {
+        sCounters[counter] += n;
+    }
+}
+
+void prof_render_task(unsigned long long totalNs) {
+    unsigned long long busyNs;
+    s32 w;
+    if (!prof_enabled()) {
+        return;
+    }
+    // Whatever the task spent neither waiting for the GPU nor on textures was display list work.
+    busyNs = totalNs > sTaskGpuWaitNs ? totalNs - sTaskGpuWaitNs : 0;
+    prof_add(PROF_RDP, busyNs > sTaskTextureNs ? busyNs - sTaskTextureNs : 0);
+    sTaskGpuWaitNs = 0;
+    sTaskTextureNs = 0;
+    sRenderedFrames++;
+    for (w = 0; w < PROF_WINDOW_COUNT; w++) {
+        u32 request = sMaxClearRequest[w];
+        if (sMaxCleared[w] != request) {
+            sMaxCleared[w] = request;
+            sRenderMaxUs[w] = 0;
+            sGpuMaxUs[w] = 0;
+        }
+        if ((u32) (busyNs / 1000) > sRenderMaxUs[w]) {
+            sRenderMaxUs[w] = (u32) (busyNs / 1000);
+        }
+    }
+}
+
+void prof_logic_begin(void) {
+    if (prof_enabled()) {
+        sLogicStartNs = plat_time_ns();
+    }
+}
+
+void prof_logic_end(void) {
+    if (prof_enabled()) {
+        sLogicNs += plat_time_ns() - sLogicStartNs;
+    }
+}
+
+void prof_window_start(int window) {
+    Window *w = &sWindows[window];
+    s32 i;
+    for (i = 0; i < PROF_STAGE_COUNT; i++) {
+        w->startTotalUs[i] = sTotalUs[i];
+    }
+    for (i = 0; i < PROF_COUNTER_COUNT; i++) {
+        w->startCounters[i] = sCounters[i];
+    }
+    for (i = 0; i < PROF_RATE_BUCKETS; i++) {
+        w->rateFrames[i] = 0;
+    }
+    w->startRenderedFrames = sRenderedFrames;
+    w->startGameFrames = sGameFrames;
+    w->startNs = plat_time_ns();
+    w->startIdleNs = plat_idle_ns();
+    w->worstFrameUs = 0;
+    w->worstBuildUs = 0;
+    w->hitches = 0;
+    sMaxClearRequest[window]++;
+}
+
+void prof_window_read(int window, ProfStats *out) {
+    Window *w = &sWindows[window];
+    s32 i;
+    for (i = 0; i < PROF_STAGE_COUNT; i++) {
+        out->stageNs[i] = (unsigned long long) (u32) (sTotalUs[i] - w->startTotalUs[i]) * 1000;
+    }
+    for (i = 0; i < PROF_COUNTER_COUNT; i++) {
+        out->counters[i] = sCounters[i] - w->startCounters[i];
+    }
+    for (i = 0; i < PROF_RATE_BUCKETS; i++) {
+        out->rateFrames[i] = w->rateFrames[i];
+    }
+    out->gameFrames = sGameFrames - w->startGameFrames;
+    out->renderedFrames = sRenderedFrames - w->startRenderedFrames;
+    out->elapsedNs = plat_time_ns() - w->startNs;
+    out->idleNs = plat_idle_ns() - w->startIdleNs;
+    out->worstFrameUs = w->worstFrameUs;
+    out->worstBuildUs = w->worstBuildUs;
+    out->hitches = w->hitches;
+    if (sMaxCleared[window] == sMaxClearRequest[window]) {
+        out->worstRenderUs = sRenderMaxUs[window];
+        out->worstGpuUs = sGpuMaxUs[window];
+    } else {
+        out->worstRenderUs = 0; // Nothing rendered since the window started.
+        out->worstGpuUs = 0;
+    }
+}
+
+static double per_frame_ms(const ProfStats *s, s32 stage, u32 frames) {
+    return frames ? s->stageNs[stage] / 1e6 / frames : 0.0;
+}
+
+const char *prof_limit(const ProfStats *s) {
+    double game = per_frame_ms(s, PROF_LOGIC, s->gameFrames) + per_frame_ms(s, PROF_SCENE, s->gameFrames);
+    double render = per_frame_ms(s, PROF_RDP, s->renderedFrames) + per_frame_ms(s, PROF_TEXTURE, s->renderedFrames);
+    double gpu = per_frame_ms(s, PROF_GPU_DRAW, s->renderedFrames);
+    if (gpu > game && gpu > render) {
+        return "GPU";
+    }
+    return (game >= render) ? "game CPU" : "renderer CPU";
+}
+
+void prof_set_status(const char *text) {
+    s32 i = 0;
+    if (text != NULL) {
+        for (; text[i] != '\0' && i < (s32) sizeof(sStatus) - 1; i++) {
+            sStatus[i] = text[i];
+        }
+    }
+    sStatus[i] = '\0';
+}
+
+static int percent(u32 part, u32 whole) {
+    return whole ? (int) (((unsigned long long) part * 100 + whole / 2) / whole) : 0;
+}
+
+static void show_overlay(void) {
+    ProfStats s;
+    char text[512];
+    u32 slow, i;
+    double fps;
+
+    prof_window_read(PROF_WINDOW_OVERLAY, &s);
+    fps = s.elapsedNs ? s.gameFrames * 1e9 / s.elapsedNs : 0.0;
+    for (slow = 0, i = 4; i < PROF_RATE_BUCKETS; i++) {
+        slow += s.rateFrames[i];
+    }
+    plat_snprintf(text, sizeof(text),
+                  "PROFILER %4.1f fps  limit: %s\n"
+                  "30fps %3d%%  20fps %3d%%  slower %3d%%\n"
+                  "worst frame %3u ms  hitches %u\n"
+                  "game  logic %4.1f scene %4.1f wait %4.1f\n"
+                  "rend  rdp %4.1f tex %4.1f gpuwait %4.1f\n"
+                  "gpu   draw %4.1f  audio %4.1f  idle %2d%%\n"
+                  "tris %5u draws %4u tex+ %u\n"
+                  "%s",
+                  fps, prof_limit(&s), percent(s.rateFrames[2] + s.rateFrames[1], s.gameFrames),
+                  percent(s.rateFrames[3], s.gameFrames), percent(slow, s.gameFrames), s.worstFrameUs / 1000,
+                  s.hitches, per_frame_ms(&s, PROF_LOGIC, s.gameFrames), per_frame_ms(&s, PROF_SCENE, s.gameFrames),
+                  per_frame_ms(&s, PROF_FRAME_WAIT, s.gameFrames), per_frame_ms(&s, PROF_RDP, s.renderedFrames),
+                  per_frame_ms(&s, PROF_TEXTURE, s.renderedFrames), per_frame_ms(&s, PROF_GPU_WAIT, s.renderedFrames),
+                  per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames), per_frame_ms(&s, PROF_AUDIO, s.gameFrames),
+                  percent((u32) (s.idleNs / 1000), (u32) (s.elapsedNs / 1000)),
+                  s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
+                  s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0, s.counters[PROF_TEXTURE_UPLOADS],
+                  sStatus);
+    plat_overlay_show(text);
+    if (++sLogCounter % 4 == 0) {
+        port_log("profile: %.1f fps (30fps %d%%), worst %u ms, logic %.2f scene %.2f rdp %.2f tex %.2f gpu %.2f "
+                 "audio %.2f ms, limit %s",
+                 fps, percent(s.rateFrames[2] + s.rateFrames[1], s.gameFrames), s.worstFrameUs / 1000,
+                 per_frame_ms(&s, PROF_LOGIC, s.gameFrames), per_frame_ms(&s, PROF_SCENE, s.gameFrames),
+                 per_frame_ms(&s, PROF_RDP, s.renderedFrames), per_frame_ms(&s, PROF_TEXTURE, s.renderedFrames),
+                 per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames), per_frame_ms(&s, PROF_AUDIO, s.gameFrames),
+                 prof_limit(&s));
+    }
+    prof_window_start(PROF_WINDOW_OVERLAY);
+}
+
+void prof_game_mark(int mark, int updateRate) {
+    unsigned long long now;
+    s32 w;
+
+    if (!prof_enabled()) {
+        if (sGameThreadOn) {
+            // Turned off: clear the readout, and start afresh if it is turned on again.
+            sGameThreadOn = FALSE;
+            sWindows[PROF_WINDOW_OVERLAY].startNs = 0;
+            sLastFrameEndNs = 0;
+            plat_overlay_show("");
+        }
+        return;
+    }
+    if (!sGameThreadOn) {
+        // Turned on part way through a frame: wait for the next one, so no stage is timed from a stale mark.
+        if (mark != PROF_MARK_LOOP_START) {
+            return;
+        }
+        sGameThreadOn = TRUE;
+    }
+    now = plat_time_ns();
+    sMarkNs[mark] = now;
+    switch (mark) {
+        case PROF_MARK_LOOP_START:
+            sLogicNs = 0;
+            break;
+        case PROF_MARK_BUILT: {
+            unsigned long long build = now - sMarkNs[PROF_MARK_LOOP_START];
+            prof_add(PROF_LOGIC, sLogicNs);
+            prof_add(PROF_SCENE, build > sLogicNs ? build - sLogicNs : 0);
+            for (w = 0; w < PROF_WINDOW_COUNT; w++) {
+                if (build / 1000 > sWindows[w].worstBuildUs) {
+                    sWindows[w].worstBuildUs = (u32) (build / 1000);
+                }
+            }
+            break;
+        }
+        case PROF_MARK_WAITED:
+            prof_add(PROF_FRAME_WAIT, now - sMarkNs[PROF_MARK_BUILT]);
+            break;
+        case PROF_MARK_END: {
+            u32 periodUs = sLastFrameEndNs ? (u32) ((now - sLastFrameEndNs) / 1000) : 0;
+            prof_add(PROF_VSYNC, now - sMarkNs[PROF_MARK_WAITED]);
+            sLastFrameEndNs = now;
+            sGameFrames++;
+            if (updateRate < 0) {
+                updateRate = 0;
+            }
+            if (updateRate >= PROF_RATE_BUCKETS) {
+                updateRate = PROF_RATE_BUCKETS - 1;
+            }
+            for (w = 0; w < PROF_WINDOW_COUNT; w++) {
+                Window *win = &sWindows[w];
+                win->rateFrames[updateRate]++;
+                if (periodUs > win->worstFrameUs) {
+                    win->worstFrameUs = periodUs;
+                }
+                if (periodUs > 50000) {
+                    win->hitches++;
+                }
+            }
+            if (sWindows[PROF_WINDOW_OVERLAY].startNs == 0) {
+                prof_window_start(PROF_WINDOW_OVERLAY);
+            } else if (now - sWindows[PROF_WINDOW_OVERLAY].startNs >= 1000000000ULL) {
+                show_overlay();
+            }
+            break;
+        }
+    }
+}

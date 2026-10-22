@@ -38,6 +38,10 @@
 #include "structs.h"
 #include "textures_sprites.h"
 #include "thread0_epc.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#include "plat/profile.h"
+#endif
 #include "thread30_bgload.h"
 #include "tracks.h"
 #include "types.h"
@@ -252,6 +256,9 @@ void main_game_loop(void) {
     s32 tempLogicUpdateRate, tempLogicUpdateRateMax;
 
     osSetTime(0);
+#ifdef TARGET_PORT
+    prof_game_mark(PROF_MARK_LOOP_START, 0);
+#endif
 
     if (gScreenStatus == MESG_SKIP_BUFFER_SWAP) {
         gCurrDisplayList = gDisplayLists[gSPTaskNum];
@@ -331,6 +338,9 @@ void main_game_loop(void) {
     gSPEndDisplayList(gCurrDisplayList++);
 
     copy_viewports_to_stack();
+#ifdef TARGET_PORT
+    prof_game_mark(PROF_MARK_BUILT, 0);
+#endif
     if (gDrawFrameTimer != 1) {
         if (gSkipGfxTask == FALSE) {
             gScreenStatus = gfxtask_wait();
@@ -338,6 +348,9 @@ void main_game_loop(void) {
     } else {
         gDrawFrameTimer = 0;
     }
+#ifdef TARGET_PORT
+    prof_game_mark(PROF_MARK_WAITED, 0);
+#endif
     gSkipGfxTask = FALSE;
     mempool_free_queue_clear();
     if (!gIsPaused) {
@@ -355,6 +368,10 @@ void main_game_loop(void) {
     // affects frameskipping, to maintain consistent game speed, through the (many)
     // dropped frames in DKR.
     tempLogicUpdateRate = fb_update(gScreenStatus);
+#ifdef TARGET_PORT
+    prof_game_mark(PROF_MARK_END, tempLogicUpdateRate);
+    port_autorun_frame(tempLogicUpdateRate);
+#endif
     sLogicUpdateRate = tempLogicUpdateRate;
     tempLogicUpdateRateMax = LOGIC_10FPS;
     if (tempLogicUpdateRate > tempLogicUpdateRateMax) {
@@ -445,7 +462,13 @@ void mode_game(s32 updateRate) {
 #endif
     // Update all objects
     if (!gIsPaused) {
+#ifdef TARGET_PORT
+        prof_logic_begin();
         obj_update(updateRate);
+        prof_logic_end();
+#else
+        obj_update(updateRate);
+#endif
         if (check_if_showing_cutscene_camera() == 0 || get_race_countdown()) {
             if (buttonPressedInputs & START_BUTTON && level_properties_get() == 0 && gDrumstickSceneLoadTimer == 0 &&
                 gGameMode == GAMEMODE_INGAME && gPostRaceViewPort == FALSE && gLevelLoadTimer == 0 &&
@@ -510,6 +533,16 @@ void mode_game(s32 updateRate) {
                 break;
         }
     }
+#ifdef TARGET_PORT
+    if (port_autorun_quit_race()) {
+        // DKR_AUTORUN: the race is over, back to the title screen for the next one (as quitting from the pause menu).
+        gIsPaused = FALSE;
+        level_properties_reset();
+        gDrumstickSceneLoadTimer = 0;
+        buttonHeldInputs |= (L_TRIG | R_TRIG);
+        loadContext = LEVEL_CONTEXT_NONE;
+    }
+#endif
     process_onscreen_textbox(updateRate);
     i = textbox_visible();
     if (i != 0) {

@@ -28,6 +28,14 @@
 #include "printf.h"
 #include "save_data.h"
 #include "structs.h"
+#ifdef TARGET_PORT
+#include "port.h"
+// DKR_AUTORUN: while the AI drives the player's kart, it handles like a kart that has crossed the finish line (which
+// the AI also drives), since the AI's steering is tuned for that handling.
+#define AI_DRIVEN(racer) ((racer)->raceFinished || port_autorun_drives())
+#else
+#define AI_DRIVEN(racer) ((racer)->raceFinished)
+#endif
 #include "textures_sprites.h"
 #include "thread3_main.h"
 #include "tracks.h"
@@ -1618,7 +1626,7 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
     racerOx1 = -racer->ox1 * 10 * spC8;
     racerOz1 = -racer->oz1 * 10 * spC8;
     var_f2 = 8.0f;
-    if (gCurrentPlayerIndex == PLAYER_COMPUTER || racer->raceFinished) {
+    if (gCurrentPlayerIndex == PLAYER_COMPUTER || AI_DRIVEN(racer)) {
         var_f2 = 32.0f;
     }
     var_v1 = gCurrentStickX - racer->steerAngle;
@@ -1829,7 +1837,7 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
     } else {
         obj->y_velocity -= gCurrentRacerWeightStat * updateRateF;
     }
-    iTemp = (gCurrentPlayerIndex != PLAYER_COMPUTER && !racer->raceFinished) ? racer->steerAngle : gCurrentStickX;
+    iTemp = (gCurrentPlayerIndex != PLAYER_COMPUTER && !AI_DRIVEN(racer)) ? racer->steerAngle : gCurrentStickX;
     spFC = 0.004;
     obj->y_velocity -= (obj->y_velocity * 0.025) * updateRateF;
     if (gCurrentRacerInput & B_BUTTON && gCurrentStickY >= -40 && racer->velocity >= -0.5) {
@@ -4290,6 +4298,12 @@ void update_player_racer(Object *obj, s32 updateRate) {
         }
         tempVar = tempRacer->playerIndex;
         if (tempRacer->playerIndex != PLAYER_COMPUTER) {
+#ifdef TARGET_PORT
+            if (port_autorun_drives() && tempRacer->exitObj == 0) {
+                // DKR_AUTORUN: the AI drives the player's kart, as it does after the finish line.
+                racer_AI_pathing_inputs(obj, tempRacer, updateRate);
+            } else
+#endif
             if (tempRacer->exitObj == 0) {
                 if (is_race_started_by_player_two()) {
                     tempVar = 1 - tempVar;
@@ -4727,7 +4741,7 @@ void update_car(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Racer 
     if (racer->unk1D2 != 0) {
         gCurrentRacerInput &= ~A_BUTTON;
     }
-    if (gCurrentPlayerIndex == PLAYER_COMPUTER || racer->raceFinished) {
+    if (gCurrentPlayerIndex == PLAYER_COMPUTER || AI_DRIVEN(racer)) {
         update_onscreen_AI_racer(racerObj, racer, updateRate, updateRateF);
     } else {
         if (racer->unk1D4 != 0) {

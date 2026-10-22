@@ -49,8 +49,10 @@ static void show_bottom_screen_help(void) {
     printf("  C-Stick      C buttons\n");
     printf("  SELECT       N64 L button\n");
     printf("  START        Pause\n\n");
-    printf("  SELECT+touch Send a bug report\n");
-    printf("  Button below Install a newer build\n\n");
+    printf("  SELECT+touch Send a bug report\n\n");
+    printf("  Buttons below: send a bug report,\n");
+    printf("  start an unattended test run,\n");
+    printf("  install a newer build\n\n");
     printf("  Saves: sdmc:/3ds/dkr/\n");
 }
 

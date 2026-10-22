@@ -157,3 +157,11 @@ int plat_list_dir(const char *dir, char *names, int nameSize, int maxNames) {
     closedir(d);
     return count;
 }
+
+const char *plat_build_version(void) {
+#ifdef PORT_BUILD_VERSION
+    return PORT_BUILD_VERSION;
+#else
+    return "host";
+#endif
+}

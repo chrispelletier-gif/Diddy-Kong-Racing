@@ -67,8 +67,9 @@ runs silently.
 | SELECT        | L                   |                         |
 | START         | START               | Pause                   |
 
-The menus are driven by the stick, as on the N64. Touching the bottom screen saves a snapshot of the frame (see
-below); holding SELECT while touching it sends a bug report.
+The menus are driven by the stick, as on the N64. At the bottom of the bottom screen are four buttons: Bug rep.,
+Test run, Profiler and Updates (see below). The rest of the touch screen does nothing, so a stray tap can't interrupt a race;
+holding SELECT while touching anywhere also sends a bug report.
 
 ## How it works
 
@@ -134,8 +135,9 @@ controls) work there, as do these renderer switches:
 ## Bug reports
 
 The 3DS build can send a bug report over Wi-Fi as an issue on this repository, labelled `3ds-bug-report`:
-- Hold SELECT and touch the bottom screen. The game saves a snapshot of the frame and sends it with the log. This
-  also works when the game has frozen, without the snapshot if the renderer has stopped.
+- Tap Bug rep. at the bottom of the bottom screen, or hold SELECT and touch the screen anywhere. The game saves a
+  snapshot of the frame and sends it with the log. This also works when the game has frozen, without the snapshot
+  if the renderer has stopped.
 - If the game crashes it writes `sdmc:/3ds/dkr/crash.txt` (the registers, the stack and the recent log) and goes
   back to the Homebrew Launcher. The next time it starts, and also after a freeze that needed the power button, it
   offers to send the last run's log and crash report (A sends, B skips).
@@ -155,7 +157,11 @@ is kept as `sdmc:/3ds/dkr/bugreport_unsent.txt`.
 
 The issue body has the build, the console, the counters and the end of the log. The files (the snapshot's
 `diff_N_ref.png`, `diff_N_gpu.bin` and `diff_N_log.txt`, `log.txt`, `env.txt`, or `last_log.txt` and
-`last_crash.txt` after a crash) are posted as compressed comments on the issue. To get them back:
+`last_crash.txt` after a crash) are posted as compressed comments on the issue. `log.txt` stops after the start-up
+lines; the body has the latest ones. When the GPU stops responding, the game saves `gpu_hang.txt` (the GPU's command
+queue, marking the command list it stopped in, and every draw of the stuck frame, those in that list starred) and
+`gpu_hang_cmd.bin` (the frame's command list), and 20 seconds into any hang `hang_log.txt` (the latest log lines).
+They go with a report sent right away, or as `last_*` files with the report on the next launch. To get them back:
 
 ```sh
 python3 port/tools/bugreport_fetch.py --list        # open reports
@@ -169,7 +175,7 @@ A crash report gives `pc` and `lr`; with the `dkr.elf` of the same build (the `B
 ## Updates
 
 CI publishes every 3DS build as a pre-release: `3ds-newest` is the latest push to any branch, `3ds-master` the
-latest build of master. Tap Check for updates at the bottom of the bottom screen; the game lists both builds (the
+latest build of master. Tap Updates at the bottom of the bottom screen; the game lists both builds (the
 one running is marked "this") and offers master, newest or cancel. The chosen build is downloaded next to the
 running `.3dsx`, checked against its size and sha256, and replaces it; tap Quit to finish the update, or keep
 playing and the new build runs next time. It only works when the game was started from the SD card (not over
@@ -177,6 +183,81 @@ playing and the new build runs next time. It only works when the game was starte
 
 While the repository is public no token is needed. For a private repository the token in
 `sdmc:/3ds/dkr/bugreport.txt` is used, and it needs Contents set to Read-only as well (step 4 above).
+
+## Profiler
+
+Tap Profiler at the bottom of the bottom screen to show the profiler on the bottom screen, updated every second; the
+button turns green while it is on, and the game remembers the setting. `DKR_PROFILE=1` in `env.txt` and the test run
+below turn it on as well. While it is off it costs nothing measurable (each timing hook returns after one check).
+
+| Line | Meaning |
+| ---- | ------- |
+| `PROFILER 29.8 fps limit: GPU` | Frames per second, and which part limits them: the game CPU, the renderer CPU or the GPU. |
+| `30fps 97% 20fps 3% slower 0%` | Share of frames shown at 30 fps, at 20 fps, and slower. |
+| `worst frame 61 ms hitches 2` | The longest frame, and frames over 50 ms. |
+| `game logic / scene / wait` | Game thread, ms per frame: object updates (racers, AI), building the display list, waiting for the renderer. |
+| `rend rdp / tex / gpuwait` | Renderer thread: interpreting the display list and sending it to the GPU, decoding textures, waiting for the GPU. |
+| `gpu draw / audio / idle` | The GPU's drawing time, the audio mixing, and how much of the main core is idle. |
+| `tris / draws / tex+` | Triangles and draw batches per frame, textures decoded in the last second. |
+
+On a New 3DS the game thread, the renderer and the GPU work in parallel, so whichever of `logic + scene`,
+`rdp + tex` and `gpu draw` is largest sets the frame rate (33.3 ms per frame is 30 fps). Every few seconds a summary
+line also goes to the log.
+
+## Unattended test run
+
+Tap Test run at the bottom of the bottom screen, then Full test, and leave the console on its charger. From the
+title screen, the game races every track with every character (200 races, some 8 hours), with the AI driving your
+kart. Each race is profiled and checked: a race that doesn't finish within 5 minutes, a kart that stops reaching
+checkpoints for a minute, a crash or a freeze are all recorded. When the AI wedges your kart somewhere for 10 s,
+the kart is put at the next checkpoint and the race goes on; the spot is noted in the results. The bottom screen shows the profiler, the race, and a
+progress bar. Your saves are not written while it runs. Tap Stop test to end it early.
+
+- Results go to `sdmc:/3ds/dkr/`: `autorun_results.csv` (one line per race: outcome, frame rate, the profiler's
+  stages, worst frames) and `autorun_problems.txt`.
+- When the run ends or is stopped, and bug reports are set up, the results are sent as an issue titled
+  "[3DS test run]". `python3 port/tools/bugreport_fetch.py <issue>` saves its files, and
+  `python3 port/tools/autorun_report.py bugreport_<issue>/autorun_results.csv` turns them into tables by track and
+  by character, the slowest races and the problems.
+- If the game crashes or freezes, start it again: it sends the crash report without asking and carries on with the
+  next race. (A freeze is noticed when nothing has been drawn for 20 seconds.)
+
+`env.txt` settings change what it runs (the same settings work on the host build):
+
+| Setting | Effect |
+| ------- | ------ |
+| `DKR_AUTORUN=1` | Run at every start, without the button. |
+| `DKR_AUTORUN_TRACKS=5,3` | Only these tracks (`ASSET_LEVEL_*` ids; default: the 20 of the tracks menu). |
+| `DKR_AUTORUN_CHARACTERS=3,9` | Only these characters: Krunch 0, Bumper 1, Tiptup 2, Conker 3, Timber 4, Banjo 5, Drumstick 6, Pipsy 7, T.T. 8, Diddy 9. |
+| `DKR_AUTORUN_VEHICLES=all` | Also each other vehicle a track allows. |
+| `DKR_AUTORUN_TIMEOUT=300` | Seconds before an unfinished race counts as a timeout. |
+| `DKR_AUTORUN_LOOP=1` | Start over after the last race. |
+| `DKR_AUTORUN_RESTART=1` | Start from the first race instead of resuming. |
+| `DKR_AUTORUN_SNAPSHOT=1` | Save a snapshot (GPU and reference images) after each race, for `diff_frames.py`. |
+
+### Quick test
+
+Tap Test run, then Quick. It races only the slowest tracks of the full run (Haunted Woods, Jungle Falls, Crescent
+Island, Whale Bay and EverFrost Peak, from hardware test run #12), twice each with Bumper and your own anti-aliasing
+setting: about 20 minutes. Use it to tell whether a new build made the slow spots faster: run it on the old build,
+install the new one, run it again. The results issue ("[3DS test run] quick test ...") compares each track with the
+quick test before it on the same console, with both builds named, and gives the change in frame rate, share of
+frames at 30 fps, GPU and renderer time and worst frame. The races are in `quick_test_results.csv` (the test run's
+columns plus `build`), which `autorun_report.py` also splits by track and build. `DKR_AUTORUN_QUICK=1` runs it at
+every start; `DKR_AUTORUN_QUICK_TRACKS`, `DKR_AUTORUN_QUICK_CHARACTER` and `DKR_AUTORUN_QUICK_PASSES` change the
+tracks, the character and the races per track.
+
+### Anti-aliasing benchmark
+
+Tap Test run, then AA bench. It is a short test run (about half an hour) that measures what anti-aliasing costs on
+the heaviest races: Whale Bay, Jungle Falls and Frosty Village, the slowest tracks of hardware test run #10, raced
+by Bumper four times each with anti-aliasing off, on, on, off (so neither setting gets the cooler console or the warm
+caches). The game switches anti-aliasing itself before each race and puts your own setting back at the end. The
+results issue ("[3DS test run] AA benchmark ...") has a table of the two settings side by side for each track and
+what AA costs in GPU time and frame rate; the races are in `aa_bench_results.csv` (the test run's columns plus
+`aa`), which `autorun_report.py` also splits by track and AA. It keeps its own progress file, so a full test run it
+interrupts carries on afterwards. `DKR_AUTORUN_BENCH=1` runs it at every start instead; `DKR_AUTORUN_BENCH_TRACKS`
+and `DKR_AUTORUN_BENCH_CHARACTER` change the tracks and the character.
 
 ## Automated testing
 
@@ -229,10 +310,9 @@ For sound in Azahar, put any file at `sdmc/3ds/dspfirm.cdc`; Azahar's emulated D
 
 - **Tested in Azahar:** the intro, attract mode and menus, the adventure hub and races.
 - **Performance in Azahar:** races run at the game's 30 fps cap in both Old 3DS and New 3DS mode, with time to
-  spare (`DKR_PROFILE=1` in `env.txt` logs the frame rate, graphics and audio time, and idle time).
+  spare (see the profiler above).
 - **Untested:** real hardware. Azahar does not model CPU timing exactly, so expect the real frame rate to be lower,
   especially on an Old 3DS.
 - **Known gaps:**
   - Only the US 1.0 ROM is tested.
   - Rumble isn't supported.
-  - The bottom screen is unused.

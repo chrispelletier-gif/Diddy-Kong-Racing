@@ -11,6 +11,7 @@
 #include "structs.h"
 #include "port.h"
 #include "plat/plat.h"
+#include "plat/profile.h"
 #include "gfx_backend.h"
 
 #define MAX_VERTICES 64
@@ -314,6 +315,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     u8 filter, wrapS, wrapT;
     TexCacheEntry *e;
     u32 *pixels;
+    unsigned long long texStart;
 
     if (!load->valid) {
         // Loaded at an unaligned TMEM address. Search for the load covering it.
@@ -384,6 +386,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
         return NULL; // Can't happen: at most three of the eight entries are in use.
     }
 
+    texStart = plat_time_ns();
     e = &sTexCache[oldest];
     if (e->used) {
         gfxb_texture_free(&e->tex);
@@ -393,6 +396,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     if (pixels == NULL) {
         gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
         e->used = FALSE;
+        prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
         return NULL;
     }
     decode_texture(pixels, load, tile, width, height, tlut);
@@ -417,6 +421,8 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     e->tex.wrapT = wrapT;
     e->tex.backendData = NULL;
     gfxb_texture_upload(&e->tex);
+    prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+    prof_count(PROF_TEXTURE_UPLOADS, 1);
     return &e->tex;
 }
 
@@ -666,6 +672,8 @@ static void flush_batch(void) {
             plat_log("    u %.3f..%.3f v %.3f..%.3f w %.1f..%.1f", minU, maxU, minV, maxV, minW, maxW);
         }
         gfxb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount);
+        prof_count(PROF_TRIANGLES, sBatchCount);
+        prof_count(PROF_DRAWS, 1);
         REF_CALL(refb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount));
         sBatchCount = 0;
     }
@@ -1322,7 +1330,6 @@ void port_gfx_run_task(void *taskPtr) {
     OSTask *task = (OSTask *) taskPtr;
     port_gfx_init();
     sFrameCount++;
-    port_profile_frame();
 #ifdef PORT_GFX_REFERENCE
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
 #endif
