@@ -74,8 +74,16 @@ ifeq ($(DEBUG),1)
 else ifeq ($(DEBUG),asan)
   OPT_FLAGS := -O1 -g $(SANITIZE_FLAGS) -fno-omit-frame-pointer
 else
-  OPT_FLAGS := -O2 -g
+  # -O3 with link-time optimisation across the game, libultra and the port (roadmap P11). Neither changes how floats
+  # are rounded, so the game plays exactly as with -O2 (checked with port/tools/frame_regression.py).
+  # OPT=2 LTO=0 gives the old build for comparison. HOT_OPT is the level for the loop-heavy renderer and audio files
+  # (HOT_SRC), so the rest can stay smaller.
+  OPT ?= 3
+  HOT_OPT ?= $(OPT)
+  LTO ?= 1
+  OPT_FLAGS := -O$(OPT) -g $(if $(filter 1,$(LTO)),-flto=auto)
 endif
+HOT_SRC := src/gfx/gfx_rdp.c src/audio/audio_rsp.c 3ds/gfx_c3d.c
 
 ifeq ($(TARGET),3ds)
   ifeq ($(strip $(DEVKITARM)),)
@@ -133,16 +141,19 @@ define compile_rule
 $(call obj,$(1)): $(1)
 	@mkdir -p $$(dir $$@)
 	@echo "CC $(1)"
-	@$$(CC) $(2) -MMD -MP -c $$< -o $$@
+	@$$(CC) $(2) $$(FILE_FLAGS) -MMD -MP -c $$< -o $$@
 endef
 
 $(foreach f,$(GAME_SRC) $(LIBULTRA_SRC),$(eval $(call compile_rule,$(f),$$(GAME_CFLAGS))))
 $(foreach f,$(PORT_GAME_SRC),$(eval $(call compile_rule,$(f),$$(PORT_CFLAGS))))
 $(foreach f,$(PORT_SYS_SRC),$(eval $(call compile_rule,$(f),$$(SYS_CFLAGS))))
+ifneq ($(HOT_OPT),)
+$(foreach f,$(HOT_SRC),$(call obj,$(f))): FILE_FLAGS := -O$(HOT_OPT)
+endif
 
 $(EXE): $(ALL_OBJS)
 	@echo "LD $@"
-	@$(CC) $(LDFLAGS) $^ $(LIBS) -o $@
+	@$(CC) $(LDFLAGS) $(OPT_FLAGS) $(COMMON_FLAGS) $^ $(LIBS) -o $@
 
 -include 3ds/rules.mk
 
