@@ -52,6 +52,7 @@ static C3D_Tex sWhiteTex;
 extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
 static int sFrameStarted;
 static int sDepthOnly;
+static int sClearing; // draw_clear_rect is drawing
 static int sFrameCount, sFrameTriangles;
 /* For the hang report: the size of the last frame handed to the GPU. */
 static int sLastFrameTriangles;
@@ -1272,7 +1273,7 @@ static void apply_fog(const GfxDrawState *state) {
             sGpu.fogColor = color;
         }
     }
-    if (on != sFogOn) {
+    if (!sGpu.known || on != sFogOn) {
         C3D_FogGasMode(on ? GPU_FOG : GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
         sFogOn = on;
     }
@@ -1468,9 +1469,19 @@ static void set_scissor(const short rect[4]) {
  * are done.
  */
 
-/* Returns whether this is a blended draw after an unblended one, the case that showed the faults. */
+/*
+ * The log behind the character select screen came and went from frame to frame on a New 3DS (issue #25). It is the
+ * first draw after the screen clears, which are full screen draws with fog, depth and culling off, and the sky drawn
+ * after it would cover it wherever the GPU drew it without its depth settings. So the draw after a clear rectangle is treated like
+ * the first blended draw above: the command list is split before it and its settings are written twice.
+ * DKR_AFTER_CLEAR=0 leaves that out, for testing.
+ */
+#define KEY_CLEAR (1u << 19)
+
+/* Returns whether this is a blended draw after an unblended one, or the draw after a clear, the cases that showed the
+ * faults. */
 static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
-    static int sFlushMode = -1, sSplitMode = -1;
+    static int sFlushMode = -1, sSplitMode = -1, sAfterClear = -1;
     static unsigned int sLastKey = ~0u;
     unsigned int key;
     int split, first;
@@ -1483,14 +1494,17 @@ static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
         plat_log("framebuffer flush between draws: %s; command list split: %s",
                  sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always",
                  sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes");
+        env = plat_getenv("DKR_AFTER_CLEAR");
+        sAfterClear = env != NULL ? atoi(env) : 1;
     }
     key = state->blend | (state->alphaTest << 4) | (state->alphaRef << 8) | (state->depthTest << 16) |
-          (state->depthWrite << 17) | (sDepthOnly << 18);
+          (state->depthWrite << 17) | (sDepthOnly << 18) | (sClearing ? KEY_CLEAR : 0);
     if (sFlushMode == 2 || (sFlushMode == 1 && key != sLastKey)) {
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
     }
-    first = IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF);
+    first = (IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF)) ||
+            (sAfterClear && !sClearing && sLastKey != ~0u && (sLastKey & KEY_CLEAR));
     split = sSplitMode == 2 ? key != sLastKey : sSplitMode == 1 ? first : 0;
     if (split && sVboUsed > 0 && sDrainSplits < MAX_DRAIN_SPLITS &&
         (sDrainSplits < SMALL_DRAWS_ONLY || numTriangles <= 4)) {
@@ -1746,8 +1760,10 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
         v[i].a = rgba;
     }
     sDepthOnly = depthOnly;
+    sClearing = 1;
     gfxb_draw_triangles(&state, v, 2);
     sDepthOnly = 0;
+    sClearing = 0;
 }
 
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
