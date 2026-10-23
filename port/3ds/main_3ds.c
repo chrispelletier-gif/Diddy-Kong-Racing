@@ -12,6 +12,7 @@ void bugreport_start(void);
 void bugreport_clean_exit(void);
 void bugreport_watch_thread(const char *name);
 void plat_3ds_console_init(void);
+void plat_3ds_console_line(const char *text);
 void update_3ds_start(const char *selfPath);
 
 static volatile int sQuitRequested;
@@ -36,24 +37,38 @@ static void apt_hook(APT_HookType hook, void *param) {
     }
 }
 
-/* The game only uses the top screen; the bottom one shows the controls. */
+/*
+ * The game only uses the top screen; the bottom one shows the controls. Its lines are kept like status messages, so
+ * they come back when the Settings menu closes.
+ */
 static void show_bottom_screen_help(void) {
-    printf("\n  Diddy Kong Racing\n");
-    printf("  Native 3DS port of the decomp\n\n");
-    printf("  Circle Pad   Steer\n");
-    printf("  A            Accelerate\n");
-    printf("  B            Brake / reverse\n");
-    printf("  L / ZL       Use item (Z)\n");
-    printf("  R / ZR       Hop / drift\n");
-    printf("  X / Y        C-Up / C-Left\n");
-    printf("  C-Stick      C buttons\n");
-    printf("  SELECT       N64 L button\n");
-    printf("  START        Pause\n\n");
-    printf("  SELECT+touch Send a bug report\n\n");
-    printf("  Buttons below: send a bug report,\n");
-    printf("  start an unattended test run,\n");
-    printf("  install a newer build\n\n");
-    printf("  Saves: sdmc:/3ds/dkr/\n");
+    static const char *const sLines[] = {
+        "",
+        "Diddy Kong Racing",
+        "Native 3DS port of the decomp",
+        "",
+        "Circle Pad   Steer",
+        "A            Accelerate",
+        "B            Brake / reverse",
+        "L / ZL       Use item (Z)",
+        "R / ZR       Hop / drift",
+        "X / Y        C-Up / C-Left",
+        "C-Stick      C buttons",
+        "SELECT       N64 L button",
+        "START        Pause",
+        "",
+        "SELECT+touch Send a bug report",
+        "",
+        "Settings (below): anti-aliasing,",
+        "profiler, test runs, updates and",
+        "bug reports",
+        "",
+        "Saves: sdmc:/3ds/dkr/",
+    };
+    unsigned i;
+    for (i = 0; i < sizeof(sLines) / sizeof(sLines[0]); i++) {
+        plat_3ds_console_line(sLines[i]);
+    }
 }
 
 int plat_main_loop_iteration(void) {

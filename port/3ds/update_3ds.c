@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "menu_3ds.h"
 #include "net_3ds.h"
 #include "plat/plat.h"
 
@@ -36,17 +37,16 @@ void bugreport_watch_thread(const char *name);
 void bugreport_request(void);
 long port_autorun_enabled(void);
 void port_autorun_request(long start);
-int prof_user_enabled(void);
-void prof_set_user_enabled(int on);
 
 /*
- * The panel's buttons also start the other bottom screen actions: in the idle state they are "Bug rep." (the same
- * as SELECT + touch), "Test run" (port_autorun.c, after a confirmation), "Profiler" (turns the profiler readout on
- * or off; green while on) and "Updates". Touches anywhere else on the screen do nothing.
+ * The panel's buttons also lead to everything else on the bottom screen: in the idle state there is "Settings",
+ * which opens the Settings menu (menu_3ds.c: anti-aliasing, the profiler, the test run, updates and bug reports),
+ * and "Stop test" while a test run is on. Touches anywhere else on the screen do nothing unless the menu is open.
  */
 enum UpdateState {
-    STATE_IDLE,     /* Bug report / Test run / Profiler / Updates. */
-    STATE_CONFIRM,  /* Start or stop the test run / - / cancel. */
+    STATE_IDLE,     /* Settings (/ Stop test). */
+    STATE_MENU,     /* The menu is open: Close or Back / Prev / Next. */
+    STATE_CONFIRM,  /* Stop the test run / - / cancel. */
     STATE_BUSY,     /* Checking or downloading; taps are ignored. */
     STATE_CHOOSE,   /* master / newest / cancel. */
     STATE_INSTALLED /* "Quit to finish the update". */
@@ -73,7 +73,9 @@ typedef struct Config {
 static char sSelfPath[256];
 static volatile int sStarted;
 static volatile int sState;
-static volatile int sTappedButton = -1;
+static volatile int sTappedButton = -1; // Or TAP_MENU, at sTapX, sTapY.
+static volatile int sTapX, sTapY;
+#define TAP_MENU -2
 static LightEvent sTapEvent;
 static Channel sChannels[2] = { { "3ds-master", "master" }, { "3ds-newest", "newest" } };
 static int sChosen;
@@ -111,32 +113,31 @@ static void draw_text_button(const char *label) {
     draw_buttons(&label, 1);
 }
 
-static int sTestRunShown = -1; // Whether the idle buttons say "Stop test" (1) or "Test run" (0).
+static int sTestRunShown = -1; // Whether the idle buttons include "Stop test".
 
 static void draw_home(void) {
-    const char *labels[4];
+    static const char *const sRunning[2] = { "Settings", "Stop test" };
     sTestRunShown = port_autorun_enabled() != 0;
-    labels[0] = "Bug rep.";
-    labels[1] = sTestRunShown ? "Stop test" : "Test run";
-    labels[2] = prof_user_enabled() ? "+Profiler" : "Profiler";
-    labels[3] = "Updates";
-    draw_buttons(labels, 4);
+    if (sTestRunShown) {
+        draw_buttons(sRunning, 2);
+    } else {
+        draw_text_button("Settings");
+    }
 }
 
-/* Running: Stop test / - / cancel. Otherwise: Full test / Quick / AA bench / cancel (9 characters a button). */
+static void draw_menu_buttons(void) {
+    const char *labels[3];
+    labels[0] = menu_3ds_on_main_page() ? "Close" : "Back";
+    labels[1] = menu_3ds_can_scroll(-1) ? "Prev" : "-Prev";
+    labels[2] = menu_3ds_can_scroll(1) ? "Next" : "-Next";
+    draw_buttons(labels, 3);
+}
+
+/* Stop test / - / cancel. */
 static void draw_confirm(void) {
     static const char *const sRunning[3] = { "Stop test", "-", "cancel" };
-    static const char *const sStart[4] = { "Full test", "Quick", "AA bench", "cancel" };
-    if (sTestRunShown) {
-        draw_buttons(sRunning, 3);
-        plat_status("Stop the test run? The results so far are sent as a report.");
-    } else {
-        draw_buttons(sStart, 4);
-        plat_status("Full: the AI races every track with every character (some 8 hours), recording a profile of");
-        plat_status("each race and any crash. Quick: the 5 slowest tracks twice (20 min), compared with the last");
-        plat_status("quick test. AA bench: the heaviest races with anti-aliasing off and on (half an hour).");
-        plat_status("Saves aren't written meanwhile. Each starts from the title screen.");
-    }
+    draw_buttons(sRunning, 3);
+    plat_status("Stop the test run? The results so far are sent as a report.");
 }
 
 static void show_busy(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -577,8 +578,18 @@ static int install(Channel *channel) {
 /* The touch screen, from the game's controller polling (input_3ds.c). Returns nonzero if the touch was a button. */
 int update_3ds_touch(int x, int y) {
     int button, count = sButtonCount, cell = count > 1 ? 40 / count : 40;
-    if (!sStarted || y < BUTTON_TOP || y >= BUTTON_BOTTOM) {
+    if (!sStarted || y >= BUTTON_BOTTOM) {
         return 0;
+    }
+    if (y < BUTTON_TOP) {
+        if (sState != STATE_MENU) {
+            return 0;
+        }
+        sTapX = x;
+        sTapY = y;
+        sTappedButton = TAP_MENU;
+        LightEvent_Signal(&sTapEvent);
+        return 1;
     }
     // Columns: one wide button, or several, each a space then a block (8 pixels a character).
     button = sState == STATE_INSTALLED ? 0 : (x / 8) / cell;
@@ -595,50 +606,69 @@ static void update_thread(void *arg) {
     bugreport_watch_thread("update");
     for (;;) {
         int button;
-        // Every two seconds without a tap, the test run button is brought up to date (a run ends by itself).
+        // Every two seconds without a tap, the test run's buttons and rows are brought up to date (a run ends by
+        // itself).
         if (LightEvent_WaitTimeout(&sTapEvent, 2000000000LL) != 0) {
             if (sState == STATE_IDLE && sTestRunShown != (port_autorun_enabled() != 0)) {
                 draw_home();
+            } else if (sState == STATE_MENU) {
+                menu_3ds_refresh();
             }
             continue;
         }
         button = sTappedButton;
+        if (button == TAP_MENU && sState != STATE_MENU) {
+            continue; // The menu closed before this tap was seen.
+        }
         switch (sState) {
             case STATE_IDLE:
                 if (button == 0) {
-                    bugreport_request();
-                } else if (button == 1) {
+                    sState = STATE_MENU;
+                    menu_3ds_open();
+                    draw_menu_buttons();
+                } else {
                     sState = STATE_CONFIRM;
                     draw_confirm();
-                } else if (button == 2) {
-                    prof_set_user_enabled(!prof_user_enabled());
-                    draw_home();
+                }
+                break;
+            case STATE_MENU: {
+                int result = MENU_STAY;
+                if (button == TAP_MENU) {
+                    result = menu_3ds_tap(sTapX, sTapY);
+                } else if (button == 0) {
+                    result = menu_3ds_back() ? MENU_STAY : MENU_CLOSE;
                 } else {
+                    menu_3ds_scroll(button == 1 ? -1 : 1);
+                }
+                if (result == MENU_STAY) {
+                    draw_menu_buttons();
+                    break;
+                }
+                menu_3ds_close();
+                sState = STATE_IDLE;
+                if (result == MENU_BUGREPORT) {
+                    bugreport_request();
+                } else if (result == MENU_UPDATES) {
                     sState = STATE_BUSY;
                     if (check()) {
                         sState = STATE_CHOOSE;
                         draw_choices();
-                    } else {
-                        sState = STATE_IDLE;
-                        draw_home();
+                        break;
                     }
+                    sState = STATE_IDLE;
                 }
+                draw_home();
                 break;
+            }
             case STATE_CONFIRM:
-                if (sTestRunShown) {
-                    if (button == 1) {
-                        break; // The grey button.
-                    }
-                    if (button == 0) {
-                        port_autorun_request(0);
-                    }
-                } else if (button < 3) {
-                    // port_autorun_request: 1 the full run, 3 the quick test, 2 the anti-aliasing benchmark.
-                    static const long sRequests[3] = { 1, 3, 2 };
-                    port_autorun_request(sRequests[button]);
+                if (button == 1) {
+                    break; // The grey button.
                 }
-                // The run turns on or off at the game's next frame.
-                svcSleepThread(200 * 1000 * 1000);
+                if (button == 0) {
+                    port_autorun_request(0);
+                    // The run turns off at the game's next frame.
+                    svcSleepThread(200 * 1000 * 1000);
+                }
                 sState = STATE_IDLE;
                 draw_home();
                 break;

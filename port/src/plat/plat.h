@@ -127,7 +127,8 @@ void plat_overlay_show(const char *text);
 /* Sends the unattended test run's results as a GitHub issue, in the background, if bug reports are set up (3DS). */
 void plat_send_test_results(const char *title, const char *summary);
 /*
- * Anti-aliasing (the 3DS draws at twice the resolution and scales down): 1 on, 0 off, -1 back to what DKR_AA says.
+ * Anti-aliasing (the 3DS draws at twice the resolution and scales down): 1 on, 0 off, -1 back to the player's setting (the
+ * Settings menu, else DKR_AA).
  * The renderer switches between two frames. plat_antialias says whether the frames drawn now are anti-aliased (the
  * host build only remembers the setting).
  */

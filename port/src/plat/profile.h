@@ -44,7 +44,7 @@ enum ProfMark { PROF_MARK_LOOP_START, PROF_MARK_BUILT, PROF_MARK_WAITED, PROF_MA
 #define PROF_RATE_BUCKETS 7
 
 int prof_enabled(void);
-/* The bottom screen's Profiler button: on or off, remembered across launches. */
+/* The Settings menu's Profiler row on the bottom screen: on or off, remembered across launches. */
 int prof_user_enabled(void);
 void prof_set_user_enabled(int on);
 void prof_add(int stage, unsigned long long ns);
