@@ -9168,13 +9168,13 @@ s32 func_8001F460(Object *arg0, s32 arg1, Object *arg2) {
                 // clang-format on
             }
             if (obj64->unk3F == 0) {
-                arg0->trans.rotation.s[0] = catmull_rom_interpolation(spE0, var_s2, var_f20);
-                arg0->trans.rotation.s[1] = catmull_rom_interpolation(spCC, var_s2, var_f20);
-                arg0->trans.rotation.s[2] = catmull_rom_interpolation(spB8, var_s2, var_f20);
+                arg0->trans.rotation.s[0] = F2S16(catmull_rom_interpolation(spE0, var_s2, var_f20));
+                arg0->trans.rotation.s[1] = F2S16(catmull_rom_interpolation(spCC, var_s2, var_f20));
+                arg0->trans.rotation.s[2] = F2S16(catmull_rom_interpolation(spB8, var_s2, var_f20));
             } else {
-                arg0->trans.rotation.s[0] = lerp(spE0, var_s2, var_f20);
-                arg0->trans.rotation.s[1] = lerp(spCC, var_s2, var_f20);
-                arg0->trans.rotation.s[2] = lerp(spB8, var_s2, var_f20);
+                arg0->trans.rotation.s[0] = F2S16(lerp(spE0, var_s2, var_f20));
+                arg0->trans.rotation.s[1] = F2S16(lerp(spCC, var_s2, var_f20));
+                arg0->trans.rotation.s[2] = F2S16(lerp(spB8, var_s2, var_f20));
             }
             break;
     }

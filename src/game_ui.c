@@ -2215,7 +2215,7 @@ void hud_race_position(Object_Racer *racer, s32 updateRate) {
     }
     scale = (gCurrentHud->entry[HUD_RACE_POSITION].racePosition.scaleCounter + 129);
     scale *= 128.0f;
-    scale = sins_f(scale);
+    scale = sins_f(F2S16(scale));
     placeIndex = place - 1;
     gCurrentHud->entry[HUD_RACE_POSITION].scale =
         (gCurrentHud->entry[HUD_RACE_POSITION].racePosition.baseScale / 127.0f) + (1.0 + (0.5 * scale));
@@ -3067,7 +3067,7 @@ void hud_weapon(Object *obj, s32 updateRate) {
                 } else if (gHUDNumPlayers == ONE_PLAYER) {
                     gCurrentHud->entry[HUD_WEAPON_DISPLAY].scale +=
                         0.18 *
-                        sins_f(((f32) gCurrentHud->entry[HUD_WEAPON_DISPLAY].weaponDisplay.scale * 682.6583 * 4.0));
+                        sins_f(F2S16((f32) gCurrentHud->entry[HUD_WEAPON_DISPLAY].weaponDisplay.scale * 682.6583 * 4.0));
                 }
             }
             if (gHUDNumPlayers > ONE_PLAYER) {

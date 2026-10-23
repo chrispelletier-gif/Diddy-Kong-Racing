@@ -93,6 +93,14 @@
 #define COLOUR_SET_WORD(c, w) ((c).word = (w))
 #endif
 
+// Float to s16 for values that can be out of range, where the N64 kept the low 16 bits. A plain conversion of such a
+// value is undefined behaviour, which optimised port builds can turn into wild memory reads.
+#ifdef TARGET_PORT
+#define F2S16(x) ((s16) port_f2i32(x))
+#else
+#define F2S16(x) ((s16) (x))
+#endif
+
 // A few systems in the game use an array as a cache table. This gives you the asset ID
 #define ASSETCACHE_ID(x)    ((x << 1) + 0)
 // A few systems in the game use an array as a cache table. This gives you the pointer to the asset

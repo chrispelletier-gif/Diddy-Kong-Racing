@@ -2314,7 +2314,7 @@ f32 waves_get_y(s32 blockID, s32 arg1, s32 arg2) {
                     } else {
                         var_s0 += (s32) (dist * gen->unk20);
                     }
-                    diffX = coss_f((dist * 65536.0f) / gen->radius);
+                    diffX = coss_f(F2S16((dist * 65536.0f) / gen->radius));
                     y += gen->unk24 * sins_f(var_s0) * diffX;
                 }
             }
