@@ -107,7 +107,16 @@ void plat_log_copy_to(const char *path);
 enum { PLAT_3DS_PARKED_GPU_IDLE = 1, PLAT_3DS_PARKED_GPU_BUSY = 2 };
 void plat_3ds_quit_point(int parkedState);
 void plat_3ds_pause_renderer(int pause);
+/* Keeps the console awake when the lid closes while held (counted: each hold needs a release). */
+void plat_3ds_hold_sleep(int hold);
 void plat_3ds_exit(void) __attribute__((noreturn));
+
+/*
+ * Pauses the game as if START was pressed (3DS: when the HOME menu opens or the lid closes). The request is set from
+ * the system's thread and taken once by the game thread at the start of its next frame.
+ */
+void plat_request_game_pause(void);
+int plat_take_game_pause(void);
 
 /* Set when the player asks for a snapshot of the next frame (3DS: by touching the bottom screen). */
 extern volatile int gPlatSnapshotRequested;
