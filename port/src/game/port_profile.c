@@ -3,7 +3,7 @@
  *
  *   DKR_PROFILE=1   Shows the profiler on the bottom screen (updated every second) and logs a summary line every
  *                   few seconds. The unattended test run (DKR_AUTORUN) turns it on as well, and so does the
- *                   bottom screen's "Profiler" button, which is remembered in profiler.txt in the data directory.
+ *                   Settings menu's Profiler row on the bottom screen, which is remembered in profiler.txt in the data directory.
  * While it is off, every hook returns after one check.
  *
  * Each stage has exactly one writer thread, which keeps a running total in microseconds; readers take the difference
@@ -66,7 +66,7 @@ static void user_file_path(char *path, s32 size) {
     plat_snprintf(path, size, "%s/" USER_FILE, plat_data_dir());
 }
 
-/* On with DKR_PROFILE, the Profiler button, and during the unattended test run (which can start and stop at any time). */
+/* On with DKR_PROFILE, the Settings menu's Profiler row, and during the unattended test run (which can start and stop at any time). */
 int prof_enabled(void) {
     if (sEnabled < 0) {
         char path[256];
