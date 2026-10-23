@@ -62,8 +62,8 @@
 #define MAX_RACES 1024
 #define MAX_TRACKS 64
 #define FINISH_LINGER_SECONDS 8 // After the finish line: the post-race camera and results, then on to the next.
-#define UNSTICK_SECONDS 10      // No checkpoint passed for this long: the kart is put at the next checkpoint.
-#define STUCK_SECONDS 60        // No checkpoint passed for this long (even so) counts as stuck.
+#define UNSTICK_SECONDS 10      // No new checkpoint passed for this long: the kart is put at the next checkpoint.
+#define STUCK_SECONDS 60        // No new checkpoint passed for this long (even so) counts as stuck.
 #define STATE_FILE "autorun_state.txt"
 #define RESULTS_FILE "autorun_results.csv"
 #define PROBLEMS_FILE "autorun_problems.txt"
@@ -137,8 +137,10 @@ static s32 sTitleFrames;
 static unsigned long long sPhaseStartNs;
 static unsigned long long sLoadNs;
 static s32 sRaceRetraces;  // Game time while racing, in 60ths of a second.
-static s32 sStuckRetraces; // Game time since the kart last reached a new checkpoint.
-static s32 sLastProgress;
+static s32 sStuckRetraces; // Game time since the kart last got further than ever along the course.
+// The most checkpoints passed this race. A kart that goes back past a checkpoint loses one, so a kart circling over
+// a checkpoint passes it again and again without getting anywhere: only a new best counts as progress.
+static s32 sBestProgress;
 static s32 sUnsticks;      // Times this race the kart was put at the next checkpoint.
 static char sUnstuckAt[64]; // Where, as "lap:checkpoint" pairs.
 static s32 sLingerRetraces;
@@ -705,7 +707,7 @@ s32 port_autorun_title(void) {
     set_phase(PHASE_LOADING);
     sRaceRetraces = 0;
     sStuckRetraces = 0;
-    sLastProgress = -1;
+    sBestProgress = -0x10000;
     sUnsticks = 0;
     sUnstuckAt[0] = '\0';
     sLingerRetraces = 0;
@@ -1166,9 +1168,9 @@ void port_autorun_frame(s32 updateRate) {
                 break;
             }
             sRaceRetraces += updateRate;
-            progress = racer->lap * 256 + racer->nextCheckpoint;
-            if (progress != sLastProgress) {
-                sLastProgress = progress;
+            progress = racer->courseCheckpoint;
+            if (progress > sBestProgress) {
+                sBestProgress = progress;
                 sStuckRetraces = 0;
             } else {
                 sStuckRetraces += updateRate;
