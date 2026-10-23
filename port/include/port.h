@@ -59,9 +59,20 @@ void port_swap16_array(void *ptr, s32 count);
 void port_swap32_array(void *ptr, s32 count);
 
 /* ROM access (port/src/os/os_pi.c). */
-/* Results of port_rom_load. */
-enum { PORT_ROM_OK = 1, PORT_ROM_NOT_FOUND = 0, PORT_ROM_NOT_N64 = -1, PORT_ROM_NOT_DKR = -2, PORT_ROM_WRONG_VERSION = -3 };
+/* Results of port_rom_load, the failures from least to most telling (the lowest one seen is reported). */
+enum {
+    PORT_ROM_OK = 1,
+    PORT_ROM_NOT_FOUND = 0,
+    PORT_ROM_NOT_N64 = -1,
+    PORT_ROM_NOT_DKR = -2,
+    PORT_ROM_WRONG_VERSION = -3,
+    PORT_ROM_DAMAGED = -4
+};
 s32 port_rom_load(const char *path);
+/* Why port_rom_load last turned a ROM down, as a sentence naming the file. */
+const char *port_rom_problem(void);
+/* The release this build plays, such as "US 1.0". */
+const char *port_rom_supported_release(void);
 const u8 *port_rom_data(void);
 u32 port_rom_size(void);
 void port_rom_read(u32 romOffset, void *dst, u32 size);

@@ -143,8 +143,12 @@ static void to_screen(const GfxVertex *v, C3DVertex *out) {
 /*
  * GPU self test, for finding what hangs a real 3DS when an emulator copes. Before the game starts, a few frames are
  * drawn that each add one feature of the renderer to the one before, and the bottom screen says which one never
- * finished. Skipped with DKR_NO_GPU_TEST=1.
+ * finished. Once it has passed, gpu_test.txt in the data directory remembers that and later starts skip it, until
+ * GPU_SELF_TEST_VERSION changes. DKR_GPU_TEST=1 runs it anyway and DKR_NO_GPU_TEST=1 never runs it.
  */
+
+// Bump when the self test, the vertex format or the shader changes, so that the test runs again once.
+#define GPU_SELF_TEST_VERSION 1
 static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
 static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
@@ -192,6 +196,29 @@ static void gpu_test_end(const char *what) {
     gpu_test_wait(what);
 }
 
+static void gpu_test_marker_path(char *out, size_t size) {
+    snprintf(out, size, "%s/gpu_test.txt", plat_data_dir());
+}
+
+static int gpu_test_passed_before(void) {
+    char path[256], text[32];
+    int got;
+    gpu_test_marker_path(path, sizeof(path));
+    got = plat_load_file_start(path, text, sizeof(text) - 1);
+    if (got <= 0) {
+        return 0;
+    }
+    text[got] = '\0';
+    return strncmp(text, "passed ", 7) == 0 && atoi(text + 7) == GPU_SELF_TEST_VERSION;
+}
+
+static void gpu_test_mark_passed(void) {
+    char path[256], text[32];
+    gpu_test_marker_path(path, sizeof(path));
+    snprintf(text, sizeof(text), "passed %d\n", GPU_SELF_TEST_VERSION);
+    plat_save_file(path, text, strlen(text));
+}
+
 static void gpu_self_test(void) {
     static const char *const sNames[] = {
         "empty frame",
@@ -209,6 +236,10 @@ static void gpu_self_test(void) {
     int i;
 
     if (plat_getenv("DKR_NO_GPU_TEST") != NULL) {
+        return;
+    }
+    if (plat_getenv("DKR_GPU_TEST") == NULL && gpu_test_passed_before()) {
+        plat_log("GPU test skipped: passed before (gpu_test.txt)");
         return;
     }
     plat_status("GPU test...");
@@ -301,6 +332,7 @@ static void gpu_self_test(void) {
     gpu_test_end(sNames[8]);
 
     plat_status("GPU test passed");
+    gpu_test_mark_passed();
 }
 
 /* The render target for the top screen. The doubled one needs 3MB of VRAM, so fall back if it does not fit. */
