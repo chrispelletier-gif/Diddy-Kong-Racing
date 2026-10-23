@@ -348,6 +348,10 @@ static u32 frame_hash(const u8 *data, u32 size) {
     return h->hash;
 }
 
+static inline u32 cycle_type(void) {
+    return g.omH & (3 << G_MDSFT_CYCLETYPE);
+}
+
 /* Returns the texture for the given tile, decoding it if it isn't in the cache. */
 static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     Tile *tile = &g.tiles[tileIndex & 7];
@@ -400,7 +404,9 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     if (tlut != NULL) {
         hash ^= frame_hash(tlut, (tile->siz == G_IM_SIZ_4b) ? 32 : 512) * 31;
     }
-    filter = ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT) ? GFX_FILTER_POINT : GFX_FILTER_BILINEAR;
+    // Copy mode never filters.
+    filter = ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT || cycle_type() == G_CYC_COPY) ? GFX_FILTER_POINT
+                                                                                            : GFX_FILTER_BILINEAR;
     tlutType = (tlut != NULL) ? (g.omH >> G_MDSFT_TEXTLUT) & 3 : 0;
     wrapS = wrap_mode(tile->cms, tile->masks);
     wrapT = wrap_mode(tile->cmt, tile->maskt);
@@ -485,7 +491,14 @@ typedef struct TexAxis {
     s32 divide;
 } TexAxis;
 
-static void tex_axis_init(TexAxis *a, u8 shift, u16 tileStart, u32 size) {
+/* The RDP's bilinear filter puts texel centres on whole texture coordinates, while GPUs (and the software renderer)
+ * put them half a texel further on, so filtered textures are moved by that half texel to land where the N64 draws them.
+ * Point sampled ones line up already. */
+static inline float texel_centre_shift(const GfxTexture *tex) {
+    return (tex->filter == GFX_FILTER_BILINEAR) ? 0.5f : 0.0f;
+}
+
+static void tex_axis_init(TexAxis *a, u8 shift, u16 tileStart, u32 size, float centreShift) {
     float scale = 1.0f / 32.0f;
     if (shift > 10) {
         scale *= (float) (1 << (16 - shift));
@@ -493,7 +506,7 @@ static void tex_axis_init(TexAxis *a, u8 shift, u16 tileStart, u32 size) {
         scale /= (float) (1 << shift);
     }
     a->scale = scale;
-    a->offset = tileStart * 0.25f;
+    a->offset = tileStart * 0.25f - centreShift;
     a->size = (float) size;
     a->divide = (size & (size - 1)) != 0;
     a->invSize = 1.0f / (float) size;
@@ -570,8 +583,14 @@ static void decode_combiner(void) {
     }
 }
 
-static inline u32 cycle_type(void) {
-    return g.omH & (3 << G_MDSFT_CYCLETYPE);
+/* The scissor's right edge for rectangles: exclusive, except in fill and copy modes, where the RDP also draws the
+ * column at the edge. */
+static inline s32 scissor_right(u32 cyc) {
+    s32 right = g.scissor[2];
+    if ((cyc == G_CYC_FILL || cyc == G_CYC_COPY) && right < GFX_SCREEN_WIDTH) {
+        right++;
+    }
+    return right;
 }
 
 /* Builds the draw state for the current RSP/RDP state. */
@@ -671,6 +690,9 @@ static void build_draw_state(GfxDrawState *s, s32 isRect) {
     }
     for (i = 0; i < 4; i++) {
         s->scissor[i] = g.scissor[i];
+    }
+    if (isRect) {
+        s->scissor[2] = scissor_right(cyc);
     }
 
     if (usesTex0 || cyc == G_CYC_COPY) {
@@ -862,12 +884,14 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     tex0 = state.textures[0] != NULL;
     tex1 = state.textures[1] != NULL;
     if (tex0) {
-        tex_axis_init(&u0, tile0->shifts, tile0->uls, (u32) w0);
-        tex_axis_init(&v0, tile0->shiftt, tile0->ult, (u32) h0);
+        float shift = texel_centre_shift(state.textures[0]);
+        tex_axis_init(&u0, tile0->shifts, tile0->uls, (u32) w0, shift);
+        tex_axis_init(&v0, tile0->shiftt, tile0->ult, (u32) h0, shift);
     }
     if (tex1) {
-        tex_axis_init(&u1, tile1->shifts, tile1->uls, (u32) w1);
-        tex_axis_init(&v1, tile1->shiftt, tile1->ult, (u32) h1);
+        float shift = texel_centre_shift(state.textures[1]);
+        tex_axis_init(&u1, tile1->shifts, tile1->uls, (u32) w1, shift);
+        tex_axis_init(&v1, tile1->shiftt, tile1->ult, (u32) h1, shift);
     }
     for (i = 0; i < count; i++) {
         const Triangle *t = &tris[i];
@@ -920,7 +944,7 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
     GfxVertex corners[4];
     GfxVertex *out;
     s32 i;
-    float w0 = 1.0f, h0 = 1.0f, w1 = 1.0f, h1 = 1.0f;
+    float w0 = 1.0f, h0 = 1.0f, w1 = 1.0f, h1 = 1.0f, shift0 = 0.0f, shift1 = 0.0f;
     Tile *tile = &g.tiles[g.rdpHalf1 & 7];
     Tile *tile1 = &g.tiles[(g.rdpHalf1 + 1) & 7];
 
@@ -932,10 +956,12 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
     if (state.textures[0] != NULL) {
         w0 = state.textures[0]->width;
         h0 = state.textures[0]->height;
+        shift0 = texel_centre_shift(state.textures[0]);
     }
     if (state.textures[1] != NULL) {
         w1 = state.textures[1]->width;
         h1 = state.textures[1]->height;
+        shift1 = texel_centre_shift(state.textures[1]);
     }
     screen_to_clip(&corners[0], x0, y0);
     screen_to_clip(&corners[1], x1, y0);
@@ -948,10 +974,10 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
             s = (i & 2) ? s1 : s0;
             t = (i & 1) ? t1 : t0;
         }
-        corners[i].u0 = (s - tile->uls * 0.25f) / w0;
-        corners[i].v0 = (t - tile->ult * 0.25f) / h0;
-        corners[i].u1 = (s - tile1->uls * 0.25f) / w1;
-        corners[i].v1 = (t - tile1->ult * 0.25f) / h1;
+        corners[i].u0 = (s - tile->uls * 0.25f + shift0) / w0;
+        corners[i].v0 = (t - tile->ult * 0.25f + shift0) / h0;
+        corners[i].u1 = (s - tile1->uls * 0.25f + shift1) / w1;
+        corners[i].v1 = (t - tile1->ult * 0.25f + shift1) / h1;
         corners[i].r = corners[i].g = corners[i].b = corners[i].a = 255;
     }
     state.cullMode = 0;
@@ -1009,10 +1035,11 @@ static void fill_rectangle(u32 w0, u32 w1) {
     rect[1] = uly;
     rect[2] = lrx;
     rect[3] = lry;
-    // Clip to the scissor.
+    // Clip to the scissor. In fill and copy modes the RDP includes the scissor's right edge column, and DKR relies on
+    // that: it clears the screen with the scissor at 319, then draws the scene with it at 320.
     if (rect[0] < g.scissor[0]) rect[0] = g.scissor[0];
     if (rect[1] < g.scissor[1]) rect[1] = g.scissor[1];
-    if (rect[2] > g.scissor[2]) rect[2] = g.scissor[2];
+    if (rect[2] > scissor_right(cyc)) rect[2] = scissor_right(cyc);
     if (rect[3] > g.scissor[3]) rect[3] = g.scissor[3];
     if (rect[2] <= rect[0] || rect[3] <= rect[1]) {
         return;

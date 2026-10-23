@@ -310,6 +310,11 @@ It plays a few scripted scenarios (the intro and title, a spread of levels throu
 from the complete save) on both builds, and writes `report.md` and side by side images (base, head, difference) of
 every frame that differs.
 
+`port/tools/n64_compare/` checks the renderer against a real N64 instead: an accurate emulator (ares, running the
+game's own F3DDKR microcode on its emulated RSP and paraLLEl-RDP for the RDP) plays the ROM and saves chosen frames'
+display lists with the pictures it drew from them, and the port's renderer replays the same display lists, so both
+sides draw exactly the same frame. See its README for how to run it and what it found.
+
 ### CI
 
 `.github/workflows/Port.yml` runs on every push: it builds `dkr.3dsx` and the host build (both are uploaded as
