@@ -693,15 +693,19 @@ static void draw_home(const State *s) {
     }
 }
 
-/* A value of "On" or "Off" is shown with the game's ON and OFF labels, the chosen one lit. */
+/*
+ * A value of "On" or "Off" is shown as a switch with the game's labels: ON lit, or OFF dim (both side by side, the
+ * chosen one lit, read the wrong way round: OFF looked brighter when off).
+ */
 static int draw_on_off(const char *value, int x, int y) {
     int on = strcmp(value, "On") == 0;
-    if ((!on && strcmp(value, "Off") != 0) || sOnOff[0][0].rgba == NULL || sOnOff[0][1].rgba == NULL ||
-        sOnOff[1][0].rgba == NULL || sOnOff[1][1].rgba == NULL) {
+    // Of the game's two versions of each label, the one with white letters is the brighter one; OFF gets the other,
+    // greyed.
+    const Picture *label = on ? &sOnOff[0][0] : &sOnOff[1][1];
+    if ((!on && strcmp(value, "Off") != 0) || label->rgba == NULL) {
         return 0;
     }
-    picture(&sOnOff[0][on], x, y);
-    picture(&sOnOff[1][!on], x + sOnOff[0][on].width + 6, y);
+    picture_part(label, 0, 0, label->width, label->height, x, y, on ? WHITE : (Colour) { 150, 150, 160, 255 });
     return 1;
 }
 
@@ -740,10 +744,10 @@ static void draw_menu(const State *s) {
         // The label, with its hint under it, or alone in the middle of the row.
         text_clipped(FONT_SMALL, 12, row->hint[0] != '\0' ? y + 2 : y + 7, row->label, WHITE, 1, BS_MENU_VALUE_X);
         text_clipped(FONT_SMALL, 12, y + 12, row->hint, HINT, 1,
-                     row->value[0] == '\0' ? BS_WIDTH - 24 : onOff ? 204 : BS_MENU_VALUE_X + 4);
+                     row->value[0] == '\0' ? BS_WIDTH - 24 : onOff ? BS_WIDTH - 52 : BS_MENU_VALUE_X + 4);
         if (row->value[0] == '\0') {
             arrow(0, BS_WIDTH - 22, y + 6);
-        } else if (!draw_on_off(row->value, 206, y + 3)) {
+        } else if (!draw_on_off(row->value, BS_WIDTH - 12 - 36, y + 3)) {
             arrow(1, BS_MENU_VALUE_X + 6, y + 6);
             arrow(0, BS_WIDTH - 22, y + 6);
             text_centred(FONT_SMALL, BS_MENU_VALUE_X + 16, BS_WIDTH - 24, y + 7, row->value, YELLOW, 1);
