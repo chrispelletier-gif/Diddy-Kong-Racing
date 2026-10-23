@@ -1,5 +1,6 @@
 /* Nintendo 3DS (libctru) implementation of the platform layer. */
 #include "plat.h"
+#include "bottom_screen.h"
 
 #include <3ds.h>
 #include <malloc.h>
@@ -472,175 +473,167 @@ void plat_log(const char *fmt, ...) {
 #endif
 }
 
-/* Makes what the console wrote visible: nothing else flushes the bottom screen's framebuffer from the CPU cache. */
-static void console_flush(void) {
+/*
+ * The bottom screen (bottom_screen.c draws it): the logo, the controls and the newest status messages, or the Settings
+ * menu (menu_3ds.c) while it is open; under them the buttons (update_3ds.c) and the watchdog's two lines. The calls
+ * here change what it shows; a thread of its own draws the changed areas into sImage and copies them to the screen,
+ * so the game's threads never wait for the drawing. Until that thread starts (plat_rom_loaded), the caller draws.
+ */
+static u16 sImage[BS_WIDTH * BS_HEIGHT];
+static LightEvent sScreenEvent;
+static volatile int sScreenThreadStarted;
+
+/* Copies rows of the image to the framebuffer, which is the screen turned on its side (the console lock is held). */
+static void screen_copy(int first, int end) {
     u16 width, height;
-    u8 *fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &width, &height);
+    u16 *fb = (u16 *) gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &width, &height);
+    int x, y;
+    for (x = 0; x < BS_WIDTH; x++) {
+        u16 *column = fb + x * 240 + 239;
+        for (y = first; y < end; y++) {
+            column[-y] = sImage[y * BS_WIDTH + x];
+        }
+    }
+    // Nothing else flushes the bottom screen's framebuffer from the CPU cache.
     GSPGPU_FlushDataCache(fb, width * height * 2);
 }
 
+/* Draws what changed. Only one thread at a time: the screen's own, or before it starts the caller (lock held). */
+static void screen_draw(unsigned changes) {
+    int area;
+    for (area = 0; area < BS_AREA_COUNT; area++) {
+        if (changes & (1 << area)) {
+            int first, end;
+            bs_draw(sImage, area);
+            bs_area_rows(area, &first, &end);
+            screen_copy(first, end);
+        }
+    }
+}
+
+/* After a change (the console lock is held). */
+static void screen_changed(void) {
+    if (sScreenThreadStarted) {
+        LightEvent_Signal(&sScreenEvent);
+    } else {
+        screen_draw(bs_take_changes());
+    }
+}
+
+static void screen_thread(void *arg) {
+    (void) arg;
+    bugreport_watch_thread("screen");
+    for (;;) {
+        unsigned changes;
+        LightEvent_Wait(&sScreenEvent);
+        LightLock_Lock(&sConsoleLock);
+        changes = bs_take_changes();
+        LightLock_Unlock(&sConsoleLock);
+        // Drawn without the lock, from the copy taken; only the copy to the screen holds it (see plat_3ds_exit).
+        if (changes != 0) {
+            int area;
+            for (area = 0; area < BS_AREA_COUNT; area++) {
+                if (changes & (1 << area)) {
+                    int first, end;
+                    bs_draw(sImage, area);
+                    bs_area_rows(area, &first, &end);
+                    LightLock_Lock(&sConsoleLock);
+                    screen_copy(first, end);
+                    LightLock_Unlock(&sConsoleLock);
+                }
+            }
+        }
+    }
+}
+
 /*
- * The bottom screen: the start-up lines and status messages scroll in its top 25 rows; below them is a fixed panel of
- * 5 rows (screen rows 26-30): the buttons (update_3ds.c) and the watchdog's two lines. Both are consoles on the same
- * framebuffer, each with its own window. The Settings menu (menu_3ds.c) covers the top 25 rows while it is open; the
- * lines that scroll there are remembered, and shown again when it closes.
+ * The drawing thread runs at a low priority next to the renderer (on its core on a New 3DS, which waits on the GPU
+ * much of the time), so the screen is only drawn when nothing else needs that core.
  */
-static PrintConsole sMainConsole, sPanelConsole, sMenuConsole;
+static void screen_thread_start(int core) {
+    LightLock_Lock(&sConsoleLock);
+    LightEvent_Init(&sScreenEvent, RESET_ONESHOT);
+    if (threadCreate(screen_thread, NULL, 16 * 1024, 0x3E, core, true) != NULL) {
+        sScreenThreadStarted = 1;
+        LightEvent_Signal(&sScreenEvent);
+    } else {
+        plat_log("bottom screen: could not create its thread");
+    }
+    LightLock_Unlock(&sConsoleLock);
+}
 
-#define MAIN_ROWS 25
-#define RECENT_LINES MAIN_ROWS
-static char sRecentLines[RECENT_LINES][160];
-static int sRecentNext;
-static int sMenuShown;
-
-/* First thing in main: the help text is printed before plat_init. */
+/* First thing in main, before plat_init. */
 void plat_3ds_console_init(void) {
     LightLock_Init(&sConsoleLock);
-    consoleInit(GFX_BOTTOM, &sMainConsole);
-    sPanelConsole = sMainConsole;
-    sMenuConsole = sMainConsole;
-    consoleSetWindow(&sMainConsole, 1, 1, 40, MAIN_ROWS);
-    consoleSetWindow(&sPanelConsole, 1, 26, 40, 5);
-    consoleSetWindow(&sMenuConsole, 1, 1, 40, MAIN_ROWS);
-    consoleSelect(&sMainConsole);
-}
-
-/* Replaces row (1-5) of the panel; text must fit on the row (escape sequences aside). */
-void plat_3ds_panel_print(int row, const char *text) {
+    gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
+    gfxSetDoubleBuffering(GFX_BOTTOM, false);
+    gfxSwapBuffersGpu();
+    gspWaitForVBlank();
     LightLock_Lock(&sConsoleLock);
-    consoleSelect(&sPanelConsole);
-    printf("\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row, text);
-    consoleSelect(&sMainConsole);
-    console_flush();
-    LightLock_Unlock(&sConsoleLock);
-}
-
-/* Replaces row (1-25) of the menu while it is shown, like plat_3ds_panel_print. */
-void plat_3ds_menu_print(int row, const char *text) {
-    LightLock_Lock(&sConsoleLock);
-    if (sMenuShown) {
-        consoleSelect(&sMenuConsole);
-        printf("\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row, text);
-        consoleSelect(&sMainConsole);
-        console_flush();
-    }
+    bs_init(consoleGetDefault()->font.gfx);
+    screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
 
 /*
- * The profiler (plat_overlay_show) takes screen rows 14-25 while it is on, and the start-up lines and status messages
- * scroll in rows 1-13 instead.
+ * The ROM is loaded (port_boot, before the game's threads start): the screen gets the game's fonts and pictures, and
+ * from now on its own thread draws it.
  */
-#define OVERLAY_ROW 14
-#define OVERLAY_ROWS 12
-static PrintConsole sOverlayConsole;
-static int sOverlayShown;
-static char sOverlayText[OVERLAY_ROWS * 48]; // The last readout, drawn when the menu closes.
-
-/* Draws the readout (the console lock is held). */
-static void overlay_draw(const char *text) {
-    int row = 0, clear = text[0] == '\0';
-    if (!sOverlayShown && !clear) {
-        sOverlayShown = 1;
-        sOverlayConsole = sMainConsole;
-        consoleSetWindow(&sOverlayConsole, 1, OVERLAY_ROW, 40, OVERLAY_ROWS);
-        consoleSetWindow(&sMainConsole, 1, 1, 40, OVERLAY_ROW - 1);
-        consoleSelect(&sMainConsole);
-        printf("\x1b[%d;1H", OVERLAY_ROW - 1); // Carry on at the bottom of the smaller window.
-    }
-    if (sOverlayShown) {
-        consoleSelect(&sOverlayConsole);
-        // One row per line (the caller keeps each line to 39 visible characters); the first row is yellow.
-        while (row < OVERLAY_ROWS && *text != '\0') {
-            const char *end = strchr(text, '\n');
-            int length = end != NULL ? (int) (end - text) : (int) strlen(text);
-            printf("\x1b[%d;1H\x1b[0m\x1b[2K%s%.*s\x1b[0m", row + 1, row == 0 ? "\x1b[33m" : "", length, text);
-            text += length + (end != NULL);
-            row++;
-        }
-        for (; row < OVERLAY_ROWS; row++) {
-            printf("\x1b[%d;1H\x1b[0m\x1b[2K", row + 1);
-        }
-        consoleSelect(&sMainConsole);
-        if (clear) {
-            // Gone: the status messages get the whole area back.
-            sOverlayShown = 0;
-            consoleSetWindow(&sMainConsole, 1, 1, 40, MAIN_ROWS);
-            printf("\x1b[%d;1H", OVERLAY_ROW - 1);
-        }
-    }
+void plat_rom_loaded(void) {
+    LightLock_Lock(&sConsoleLock);
+    bs_load_assets();
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+    screen_thread_start(sRcpCore);
 }
 
+/* The buttons (see bs_set_buttons). */
+void plat_3ds_set_buttons(const char *const *labels, int count) {
+    LightLock_Lock(&sConsoleLock);
+    bs_set_buttons(labels, count);
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+}
+
+/* A line of text in place of the buttons. */
+void plat_3ds_panel_text(const char *text) {
+    LightLock_Lock(&sConsoleLock);
+    bs_set_panel_text(text);
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+}
+
+/* The Settings menu's page, or NULL when it closes. */
+void plat_3ds_menu_draw(const BsMenu *menu) {
+    LightLock_Lock(&sConsoleLock);
+    bs_show_menu(menu);
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+}
+
+/* The profiler's readout, under the messages. */
 void plat_overlay_show(const char *text) {
     LightLock_Lock(&sConsoleLock);
-    snprintf(sOverlayText, sizeof(sOverlayText), "%s", text);
-    if (!sMenuShown) {
-        overlay_draw(text);
-        console_flush();
-    }
+    bs_set_overlay(text);
+    screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
 
-/* Prints a line in the scrolling area, or remembers it while the menu covers that (the console lock is held). */
-static void main_line(const char *text) {
-    snprintf(sRecentLines[sRecentNext], sizeof(sRecentLines[0]), "%s", text);
-    sRecentNext = (sRecentNext + 1) % RECENT_LINES;
-    if (!sMenuShown) {
-        printf("  %s\n", text);
-    } else {
-        // The menu's last row shows the newest message.
-        consoleSelect(&sMenuConsole);
-        printf("\x1b[%d;1H\x1b[0m\x1b[2K\x1b[33m%.39s\x1b[0m", MAIN_ROWS, text);
-        consoleSelect(&sMainConsole);
-    }
-    console_flush();
-}
-
-/* The help text on the bottom screen: shown like a status message, but not logged. */
+/* A line among the status messages that is not logged (the bug report's question at start). */
 void plat_3ds_console_line(const char *text) {
     LightLock_Lock(&sConsoleLock);
-    main_line(text);
+    bs_add_message(text);
+    screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
 
-/*
- * The Settings menu opens (1) over the scrolling area, or closes (0): the area is cleared and its recent lines and
- * the profiler readout come back.
- */
-void plat_3ds_menu_show(int show) {
-    int i;
+void plat_3ds_console_clear(void) {
     LightLock_Lock(&sConsoleLock);
-    if (show != sMenuShown) {
-        sMenuShown = show;
-        if (show) {
-            consoleSelect(&sMenuConsole);
-            printf("\x1b[0m\x1b[2J");
-        } else {
-            int rows = MAIN_ROWS;
-            consoleSelect(&sMainConsole);
-            if (sOverlayShown) {
-                sOverlayShown = 0;
-                consoleSetWindow(&sMainConsole, 1, 1, 40, MAIN_ROWS);
-            }
-            printf("\x1b[0m\x1b[2J");
-            if (sOverlayText[0] != '\0') {
-                overlay_draw(sOverlayText);
-                rows = OVERLAY_ROW - 1;
-            }
-            printf("\x1b[1;1H");
-            for (i = RECENT_LINES - rows + 1; i < RECENT_LINES; i++) {
-                const char *line = sRecentLines[(sRecentNext + i) % RECENT_LINES];
-                // Wrapped lines take more rows than this counts; the oldest scroll away, as they would have.
-                printf("  %s\n", line);
-            }
-        }
-        consoleSelect(&sMainConsole);
-        console_flush();
-    }
+    bs_clear_messages();
+    screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
 
-/* The bottom screen console is the current one (see main_3ds.c). */
 void plat_status(const char *fmt, ...) {
     char buffer[256];
     va_list args;
@@ -648,8 +641,14 @@ void plat_status(const char *fmt, ...) {
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     log_line("", buffer);
+    plat_3ds_console_line(buffer);
+}
+
+static void status_lines(const char *first, const char *second) {
     LightLock_Lock(&sConsoleLock);
-    main_line(buffer);
+    bs_set_status_line(0, first);
+    bs_set_status_line(1, second);
+    screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
 
@@ -725,10 +724,9 @@ static void watchdog(void *arg) {
         check_for_hang(now[PLAT_COUNTER_GFX_DONE] != last[PLAT_COUNTER_GFX_DONE], &stalledSeconds, &hangWritten);
         memcpy(last, now, sizeof(last));
 
-        // The last two rows of the panel, cut to fit.
+        // The status lines at the bottom of the screen, cut to fit.
         line[0][39] = line[1][39] = '\0';
-        plat_3ds_panel_print(4, line[0]);
-        plat_3ds_panel_print(5, line[1]);
+        status_lines(line[0], line[1]);
 
         if (seconds % 5 == 0 && seconds <= 60) {
             log_line("watchdog: ", line[0]);

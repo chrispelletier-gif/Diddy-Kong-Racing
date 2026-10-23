@@ -118,6 +118,17 @@ void plat_3ds_exit(void) __attribute__((noreturn));
 void plat_request_game_pause(void);
 int plat_take_game_pause(void);
 
+/*
+ * The game's own menu sounds for taps on the 3DS bottom screen's menu: requested from that screen's thread, played by
+ * the game thread at the start of its next frame (thread3_main.c).
+ */
+enum { PLAT_UI_SOUND_NONE, PLAT_UI_SOUND_SELECT, PLAT_UI_SOUND_MOVE, PLAT_UI_SOUND_BACK };
+void plat_request_ui_sound(int sound);
+int plat_take_ui_sound(void);
+
+/* Called once the ROM is loaded, before the game starts (the 3DS bottom screen reads its fonts and pictures). */
+void plat_rom_loaded(void);
+
 /* Set when the player asks for a snapshot of the next frame (3DS: by touching the bottom screen). */
 extern volatile int gPlatSnapshotRequested;
 /* The frame number of the last snapshot saved (its files are diff_NNNNN_*), or 0 before the first one. */

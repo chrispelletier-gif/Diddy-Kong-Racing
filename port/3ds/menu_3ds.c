@@ -1,9 +1,10 @@
 /*
- * The Settings menu on the bottom screen. The panel's "Settings" button (update_3ds.c) opens it over the scrolling
- * area (plat_3ds_menu_show). A page is a list of rows, each a label with its value between "<" and ">" (or just ">"
- * for a row that does something or opens a page), and a hint line under it. Tapping the "<" half of a value steps it
- * back, anywhere else on the row steps it forward. The panel shows Close (Back on another page), and Prev / Next when
- * a page has more rows than fit.
+ * The Settings menu on the bottom screen. The panel's "Settings" button (update_3ds.c) opens it over the top of the
+ * screen (plat_3ds_menu_draw; plat/bottom_screen.c draws it in the game's style). A page is a list of rows, each a
+ * label with its value between arrows (or the game's ON and OFF labels; or just an arrow for a row that does
+ * something or opens a page), and a hint under it. Tapping the left half of a value steps it back, anywhere else on
+ * the row steps it forward; taps sound like the game's menus. The panel shows Close (Back on another page), and
+ * Prev / Next when a page has more rows than fit.
  *
  * Other parts of the port add a page with menu_3ds_add_page; the main page gets a row that opens it. Settings are
  * saved in settings.txt (plat/settings.h) or a file of their owner's. Everything here runs on the bottom screen's
@@ -14,10 +15,10 @@
 #include <string.h>
 
 #include "menu_3ds.h"
+#include "plat/bottom_screen.h"
 #include "plat/plat.h"
 
-void plat_3ds_menu_print(int row, const char *text);
-void plat_3ds_menu_show(int show);
+void plat_3ds_menu_draw(const BsMenu *menu);
 void plat_3ds_set_antialias_setting(int on);
 int plat_3ds_antialias_setting(void);
 long port_autorun_enabled(void);
@@ -35,12 +36,8 @@ typedef struct MenuPage {
     const char *note;                          /* Optional line under the rows. */
 } MenuPage;
 
-/* Rows 3-23 hold 7 rows of the page, 3 screen rows each (label, hint, gap); row 24 the note, 25 the newest message. */
-#define FIRST_ROW 3
-#define ROWS_PER_PAGE 7
-#define NOTE_ROW 24
-/* The value field: columns 24-39 ("< value >"); a tap on columns 24-31 steps back. */
-#define VALUE_COLUMN 24
+/* The rows of a page shown at once (the screen's geometry is in bottom_screen.h). */
+#define ROWS_PER_PAGE BS_MENU_ROWS
 
 #define MAX_PAGES 8
 static MenuPage sPages[MAX_PAGES];
@@ -183,71 +180,45 @@ void menu_3ds_add_page(const char *title, int (*count)(void), const char *(*labe
 
 /* Drawing. */
 
-static void draw_row(int slot) {
-    int i = sFirst + slot, row = FIRST_ROW + slot * 3;
-    char line[160], value[48], field[24];
-    const char *hint;
-
-    if (i >= sPage->count()) {
-        plat_3ds_menu_print(row, "");
-        plat_3ds_menu_print(row + 1, "");
-        return;
-    }
-    sPage->value(i, value, sizeof(value));
-    if (value[0] != '\0') {
-        int width = 12, length = (int) strlen(value) > width ? width : (int) strlen(value);
-        int left = (width - length) / 2;
-        snprintf(field, sizeof(field), "< %*s%.*s%*s >", left, "", length, value, width - length - left, "");
-    } else {
-        snprintf(field, sizeof(field), "%15s", ">");
-    }
-    // 39 columns: a space, the label (22), then the value field (16).
-    snprintf(line, sizeof(line), "\x1b[37;44m %-22.22s%-16s", sPage->label(i), field);
-    plat_3ds_menu_print(row, line);
-    hint = sPage->hint != NULL ? sPage->hint(i) : NULL;
-    snprintf(line, sizeof(line), "\x1b[36;44m   %-36.36s", hint != NULL ? hint : "");
-    plat_3ds_menu_print(row + 1, line);
-}
-
 static void draw(void) {
     int count = sPage->count(), slot;
-    char line[80];
+    BsMenu menu;
 
     if (sFirst >= count) {
         sFirst = 0;
     }
+    memset(&menu, 0, sizeof(menu));
+    snprintf(menu.title, sizeof(menu.title), "%s", sPage->title);
     if (count > ROWS_PER_PAGE) {
-        char pages[24];
-        snprintf(pages, sizeof(pages), "%d/%d", sFirst / ROWS_PER_PAGE + 1,
+        snprintf(menu.pages, sizeof(menu.pages), "%d/%d", sFirst / ROWS_PER_PAGE + 1,
                  (count + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE);
-        snprintf(line, sizeof(line), "\x1b[33;1m %-32.32s%6s", sPage->title, pages);
-    } else {
-        snprintf(line, sizeof(line), "\x1b[33;1m %s", sPage->title);
     }
-    plat_3ds_menu_print(1, line);
-    plat_3ds_menu_print(2, "");
-    for (slot = 0; slot < ROWS_PER_PAGE; slot++) {
-        draw_row(slot);
-        plat_3ds_menu_print(FIRST_ROW + slot * 3 + 2, "");
+    for (slot = 0; slot < ROWS_PER_PAGE && sFirst + slot < count; slot++) {
+        BsMenuRow *row = &menu.rows[slot];
+        int i = sFirst + slot;
+        const char *hint = sPage->hint != NULL ? sPage->hint(i) : NULL;
+        snprintf(row->label, sizeof(row->label), "%s", sPage->label(i));
+        sPage->value(i, row->value, sizeof(row->value));
+        snprintf(row->hint, sizeof(row->hint), "%s", hint != NULL ? hint : "");
+        menu.rowCount++;
     }
     if (sPage->note != NULL) {
-        snprintf(line, sizeof(line), "\x1b[37m %s", sPage->note);
+        snprintf(menu.note, sizeof(menu.note), "%s", sPage->note);
     } else {
-        snprintf(line, sizeof(line), "\x1b[37m Build %.32s", plat_build_version());
+        snprintf(menu.note, sizeof(menu.note), "Build %.32s", plat_build_version());
     }
-    plat_3ds_menu_print(NOTE_ROW, line);
+    plat_3ds_menu_draw(&menu);
     sDrawnTestRun = port_autorun_enabled() != 0;
 }
 
 /* The panel's calls. */
 
 void menu_3ds_open(void) {
-    plat_3ds_menu_show(1);
     open_page(&sMainPage);
 }
 
 void menu_3ds_close(void) {
-    plat_3ds_menu_show(0);
+    plat_3ds_menu_draw(NULL);
     sPage = NULL;
 }
 
@@ -278,20 +249,22 @@ void menu_3ds_scroll(int direction) {
 
 /* A tap at (x, y) above the panel. Returns what the panel should do (MENU_*). */
 int menu_3ds_tap(int x, int y) {
-    int row = y / 8 + 1, column = x / 8 + 1, slot, i;
+    int slot, i;
     char value[48];
 
-    if (sPage == NULL || row < FIRST_ROW || (row - FIRST_ROW) % 3 == 2) {
+    if (sPage == NULL || y < BS_MENU_FIRST_Y) {
         return MENU_STAY;
     }
-    slot = (row - FIRST_ROW) / 3;
+    slot = (y - BS_MENU_FIRST_Y) / BS_MENU_ROW_HEIGHT;
     i = sFirst + slot;
     if (slot >= ROWS_PER_PAGE || i >= sPage->count()) {
         return MENU_STAY;
     }
     sPage->value(i, value, sizeof(value));
     sResult = MENU_STAY;
-    sPage->change(i, value[0] != '\0' && column >= VALUE_COLUMN && column < VALUE_COLUMN + 8 ? -1 : 1);
+    // A value changing, or a row that does something or opens a page.
+    plat_request_ui_sound(value[0] != '\0' ? PLAT_UI_SOUND_MOVE : PLAT_UI_SOUND_SELECT);
+    sPage->change(i, value[0] != '\0' && x >= BS_MENU_VALUE_X && x < BS_MENU_VALUE_SPLIT ? -1 : 1);
     if (sResult == MENU_STAY && sPage != NULL) {
         // The page may have opened another one, which drew itself; this one redraws the changed row (all of them, as
         // a change can add or remove rows).

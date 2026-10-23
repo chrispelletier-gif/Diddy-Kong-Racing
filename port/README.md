@@ -77,8 +77,13 @@ interrupt a race; holding SELECT while touching anywhere also sends a bug report
 
 ## Settings menu (3DS)
 
-Settings opens a menu over the bottom screen; tap a row to change it (the "<" half of a value steps back), and Close,
+Settings opens a menu over the bottom screen; tap a row to change it (the left half of a value steps back), and Close,
 Back, Prev and Next are where the button was. Choices are saved in `sdmc:/3ds/dkr/settings.txt`.
+
+The bottom screen is drawn in the game's own style (`src/plat/bottom_screen.c`): its title logo, menu title font, small
+font, colourful font, blue arrows and ON / OFF labels, all read from your ROM like the game reads them, so nothing of
+the game is shipped. Taps on the menu play the game's own menu sounds. Until the ROM is loaded the screen uses a plain
+8x8 font.
 - **Anti-aliasing**: on or off, from the next frame (see Graphics).
 - **Profiler**: frame times on the bottom screen (see Profiler).
 - **Test run**: start a full test, a quick test or the AA bench, or stop the one running.
@@ -120,6 +125,7 @@ environment variables:
 | `DKR_INPUT`         | Scripted input, e.g. `"700:START 710: 900:A 910: 1250:STICK=0,-80 1262:"`: each step holds the listed buttons from that poll number until the next step. |
 | `DKR_DUMP_AUDIO`    | Write the audio output to this file as raw 16 bit stereo PCM. |
 | `DKR_TRACE_FRAME`   | Log every display list command and draw of this frame. |
+| `DKR_BOTTOM_PREVIEW`| Draw the 3DS bottom screen's views (home, profiler, menu pages, updater) to PNG files in this directory and exit. `DKR_MONO_FONT` can name a copy of libctru's 8x8 font (2048 bytes) for the dense text. |
 
 `make -C port TARGET=host DEBUG=asan BUILD_DIR=build/asan` builds with AddressSanitizer, which is how the original
 memory bugs above were found.

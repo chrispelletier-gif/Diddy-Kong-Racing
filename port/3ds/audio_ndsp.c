@@ -42,12 +42,12 @@ static void explain_missing_dsp_firmware(void) {
         }
         closedir(dir);
     }
-    printf("\n  \x1b[31mNo sound:\x1b[0m DSP firmware not found.\n");
+    plat_status("No sound: DSP firmware not found.");
     if (misnamed[0] != '\0') {
-        printf("  Found sdmc:/3ds/%s\n  Rename it to exactly dspfirm.cdc\n", misnamed);
-        printf("  (Windows may be hiding an extension)\n");
+        plat_status("Found sdmc:/3ds/%s: rename it to exactly dspfirm.cdc (Windows may be hiding an extension)",
+                    misnamed);
     } else {
-        printf("  Put dspfirm.cdc in sdmc:/3ds/\n");
+        plat_status("Put dspfirm.cdc in sdmc:/3ds/");
     }
 }
 
