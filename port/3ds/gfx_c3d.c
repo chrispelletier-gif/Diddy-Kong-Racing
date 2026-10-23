@@ -13,6 +13,7 @@
 #include "gfx/gfx_backend.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "plat/settings.h"
 #include "shader_shbin.h"
 
 /* The display transfer converts to the screen's format and, with anti-aliasing, averages each 2x2 block of pixels. */
@@ -42,7 +43,7 @@ typedef struct C3DTexture {
 static C3D_RenderTarget *sTarget;
 /* Render target size relative to the screen: 2 draws at twice the resolution and downsamples (anti-aliasing). */
 static int sRenderScale = 1;
-static int sDefaultScale = 2;          // From DKR_AA.
+static int sDefaultScale = 2;          // The setting (settings.txt, else DKR_AA).
 static volatile int sWantedScale = 2;  // plat_set_antialias, applied by the renderer between frames.
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
@@ -350,9 +351,21 @@ static void create_target(int scale) {
                               DISPLAY_TRANSFER_FLAGS(sRenderScale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO));
 }
 
-/* From any thread (the AA benchmark): anti-aliasing on (1), off (0) or back to DKR_AA (-1), from the next frame. */
+/* From any thread (the AA benchmark): anti-aliasing on (1), off (0) or back to the setting (-1), from the next
+ * frame. */
 void plat_set_antialias(int on) {
     sWantedScale = on < 0 ? sDefaultScale : on ? 2 : 1;
+}
+
+/* The Settings menu: the player's anti-aliasing choice, saved, and used from the next frame. */
+void plat_3ds_set_antialias_setting(int on) {
+    sDefaultScale = on ? 2 : 1;
+    sWantedScale = sDefaultScale;
+    settings_set("aa", on != 0);
+}
+
+int plat_3ds_antialias_setting(void) {
+    return sDefaultScale == 2;
 }
 
 /* Whether the frames being drawn now are anti-aliased. */
@@ -398,9 +411,9 @@ void gfxb_init(void) {
     sDone = 1;
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
     {
-        // Anti-aliasing is on unless DKR_AA=0.
+        // Anti-aliasing is the Settings menu's choice; until one is made, on unless DKR_AA=0.
         const char *aa = plat_getenv("DKR_AA");
-        sDefaultScale = (aa == NULL || atoi(aa) != 0) ? 2 : 1;
+        sDefaultScale = settings_get("aa", aa == NULL || atoi(aa) != 0) ? 2 : 1;
         sWantedScale = sDefaultScale;
         create_target(sDefaultScale);
         plat_status("Graphics started%s", sRenderScale == 2 ? " (anti-aliased)" : "");

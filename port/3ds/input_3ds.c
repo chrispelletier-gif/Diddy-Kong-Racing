@@ -1,11 +1,14 @@
 /*
- * 3DS controls, mapped onto an N64 controller:
+ * 3DS controls, mapped onto an N64 controller. By default:
  *   Circle Pad -> stick        A / B -> A / B        L, ZL -> Z (use item)     R, ZR -> R (hop/drift)
  *   X -> C-Up   Y -> C-Left    C-Stick -> C buttons  D-Pad -> D-Pad            SELECT -> L    START -> START
+ * A B X Y L R ZL ZR SELECT can be remapped, and the circle pad's deadzone and response set, from the settings menu
+ * (plat/controls.c). START, the D-Pad and the C-Stick stay fixed so the menus can always be reached.
  */
 #include <3ds.h>
 #include <string.h>
 
+#include "plat/controls.h"
 #include "plat/plat.h"
 
 int update_3ds_touch(int x, int y);
@@ -17,48 +20,25 @@ typedef struct PortControllerState {
     u8 connected;
 } PortControllerState;
 
-enum {
-    N64_A = 0x8000,
-    N64_B = 0x4000,
-    N64_Z = 0x2000,
-    N64_START = 0x1000,
-    N64_DU = 0x0800,
-    N64_DD = 0x0400,
-    N64_DL = 0x0200,
-    N64_DR = 0x0100,
-    N64_L = 0x0020,
-    N64_R = 0x0010,
-    N64_CU = 0x0008,
-    N64_CD = 0x0004,
-    N64_CL = 0x0002,
-    N64_CR = 0x0001,
-};
+/* Remappable buttons (controls.c), in CTRL_KEY_* order. */
+static const u32 sRemapKeys[CTRL_KEY_COUNT] = { KEY_A, KEY_B, KEY_X, KEY_Y, KEY_L, KEY_R, KEY_ZL, KEY_ZR, KEY_SELECT };
 
+/* Buttons that always do the same thing. */
 static const struct {
     u32 key;
     u16 n64;
-} sButtonMap[] = {
-    { KEY_A, N64_A },          { KEY_B, N64_B },           { KEY_L, N64_Z },          { KEY_ZL, N64_Z },
-    { KEY_R, N64_R },          { KEY_ZR, N64_R },          { KEY_SELECT, N64_L },     { KEY_START, N64_START },
-    { KEY_X, N64_CU },         { KEY_Y, N64_CL },          { KEY_DUP, N64_DU },       { KEY_DDOWN, N64_DD },
-    { KEY_DLEFT, N64_DL },     { KEY_DRIGHT, N64_DR },     { KEY_CSTICK_UP, N64_CU }, { KEY_CSTICK_DOWN, N64_CD },
-    { KEY_CSTICK_LEFT, N64_CL }, { KEY_CSTICK_RIGHT, N64_CR },
+} sFixedMap[] = {
+    { KEY_START, CTRL_N64_START },    { KEY_DUP, CTRL_N64_DU },         { KEY_DDOWN, CTRL_N64_DD },
+    { KEY_DLEFT, CTRL_N64_DL },       { KEY_DRIGHT, CTRL_N64_DR },      { KEY_CSTICK_UP, CTRL_N64_CU },
+    { KEY_CSTICK_DOWN, CTRL_N64_CD }, { KEY_CSTICK_LEFT, CTRL_N64_CL }, { KEY_CSTICK_RIGHT, CTRL_N64_CR },
 };
 
-/* The circle pad reaches about +-155; an N64 stick about +-80. */
-static s8 scale_axis(int v) {
-    v = v * 85 / 150;
-    if (v > 80) {
-        v = 80;
-    } else if (v < -80) {
-        v = -80;
-    }
-    return (s8) v;
-}
+/* How far the circle pad reaches from its centre. */
+#define CIRCLE_PAD_RANGE 155
 
 void port_input_poll(PortControllerState *state, s32 maxControllers) {
     circlePosition pad;
-    u32 held;
+    u32 held, remapped;
     unsigned i;
     s32 c;
 
@@ -81,13 +61,19 @@ void port_input_poll(PortControllerState *state, s32 maxControllers) {
     hidCircleRead(&pad);
 
     state[0].connected = 1;
-    for (i = 0; i < sizeof(sButtonMap) / sizeof(sButtonMap[0]); i++) {
-        if (held & sButtonMap[i].key) {
-            state[0].buttons |= sButtonMap[i].n64;
+    remapped = 0;
+    for (i = 0; i < CTRL_KEY_COUNT; i++) {
+        if (held & sRemapKeys[i]) {
+            remapped |= 1u << i;
         }
     }
-    state[0].stickX = scale_axis(pad.dx);
-    state[0].stickY = scale_axis(pad.dy);
+    state[0].buttons = controls_map_buttons(remapped);
+    for (i = 0; i < sizeof(sFixedMap) / sizeof(sFixedMap[0]); i++) {
+        if (held & sFixedMap[i].key) {
+            state[0].buttons |= sFixedMap[i].n64;
+        }
+    }
+    controls_map_stick(pad.dx, pad.dy, CIRCLE_PAD_RANGE, &state[0].stickX, &state[0].stickY);
 
     // A test script (DKR_INPUT in env.txt) replaces the real controls.
     {
