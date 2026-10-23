@@ -67,6 +67,10 @@ runs silently.
 | SELECT        | L                   |                         |
 | START         | START               | Pause                   |
 
+That is the default layout. A, B, X, Y, L, R, ZL, ZR and SELECT can be remapped (with presets for A/B swapped and L/R
+swapped), and the circle pad's deadzone (default 6%), sensitivity and response curve changed, on the settings menu's
+Controls page. They are kept in `sdmc:/3ds/dkr/controls.txt`. START, the D-Pad and the C-Stick always stay as above.
+
 The menus are driven by the stick, as on the N64. At the bottom of the bottom screen are four buttons: Bug rep.,
 Test run, Profiler and Updates (see below). The rest of the touch screen does nothing, so a stray tap can't interrupt a race;
 holding SELECT while touching anywhere also sends a bug report.
