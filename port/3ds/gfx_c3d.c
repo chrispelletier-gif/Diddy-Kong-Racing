@@ -55,6 +55,7 @@ extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
 static int sFrameStarted;
 static int sDepthOnly;
 static int sClearing; // draw_clear_rect is drawing
+static int sFrameFirstDraw; // No draw yet in this frame's command list
 static int sFrameCount, sFrameTriangles;
 /* For the hang report: the size of the last frame handed to the GPU. */
 static int sLastFrameTriangles;
@@ -822,6 +823,7 @@ void gfxb_start_frame(void) {
     }
     C3D_FrameDrawOn(sTarget);
     forget_gpu_state();
+    sFrameFirstDraw = 1;
     sVboUsed = 0;
     sVboFlushed = 0;
     if (sFrameStarted < 0) {
@@ -1514,10 +1516,21 @@ static void set_scissor(const short rect[4]) {
  */
 #define KEY_CLEAR (1u << 19)
 
-/* Returns whether this is a blended draw after an unblended one, or the draw after a clear, the cases that showed the
- * faults. */
+/*
+ * The Rareware logo in the intro came and went on a New 3DS too. Each fault so far was a draw whose blending or depth
+ * settings differ from the draw before it, and only the cases already seen were covered. Two more are left that the
+ * intro has every frame: the first draw of a frame (the depth clear, after the previous frame's full screen blended
+ * fade; if the GPU missed its depth settings the depth buffer keeps the last frame's logo, and the turning logo fails
+ * the depth test against itself), and any other change of the blending, alpha test or depth settings (the sky after
+ * the black fill, opaque logo parts after its blended decals). So every such draw now has its settings written twice.
+ * Only the known cases also split the command list, as the GPU allows few splits a frame. A race frame has about 35
+ * such draws out of about 155. DKR_REWRITE=0 writes twice only in the known cases, as before.
+ */
+
+/* Returns whether the draw's settings are to be written twice: a draw whose blending or depth settings differ from
+ * the draw before, or the first draw of a frame. */
 static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
-    static int sFlushMode = -1, sSplitMode = -1, sAfterClear = -1;
+    static int sFlushMode = -1, sSplitMode = -1, sAfterClear = -1, sRewrite = -1;
     static unsigned int sLastKey = ~0u;
     unsigned int key;
     int split, first;
@@ -1532,6 +1545,9 @@ static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
                  sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes");
         env = plat_getenv("DKR_AFTER_CLEAR");
         sAfterClear = env != NULL ? atoi(env) : 1;
+        env = plat_getenv("DKR_REWRITE");
+        sRewrite = env != NULL ? atoi(env) : 1;
+        plat_log("settings written twice: %s", sRewrite ? "on every blend or depth change" : "known cases only");
     }
     key = state->blend | (state->alphaTest << 4) | (state->alphaRef << 8) | (state->depthTest << 16) |
           (state->depthWrite << 17) | (sDepthOnly << 18) | (sClearing ? KEY_CLEAR : 0);
@@ -1549,6 +1565,10 @@ static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
         C3D_FrameSplit(GX_CMDLIST_FLUSH);
         sDrainSplits++;
     }
+    if (sRewrite && (sFrameFirstDraw || key != sLastKey)) {
+        first = 1;
+    }
+    sFrameFirstDraw = 0;
     sLastKey = key;
     return first;
 }
