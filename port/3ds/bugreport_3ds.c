@@ -1,7 +1,7 @@
 /*
  * Bug reports straight from the console, as GitHub issues (src/plat/bugreport.c does the sending).
  *
- * - Holding SELECT and touching the bottom screen, or the "Bug report" button on it, takes a snapshot and sends it
+ * - Holding SELECT and touching the bottom screen, or "Send a bug report" in its Settings menu, takes a snapshot and sends it
  *   with the log.
  * - The unattended test run sends its results when it ends, and its crashes without asking at the next start.
  * - A crash writes sdmc:/3ds/dkr/crash.txt (registers, stack, recent log) and ends the program.
@@ -635,7 +635,7 @@ static volatile int sResultsRequested;
 static char sResultsTitle[160];
 static char sResultsSummary[2048];
 
-/* The "Bug report" button on the bottom screen (update_3ds.c): the same as SELECT + touch. */
+/* "Send a bug report" in the Settings menu (menu_3ds.c, via update_3ds.c): the same as SELECT + touch. */
 void bugreport_request(void) {
     sReportRequested = 1;
 }

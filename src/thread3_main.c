@@ -41,6 +41,10 @@
 #ifdef TARGET_PORT
 #include "port.h"
 #include "plat/profile.h"
+#include "plat/plat.h"
+
+// Set for one frame after the HOME menu opened or the lid closed: the race pauses as if START was pressed.
+static s32 sPortPauseRequest;
 #endif
 #include "thread30_bgload.h"
 #include "tracks.h"
@@ -289,6 +293,10 @@ void main_game_loop(void) {
     rdp_init(&gCurrDisplayList);
     bgdraw_render(&gCurrDisplayList, &gGameCurrMatrix, TRUE);
     gSaveDataFlags = input_update(gSaveDataFlags, sLogicUpdateRate);
+#ifdef TARGET_PORT
+    // Taken every frame, so a request made outside a race (on the title screen, say) does not pause a later one.
+    sPortPauseRequest = plat_take_game_pause() && !port_autorun_enabled();
+#endif
     if (get_lockup_status()) {
         render_epc_lock_up_display();
         gGameMode = GAMEMODE_LOCKUP;
@@ -457,6 +465,11 @@ void mode_game(s32 updateRate) {
 #ifdef ANTI_TAMPER
     // Spam the start button, making the game unplayable because it's constantly paused.
     if (sAntiPiracyTriggered) {
+        buttonPressedInputs |= START_BUTTON;
+    }
+#endif
+#ifdef TARGET_PORT
+    if (sPortPauseRequest) {
         buttonPressedInputs |= START_BUTTON;
     }
 #endif

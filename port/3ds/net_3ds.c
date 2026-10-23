@@ -8,6 +8,7 @@
 
 #include "net_3ds.h"
 #include "github_ca.h"
+#include "plat/plat.h"
 
 #define CA_FILE_PATH "sdmc:/3ds/dkr/cacert.pem"
 
@@ -54,8 +55,8 @@ int net_3ds_begin(char *error, size_t errorSize) {
             }
         }
     }
-    if (status == 0) {
-        sUsers++;
+    if (status == 0 && sUsers++ == 0) {
+        plat_3ds_hold_sleep(1);
     }
     LightLock_Unlock(&sLock);
     return status;
@@ -68,6 +69,7 @@ void net_3ds_end(void) {
         socExit();
         free(sSocBuffer);
         sSocBuffer = NULL;
+        plat_3ds_hold_sleep(0);
     }
     LightLock_Unlock(&sLock);
 }

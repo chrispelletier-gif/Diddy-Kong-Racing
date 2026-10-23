@@ -61,7 +61,6 @@ void plat_init(void) {
     LightLock_Init(&sKernelLock);
     CondVar_Init(&sKernelCond);
     LightLock_Init(&sIntLock);
-    LightLock_Init(&sConsoleLock);
 
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
     // DKR_SINGLE_CORE=1 keeps everything on the application core, as on an Old 3DS.
@@ -482,16 +481,27 @@ static void console_flush(void) {
 
 /*
  * The bottom screen: the start-up lines and status messages scroll in its top 25 rows; below them is a fixed panel of
- * 5 rows (screen rows 26-30): the update buttons (update_3ds.c) and the watchdog's two lines. Both are consoles on
- * the same framebuffer, each with its own window.
+ * 5 rows (screen rows 26-30): the buttons (update_3ds.c) and the watchdog's two lines. Both are consoles on the same
+ * framebuffer, each with its own window. The Settings menu (menu_3ds.c) covers the top 25 rows while it is open; the
+ * lines that scroll there are remembered, and shown again when it closes.
  */
-static PrintConsole sMainConsole, sPanelConsole;
+static PrintConsole sMainConsole, sPanelConsole, sMenuConsole;
 
+#define MAIN_ROWS 25
+#define RECENT_LINES MAIN_ROWS
+static char sRecentLines[RECENT_LINES][160];
+static int sRecentNext;
+static int sMenuShown;
+
+/* First thing in main: the help text is printed before plat_init. */
 void plat_3ds_console_init(void) {
+    LightLock_Init(&sConsoleLock);
     consoleInit(GFX_BOTTOM, &sMainConsole);
     sPanelConsole = sMainConsole;
-    consoleSetWindow(&sMainConsole, 1, 1, 40, 25);
+    sMenuConsole = sMainConsole;
+    consoleSetWindow(&sMainConsole, 1, 1, 40, MAIN_ROWS);
     consoleSetWindow(&sPanelConsole, 1, 26, 40, 5);
+    consoleSetWindow(&sMenuConsole, 1, 1, 40, MAIN_ROWS);
     consoleSelect(&sMainConsole);
 }
 
@@ -505,6 +515,18 @@ void plat_3ds_panel_print(int row, const char *text) {
     LightLock_Unlock(&sConsoleLock);
 }
 
+/* Replaces row (1-25) of the menu while it is shown, like plat_3ds_panel_print. */
+void plat_3ds_menu_print(int row, const char *text) {
+    LightLock_Lock(&sConsoleLock);
+    if (sMenuShown) {
+        consoleSelect(&sMenuConsole);
+        printf("\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row, text);
+        consoleSelect(&sMainConsole);
+        console_flush();
+    }
+    LightLock_Unlock(&sConsoleLock);
+}
+
 /*
  * The profiler (plat_overlay_show) takes screen rows 14-25 while it is on, and the start-up lines and status messages
  * scroll in rows 1-13 instead.
@@ -513,10 +535,11 @@ void plat_3ds_panel_print(int row, const char *text) {
 #define OVERLAY_ROWS 12
 static PrintConsole sOverlayConsole;
 static int sOverlayShown;
+static char sOverlayText[OVERLAY_ROWS * 48]; // The last readout, drawn when the menu closes.
 
-void plat_overlay_show(const char *text) {
+/* Draws the readout (the console lock is held). */
+static void overlay_draw(const char *text) {
     int row = 0, clear = text[0] == '\0';
-    LightLock_Lock(&sConsoleLock);
     if (!sOverlayShown && !clear) {
         sOverlayShown = 1;
         sOverlayConsole = sMainConsole;
@@ -542,9 +565,76 @@ void plat_overlay_show(const char *text) {
         if (clear) {
             // Gone: the status messages get the whole area back.
             sOverlayShown = 0;
-            consoleSetWindow(&sMainConsole, 1, 1, 40, OVERLAY_ROW + OVERLAY_ROWS - 1);
+            consoleSetWindow(&sMainConsole, 1, 1, 40, MAIN_ROWS);
             printf("\x1b[%d;1H", OVERLAY_ROW - 1);
         }
+    }
+}
+
+void plat_overlay_show(const char *text) {
+    LightLock_Lock(&sConsoleLock);
+    snprintf(sOverlayText, sizeof(sOverlayText), "%s", text);
+    if (!sMenuShown) {
+        overlay_draw(text);
+        console_flush();
+    }
+    LightLock_Unlock(&sConsoleLock);
+}
+
+/* Prints a line in the scrolling area, or remembers it while the menu covers that (the console lock is held). */
+static void main_line(const char *text) {
+    snprintf(sRecentLines[sRecentNext], sizeof(sRecentLines[0]), "%s", text);
+    sRecentNext = (sRecentNext + 1) % RECENT_LINES;
+    if (!sMenuShown) {
+        printf("  %s\n", text);
+    } else {
+        // The menu's last row shows the newest message.
+        consoleSelect(&sMenuConsole);
+        printf("\x1b[%d;1H\x1b[0m\x1b[2K\x1b[33m%.39s\x1b[0m", MAIN_ROWS, text);
+        consoleSelect(&sMainConsole);
+    }
+    console_flush();
+}
+
+/* The help text on the bottom screen: shown like a status message, but not logged. */
+void plat_3ds_console_line(const char *text) {
+    LightLock_Lock(&sConsoleLock);
+    main_line(text);
+    LightLock_Unlock(&sConsoleLock);
+}
+
+/*
+ * The Settings menu opens (1) over the scrolling area, or closes (0): the area is cleared and its recent lines and
+ * the profiler readout come back.
+ */
+void plat_3ds_menu_show(int show) {
+    int i;
+    LightLock_Lock(&sConsoleLock);
+    if (show != sMenuShown) {
+        sMenuShown = show;
+        if (show) {
+            consoleSelect(&sMenuConsole);
+            printf("\x1b[0m\x1b[2J");
+        } else {
+            int rows = MAIN_ROWS;
+            consoleSelect(&sMainConsole);
+            if (sOverlayShown) {
+                sOverlayShown = 0;
+                consoleSetWindow(&sMainConsole, 1, 1, 40, MAIN_ROWS);
+            }
+            printf("\x1b[0m\x1b[2J");
+            if (sOverlayText[0] != '\0') {
+                overlay_draw(sOverlayText);
+                rows = OVERLAY_ROW - 1;
+            }
+            printf("\x1b[1;1H");
+            for (i = RECENT_LINES - rows + 1; i < RECENT_LINES; i++) {
+                const char *line = sRecentLines[(sRecentNext + i) % RECENT_LINES];
+                // Wrapped lines take more rows than this counts; the oldest scroll away, as they would have.
+                printf("  %s\n", line);
+            }
+        }
+        consoleSelect(&sMainConsole);
         console_flush();
     }
     LightLock_Unlock(&sConsoleLock);
@@ -559,8 +649,7 @@ void plat_status(const char *fmt, ...) {
     va_end(args);
     log_line("", buffer);
     LightLock_Lock(&sConsoleLock);
-    printf("  %s\n", buffer);
-    console_flush();
+    main_line(buffer);
     LightLock_Unlock(&sConsoleLock);
 }
 

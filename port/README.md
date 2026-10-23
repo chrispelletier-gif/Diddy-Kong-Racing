@@ -67,9 +67,26 @@ runs silently.
 | SELECT        | L                   |                         |
 | START         | START               | Pause                   |
 
-The menus are driven by the stick, as on the N64. At the bottom of the bottom screen are four buttons: Bug rep.,
-Test run, Profiler and Updates (see below). The rest of the touch screen does nothing, so a stray tap can't interrupt a race;
-holding SELECT while touching anywhere also sends a bug report.
+That is the default layout. A, B, X, Y, L, R, ZL, ZR and SELECT can be remapped (with presets for A/B swapped and L/R
+swapped), and the circle pad's deadzone (default 6%), sensitivity and response curve changed, on the settings menu's
+Controls page. They are kept in `sdmc:/3ds/dkr/controls.txt`. START, the D-Pad and the C-Stick always stay as above.
+
+The menus are driven by the stick, as on the N64. At the bottom of the bottom screen is a Settings button (and Stop
+test while a test run is on). The rest of the touch screen does nothing while the menu is closed, so a stray tap can't
+interrupt a race; holding SELECT while touching anywhere also sends a bug report.
+
+## Settings menu (3DS)
+
+Settings opens a menu over the bottom screen; tap a row to change it (the "<" half of a value steps back), and Close,
+Back, Prev and Next are where the button was. Choices are saved in `sdmc:/3ds/dkr/settings.txt`.
+- **Anti-aliasing**: on or off, from the next frame (see Graphics).
+- **Profiler**: frame times on the bottom screen (see Profiler).
+- **Test run**: start a full test, a quick test or the AA bench, or stop the one running.
+- **Controls**: button layout, remapping and circle pad deadzone, sensitivity and response (see Controls).
+- **Check for updates** and **Send a bug report** (see below).
+
+Other parts of the port add a page to the menu with `menu_3ds_add_page` (`3ds/menu_3ds.h`): its rows are a label, a
+value and a change function, and the main page gets a row that opens it.
 
 ## How it works
 
@@ -110,8 +127,8 @@ memory bugs above were found.
 ## Graphics
 
 The top screen is anti-aliased by default: frames are drawn at twice the resolution in each direction and
-downsampled when they are sent to the screen. It only costs GPU time (the CPU work is unchanged). To turn it off, put
-`DKR_AA=0` in `sdmc:/3ds/dkr/env.txt`.
+downsampled when they are sent to the screen. It only costs GPU time (the CPU work is unchanged). Turn it off in the
+Settings menu (until it has been set there, `DKR_AA=0` in `sdmc:/3ds/dkr/env.txt` also turns it off).
 
 In Azahar you can also raise the internal resolution in the graphics settings; the port renders on the 3DS GPU, so
 that applies to it as well.
@@ -135,7 +152,7 @@ controls) work there, as do these renderer switches:
 ## Bug reports
 
 The 3DS build can send a bug report over Wi-Fi as an issue on this repository, labelled `3ds-bug-report`:
-- Tap Bug rep. at the bottom of the bottom screen, or hold SELECT and touch the screen anywhere. The game saves a
+- Tap Settings, then Send a bug report, or hold SELECT and touch the screen anywhere. The game saves a
   snapshot of the frame and sends it with the log. This also works when the game has frozen, without the snapshot
   if the renderer has stopped.
 - If the game crashes it writes `sdmc:/3ds/dkr/crash.txt` (the registers, the stack and the recent log) and goes
@@ -175,7 +192,7 @@ A crash report gives `pc` and `lr`; with the `dkr.elf` of the same build (the `B
 ## Updates
 
 CI publishes every 3DS build as a pre-release: `3ds-newest` is the latest push to any branch, `3ds-master` the
-latest build of master. Tap Updates at the bottom of the bottom screen; the game lists both builds (the
+latest build of master. Tap Settings, then Check for updates; the game lists both builds (the
 one running is marked "this") and offers master, newest or cancel. The chosen build is downloaded next to the
 running `.3dsx`, checked against its size and sha256, and replaces it; tap Quit to finish the update, or keep
 playing and the new build runs next time. It only works when the game was started from the SD card (not over
@@ -186,8 +203,8 @@ While the repository is public no token is needed. For a private repository the 
 
 ## Profiler
 
-Tap Profiler at the bottom of the bottom screen to show the profiler on the bottom screen, updated every second; the
-button turns green while it is on, and the game remembers the setting. `DKR_PROFILE=1` in `env.txt` and the test run
+Turn Profiler on in the Settings menu to show the profiler on the bottom screen, updated every second (it appears
+when the menu closes); the game remembers the setting. `DKR_PROFILE=1` in `env.txt` and the test run
 below turn it on as well. While it is off it costs nothing measurable (each timing hook returns after one check).
 
 | Line | Meaning |
@@ -206,12 +223,12 @@ line also goes to the log.
 
 ## Unattended test run
 
-Tap Test run at the bottom of the bottom screen, then Full test, and leave the console on its charger. From the
+Tap Settings, Test run, then Full test, and leave the console on its charger. From the
 title screen, the game races every track with every character (200 races, some 8 hours), with the AI driving your
 kart. Each race is profiled and checked: a race that doesn't finish within 5 minutes, a kart that stops reaching
-new checkpoints for a minute, a crash or a freeze are all recorded. When your kart gets no further along the course
-for 10 s (wedged, circling, or fallen under the track), it is put at the next checkpoint and the race goes on; the spot is noted in the results. The bottom screen shows the profiler, the race, and a
-progress bar. Your saves are not written while it runs. Tap Stop test to end it early.
+checkpoints for a minute, a crash or a freeze are all recorded. When the AI wedges your kart somewhere for 10 s,
+the kart is put at the next checkpoint and the race goes on; the spot is noted in the results. The bottom screen shows the profiler, the race, and a
+progress bar. Your saves are not written while it runs. Tap Stop test (next to Settings) to end it early.
 
 - Results go to `sdmc:/3ds/dkr/`: `autorun_results.csv` (one line per race: outcome, frame rate, the profiler's
   stages, worst frames) and `autorun_problems.txt`.
@@ -226,7 +243,7 @@ progress bar. Your saves are not written while it runs. Tap Stop test to end it 
 
 | Setting | Effect |
 | ------- | ------ |
-| `DKR_AUTORUN=1` | Run at every start, without the button. |
+| `DKR_AUTORUN=1` | Run at every start, without the menu. |
 | `DKR_AUTORUN_TRACKS=5,3` | Only these tracks (`ASSET_LEVEL_*` ids; default: the 20 of the tracks menu). |
 | `DKR_AUTORUN_CHARACTERS=3,9` | Only these characters: Krunch 0, Bumper 1, Tiptup 2, Conker 3, Timber 4, Banjo 5, Drumstick 6, Pipsy 7, T.T. 8, Diddy 9. |
 | `DKR_AUTORUN_VEHICLES=all` | Also each other vehicle a track allows. |
@@ -237,7 +254,7 @@ progress bar. Your saves are not written while it runs. Tap Stop test to end it 
 
 ### Quick test
 
-Tap Test run, then Quick. It races only the slowest tracks of the full run (Haunted Woods, Jungle Falls, Crescent
+Tap Settings, Test run, then Quick test. It races only the slowest tracks of the full run (Haunted Woods, Jungle Falls, Crescent
 Island, Whale Bay and EverFrost Peak, from hardware test run #12), twice each with Bumper and your own anti-aliasing
 setting: about 20 minutes. Use it to tell whether a new build made the slow spots faster: run it on the old build,
 install the new one, run it again. The results issue ("[3DS test run] quick test ...") compares each track with the
@@ -249,7 +266,7 @@ tracks, the character and the races per track.
 
 ### Anti-aliasing benchmark
 
-Tap Test run, then AA bench. It is a short test run (about half an hour) that measures what anti-aliasing costs on
+Tap Settings, Test run, then AA bench. It is a short test run (about half an hour) that measures what anti-aliasing costs on
 the heaviest races: Whale Bay, Jungle Falls and Frosty Village, the slowest tracks of hardware test run #10, raced
 by Bumper four times each with anti-aliasing off, on, on, off (so neither setting gets the cooler console or the warm
 caches). The game switches anti-aliasing itself before each race and puts your own setting back at the end. The
