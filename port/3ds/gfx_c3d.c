@@ -48,10 +48,13 @@ static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
 static C3DVertex *sVbo;
 static int sVboUsed;
+/* Vertices before this one have been flushed from the CPU cache this frame (see flush_new_vertices). */
+static int sVboFlushed;
 static C3D_Tex sWhiteTex;
 extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
 static int sFrameStarted;
 static int sDepthOnly;
+static int sClearing; // draw_clear_rect is drawing
 static int sFrameCount, sFrameTriangles;
 /* For the hang report: the size of the last frame handed to the GPU. */
 static int sLastFrameTriangles;
@@ -62,6 +65,32 @@ static int sDrainSplits, sLastDrainSplits;
 
 /* The N64 picture is 320 pixels wide; by default it is shown centred on the 400 pixel wide top screen. */
 static float sScreenScaleX = 320.0f / 400.0f;
+
+/*
+ * The GPU reads vertices and textures from memory, not from the CPU's cache, so whatever the CPU wrote has to be
+ * flushed before a command list that uses it is handed over. citro3d's default is to flush the whole linear heap
+ * (tens of megabytes) at the end of every frame, and the command buffer split did the same in the middle of one
+ * (roadmap item P12). Instead each texture is flushed when it is uploaded and the vertex buffer only from where the
+ * last flush stopped; the command list itself is flushed by GX_CMDLIST_FLUSH. DKR_FULL_FLUSH=1 is the old way.
+ */
+static int full_flush(void) {
+    static int sFull = -1;
+    if (sFull < 0) {
+        sFull = plat_getenv("DKR_FULL_FLUSH") != NULL;
+        plat_log("GPU cache flush: %s", sFull ? "whole linear heap" : "written ranges only");
+    }
+    return sFull;
+}
+
+static void flush_new_vertices(void) {
+    if (sVboFlushed > sVboUsed) {
+        sVboFlushed = 0; // The buffer was started again.
+    }
+    if (sVboUsed > sVboFlushed) {
+        GSPGPU_FlushDataCache(&sVbo[sVboFlushed], (sVboUsed - sVboFlushed) * sizeof(C3DVertex));
+    }
+    sVboFlushed = sVboUsed;
+}
 
 /* Textures freed during a frame are deleted once the GPU is done with it. */
 static C3DTexture **sPendingFrees;
@@ -366,6 +395,7 @@ void gfxb_init(void) {
     }
     C3D_TexInit(&sWhiteTex, 8, 8, GPU_RGBA8);
     C3D_TexUpload(&sWhiteTex, white);
+    GSPGPU_FlushDataCache(sWhiteTex.data, 8 * 8 * 4);
 
     C3D_DepthMap(true, -1.0f, 0.0f);
     gpu_self_test();
@@ -793,6 +823,7 @@ void gfxb_start_frame(void) {
     C3D_FrameDrawOn(sTarget);
     forget_gpu_state();
     sVboUsed = 0;
+    sVboFlushed = 0;
     if (sFrameStarted < 0) {
         static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
         draw_clear_rect(sFullScreen, 0, 1);
@@ -906,8 +937,13 @@ void gfxb_end_frame(void) {
     sFrameTriangles = 0;
     sLastDrainSplits = sDrainSplits;
     sDrainSplits = 0;
-    GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
-    C3D_FrameEnd(0);
+    if (full_flush()) {
+        GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
+        C3D_FrameEnd(0); // Also flushes the whole linear heap.
+    } else {
+        flush_new_vertices();
+        C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    }
     sFrameStarted = -1; // A frame has been drawn, so the target holds an image.
 }
 
@@ -983,7 +1019,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
     }
     // Swizzled straight into the texture's memory in 8x8 tiles, top row first (the GPU samples t = 0 from the start
     // of the data). No temporary buffer: when the heap was short, skipping the upload left whatever the memory held
-    // before, such as an old solid black texture. The data reaches the GPU with the frame's cache flush.
+    // before, such as an old solid black texture.
     data = (u32 *) t->tex.data;
     for (ty = 0; ty < ph; ty += 8) {
         for (tx = 0; tx < pw; tx += 8) {
@@ -1002,6 +1038,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
         C3D_TexSetFilter(&t->tex, GPU_LINEAR, GPU_LINEAR);
     }
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
+    GSPGPU_FlushDataCache(data, pw * ph * 4);
     forget_gpu_state();
 }
 
@@ -1272,7 +1309,7 @@ static void apply_fog(const GfxDrawState *state) {
             sGpu.fogColor = color;
         }
     }
-    if (on != sFogOn) {
+    if (!sGpu.known || on != sFogOn) {
         C3D_FogGasMode(on ? GPU_FOG : GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
         sFogOn = on;
     }
@@ -1468,9 +1505,19 @@ static void set_scissor(const short rect[4]) {
  * are done.
  */
 
-/* Returns whether this is a blended draw after an unblended one, the case that showed the faults. */
+/*
+ * The log behind the character select screen came and went from frame to frame on a New 3DS (issue #25). It is the
+ * first draw after the screen clears, which are full screen draws with fog, depth and culling off, and the sky drawn
+ * after it would cover it wherever the GPU drew it without its depth settings. So the draw after a clear rectangle is treated like
+ * the first blended draw above: the command list is split before it and its settings are written twice.
+ * DKR_AFTER_CLEAR=0 leaves that out, for testing.
+ */
+#define KEY_CLEAR (1u << 19)
+
+/* Returns whether this is a blended draw after an unblended one, or the draw after a clear, the cases that showed the
+ * faults. */
 static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
-    static int sFlushMode = -1, sSplitMode = -1;
+    static int sFlushMode = -1, sSplitMode = -1, sAfterClear = -1;
     static unsigned int sLastKey = ~0u;
     unsigned int key;
     int split, first;
@@ -1483,19 +1530,22 @@ static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
         plat_log("framebuffer flush between draws: %s; command list split: %s",
                  sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always",
                  sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes");
+        env = plat_getenv("DKR_AFTER_CLEAR");
+        sAfterClear = env != NULL ? atoi(env) : 1;
     }
     key = state->blend | (state->alphaTest << 4) | (state->alphaRef << 8) | (state->depthTest << 16) |
-          (state->depthWrite << 17) | (sDepthOnly << 18);
+          (state->depthWrite << 17) | (sDepthOnly << 18) | (sClearing ? KEY_CLEAR : 0);
     if (sFlushMode == 2 || (sFlushMode == 1 && key != sLastKey)) {
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
     }
-    first = IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF);
+    first = (IS_BLENDED(state->blend) && !IS_BLENDED(sLastKey & 0xF)) ||
+            (sAfterClear && !sClearing && sLastKey != ~0u && (sLastKey & KEY_CLEAR));
     split = sSplitMode == 2 ? key != sLastKey : sSplitMode == 1 ? first : 0;
     if (split && sVboUsed > 0 && sDrainSplits < MAX_DRAIN_SPLITS &&
         (sDrainSplits < SMALL_DRAWS_ONLY || numTriangles <= 4)) {
         // The GPU reads the vertices so far when it runs the first part of the list.
-        GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
+        flush_new_vertices();
         C3D_FrameSplit(GX_CMDLIST_FLUSH);
         sDrainSplits++;
     }
@@ -1652,7 +1702,11 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         if (sCmdBufSplits++ < 5) {
             plat_log("frame %d: command buffer full, splitting it", sFrameCount);
         }
-        GSPGPU_FlushDataCache((void *) __ctru_linear_heap, __ctru_linear_heap_size);
+        if (full_flush()) {
+            GSPGPU_FlushDataCache((void *) __ctru_linear_heap, __ctru_linear_heap_size);
+        } else {
+            flush_new_vertices();
+        }
         C3D_FrameSplit(GX_CMDLIST_FLUSH);
     }
     if (sLogFrame == -2) {
@@ -1746,8 +1800,10 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
         v[i].a = rgba;
     }
     sDepthOnly = depthOnly;
+    sClearing = 1;
     gfxb_draw_triangles(&state, v, 2);
     sDepthOnly = 0;
+    sClearing = 0;
 }
 
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
