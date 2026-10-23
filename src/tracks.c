@@ -3955,8 +3955,8 @@ void func_8002F440(void) {
             vert->g = 255;
             vert->b = 255;
             vert->a = alpha;
-            sp90[i] = ((((xDiff * yRotCos) - (zDiff * yRotSin)) * scale) + temp_f18);
-            sp80[i] = ((((zDiff * yRotCos) + (xDiff * yRotSin)) * scale) + temp_f18);
+            sp90[i] = F2S16((((xDiff * yRotCos) - (zDiff * yRotSin)) * scale) + temp_f18);
+            sp80[i] = F2S16((((zDiff * yRotCos) + (xDiff * yRotSin)) * scale) + temp_f18);
         }
 
         for (i = 1; i < (D_8011C238[spAC].unk0 - 1); i++) {

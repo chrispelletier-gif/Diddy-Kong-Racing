@@ -36,6 +36,25 @@ static inline u32 port_read_be32(const void *ptr) {
     return ((u32) p[0] << 24) | ((u32) p[1] << 16) | ((u32) p[2] << 8) | p[3];
 }
 
+/*
+ * Float to integer conversion with a defined result for every input: like the 3DS and N64 FPUs, out of range values
+ * saturate (NaN gives 0). Converting with a cast instead is undefined when the value doesn't fit, and the optimiser
+ * may then assume it always fits: a game value converted to s16 that is out of range must go through this, e.g.
+ * (s16) port_f2i32(x), which keeps the low 16 bits like the N64 did.
+ */
+static inline s32 port_f2i32(f64 x) {
+    if (!(x == x)) {
+        return 0;
+    }
+    if (x >= 2147483647.0) {
+        return 0x7FFFFFFF;
+    }
+    if (x <= -2147483648.0) {
+        return (s32) 0x80000000;
+    }
+    return (s32) x;
+}
+
 void port_swap16_array(void *ptr, s32 count);
 void port_swap32_array(void *ptr, s32 count);
 

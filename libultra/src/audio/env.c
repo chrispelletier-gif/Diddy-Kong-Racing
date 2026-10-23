@@ -489,7 +489,11 @@ s16 _getRate(f64 vol, f64 tgt, s32 count, u16* ratel)
         a -= 1.0;
     }
     s = (s16) a;
+#ifdef TARGET_PORT
+    *ratel = (s16) port_f2i32(0xffff * (a - (f32) s));
+#else
     *ratel = (s16)(0xffff * (a - (f32) s));
+#endif
 
 #ifdef AUD_PROFILE
     PROFILE_AUD(rate_num, rate_cnt, rate_max, rate_min);
