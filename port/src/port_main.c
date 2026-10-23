@@ -74,9 +74,12 @@ static s32 has_rom_extension(const char *name) {
            ext[2] == '6' && ext[3] == '4';
 }
 
+/* Why the most telling ROM candidate was turned down (port_rom_problem() at the time). */
+static char sRomProblem[320];
+
 /*
  * Looks for the ROM: first under the expected names in the data directory, then any .z64/.n64/.v64 file in the
- * search directories. Returns PORT_ROM_OK, or the most informative failure seen.
+ * search directories. Returns PORT_ROM_OK, or the most informative failure seen, with its reason in sRomProblem.
  */
 static s32 find_rom(char *foundPath, s32 pathSize) {
     static const char *romNames[] = { "baserom.z64", "baserom.n64", "baserom.v64", "dkr.z64", "dkr.n64", "dkr.v64" };
@@ -93,10 +96,12 @@ static s32 find_rom(char *foundPath, s32 pathSize) {
         }
         if (result < best) {
             best = result;
+            plat_snprintf(sRomProblem, sizeof(sRomProblem), "%s", port_rom_problem());
         }
     }
     for (d = 0; dirs[d] != NULL; d++) {
-        numNames = plat_list_dir(dirs[d], &names[0][0], sizeof(names[0]), 64);
+        // The whole array, not &names[0][0]: the fortified strcpy would take that for a single 128-byte name.
+        numNames = plat_list_dir(dirs[d], (char *) names, sizeof(names[0]), 64);
         for (i = 0; i < numNames; i++) {
             if (!has_rom_extension(names[i])) {
                 continue;
@@ -109,6 +114,7 @@ static s32 find_rom(char *foundPath, s32 pathSize) {
             }
             if (result < best) {
                 best = result;
+                plat_snprintf(sRomProblem, sizeof(sRomProblem), "%s", port_rom_problem());
             }
         }
     }
@@ -132,13 +138,23 @@ void port_boot(void) {
             port_log("Using ROM %s", path);
             break;
         case PORT_ROM_WRONG_VERSION:
-            port_fatal("Found a Diddy Kong Racing ROM, but not the\nversion this port supports.\n\n"
-                       "Use the US 1.0 ROM (SHA1 0cb115d8...).");
+            port_fatal("Wrong version of the ROM.\n\n%s\n\nThis build plays the %s release only.", sRomProblem,
+                       port_rom_supported_release());
+            break;
+        case PORT_ROM_DAMAGED:
+            port_fatal("The ROM could not be used.\n\n%s\n\nUse an unmodified dump of the %s release.", sRomProblem,
+                       port_rom_supported_release());
+            break;
+        case PORT_ROM_NOT_DKR:
+        case PORT_ROM_NOT_N64:
+            port_fatal("Could not find the Diddy Kong Racing ROM.\n\n%s\n\nCopy your %s ROM (.z64, .n64 or .v64)\nto "
+                       "%s/\non the SD card, e.g. as baserom.z64.",
+                       sRomProblem, port_rom_supported_release(), plat_data_dir());
             break;
         default:
-            port_fatal("Could not find the Diddy Kong Racing ROM.\n\nCopy your ROM (.z64, .n64 or .v64) to\n%s/\n"
-                       "on the SD card, e.g. as baserom.z64.",
-                       plat_data_dir());
+            port_fatal("Could not find the Diddy Kong Racing ROM.\n\nCopy your %s ROM (.z64, .n64 or .v64)\nto "
+                       "%s/\non the SD card, e.g. as baserom.z64.",
+                       port_rom_supported_release(), plat_data_dir());
             break;
     }
     port_si_init();
