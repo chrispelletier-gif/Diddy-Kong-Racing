@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <sys/stat.h>
 
+#include "menu_3ds.h"
+#include "plat/controls.h"
 #include "plat/plat.h"
 
 void port_boot(void);
@@ -106,6 +108,10 @@ int main(int argc, char **argv) {
     show_bottom_screen_help();
 
     port_boot();
+    // Loaded here, before the menu's thread can read or change them.
+    controls_init();
+    menu_3ds_add_page("Controls", controls_option_count, controls_option_label, controls_option_value,
+                      controls_option_change);
     bugreport_start();
     // The Homebrew Launcher passes the path of the .3dsx as argv[0].
     update_3ds_start(argc > 0 ? argv[0] : NULL);

@@ -67,6 +67,10 @@ runs silently.
 | SELECT        | L                   |                         |
 | START         | START               | Pause                   |
 
+That is the default layout. A, B, X, Y, L, R, ZL, ZR and SELECT can be remapped (with presets for A/B swapped and L/R
+swapped), and the circle pad's deadzone (default 6%), sensitivity and response curve changed, on the settings menu's
+Controls page. They are kept in `sdmc:/3ds/dkr/controls.txt`. START, the D-Pad and the C-Stick always stay as above.
+
 The menus are driven by the stick, as on the N64. At the bottom of the bottom screen is a Settings button (and Stop
 test while a test run is on). The rest of the touch screen does nothing while the menu is closed, so a stray tap can't
 interrupt a race; holding SELECT while touching anywhere also sends a bug report.
@@ -78,6 +82,7 @@ Back, Prev and Next are where the button was. Choices are saved in `sdmc:/3ds/dk
 - **Anti-aliasing**: on or off, from the next frame (see Graphics).
 - **Profiler**: frame times on the bottom screen (see Profiler).
 - **Test run**: start a full test, a quick test or the AA bench, or stop the one running.
+- **Controls**: button layout, remapping and circle pad deadzone, sensitivity and response (see Controls).
 - **Check for updates** and **Send a bug report** (see below).
 
 Other parts of the port add a page to the menu with `menu_3ds_add_page` (`3ds/menu_3ds.h`): its rows are a label, a
