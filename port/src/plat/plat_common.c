@@ -11,6 +11,19 @@ volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
 const char *volatile gPlatGfxStage = "not started";
 volatile int gPlatSnapshotRequested;
 volatile int gPlatSnapshotSaved;
+static volatile int sGamePauseRequested;
+
+void plat_request_game_pause(void) {
+    sGamePauseRequested = 1;
+}
+
+int plat_take_game_pause(void) {
+    if (!sGamePauseRequested) {
+        return 0;
+    }
+    sGamePauseRequested = 0;
+    return 1;
+}
 
 void *plat_load_file(const char *path, unsigned int *size) {
     FILE *f = fopen(path, "rb");
