@@ -31,7 +31,8 @@
 #define DEFAULT_REPO "chrispelletier-gif/Diddy-Kong-Racing"
 #define MAX_DOWNLOAD (16 * 1024 * 1024)
 
-void plat_3ds_panel_print(int row, const char *text);
+void plat_3ds_set_buttons(const char *const *labels, int count);
+void plat_3ds_panel_text(const char *text);
 void plat_3ds_request_quit(void);
 void bugreport_watch_thread(const char *name);
 void bugreport_request(void);
@@ -87,25 +88,11 @@ static int sChosen;
 static volatile int sButtonCount; // Buttons now shown, each a space then a block of (40 / count - 1) characters.
 
 /*
- * Blue blocks three rows high; a label starting with '-' is a button that cannot be tapped, drawn grey, and one
- * starting with '+' is a switch that is on, drawn green.
+ * Buttons in the game's style (plat/bottom_screen.c); a label starting with '-' is a button that cannot be tapped,
+ * drawn grey ("-" alone: a gap), and one starting with '+' is a switch that is on, drawn green.
  */
 static void draw_buttons(const char *const *labels, int count) {
-    int width = count == 1 ? 38 : 40 / count - 1, i, r;
-
-    for (r = 0; r < 3; r++) {
-        char row[160];
-        int length = 0;
-        for (i = 0; i < count; i++) {
-            int enabled = labels[i][0] != '-', on = labels[i][0] == '+';
-            const char *text = r == 1 ? labels[i] + (!enabled || on) : "";
-            int left = (width - (int) strlen(text)) / 2;
-            const char *colour = on ? "\x1b[30;42m" : enabled ? "\x1b[37;44m" : "\x1b[30;47m";
-            length += snprintf(row + length, sizeof(row) - length, " %s%*s%-*s\x1b[0m", colour, left, "", width - left,
-                               text);
-        }
-        plat_3ds_panel_print(r + 1, row);
-    }
+    plat_3ds_set_buttons(labels, count);
     sButtonCount = count;
 }
 
@@ -147,14 +134,7 @@ static void show_busy(const char *fmt, ...) {
     va_start(args, fmt);
     vsnprintf(text, sizeof(text), fmt, args);
     va_end(args);
-    plat_3ds_panel_print(1, "");
-    plat_3ds_panel_print(2, "");
-    plat_3ds_panel_print(3, "");
-    {
-        char line[80];
-        snprintf(line, sizeof(line), "  \x1b[33;1m%s\x1b[0m", text);
-        plat_3ds_panel_print(2, line);
-    }
+    plat_3ds_panel_text(text);
 }
 
 static void load_config(Config *config) {
@@ -622,6 +602,7 @@ static void update_thread(void *arg) {
         }
         switch (sState) {
             case STATE_IDLE:
+                plat_request_ui_sound(PLAT_UI_SOUND_SELECT);
                 if (button == 0) {
                     sState = STATE_MENU;
                     menu_3ds_open();
@@ -636,8 +617,10 @@ static void update_thread(void *arg) {
                 if (button == TAP_MENU) {
                     result = menu_3ds_tap(sTapX, sTapY);
                 } else if (button == 0) {
+                    plat_request_ui_sound(PLAT_UI_SOUND_BACK);
                     result = menu_3ds_back() ? MENU_STAY : MENU_CLOSE;
-                } else {
+                } else if (menu_3ds_can_scroll(button == 1 ? -1 : 1)) {
+                    plat_request_ui_sound(PLAT_UI_SOUND_MOVE);
                     menu_3ds_scroll(button == 1 ? -1 : 1);
                 }
                 if (result == MENU_STAY) {
@@ -664,6 +647,7 @@ static void update_thread(void *arg) {
                 if (button == 1) {
                     break; // The grey button.
                 }
+                plat_request_ui_sound(button == 0 ? PLAT_UI_SOUND_SELECT : PLAT_UI_SOUND_BACK);
                 if (button == 0) {
                     port_autorun_request(0);
                     // The run turns off at the game's next frame.
@@ -674,9 +658,11 @@ static void update_thread(void *arg) {
                 break;
             case STATE_CHOOSE:
                 if (button == 2) {
+                    plat_request_ui_sound(PLAT_UI_SOUND_BACK);
                     sState = STATE_IDLE;
                     draw_home();
                 } else if (sChannels[button].found) {
+                    plat_request_ui_sound(PLAT_UI_SOUND_SELECT);
                     sState = STATE_BUSY;
                     sChosen = button;
                     if (install(&sChannels[button])) {

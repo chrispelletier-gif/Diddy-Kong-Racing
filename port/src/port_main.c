@@ -136,6 +136,7 @@ void port_boot(void) {
         case PORT_ROM_OK:
             plat_status("ROM loaded in %.1f s", (plat_time_ns() - start) / 1e9);
             port_log("Using ROM %s", path);
+            plat_rom_loaded();
             break;
         case PORT_ROM_WRONG_VERSION:
             port_fatal("Wrong version of the ROM.\n\n%s\n\nThis build plays the %s release only.", sRomProblem,

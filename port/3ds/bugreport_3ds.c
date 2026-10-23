@@ -387,11 +387,10 @@ static int send_and_show(const ReportConfig *config, Report *report) {
 
 /* The start of the program: the previous run's files, and the offer to report it. */
 
+void plat_3ds_console_line(const char *text);
+
 static void show_console(const char *text) {
-    printf("  %s\n", text);
-    gfxFlushBuffers();
-    gfxSwapBuffers();
-    gspWaitForVBlank();
+    plat_3ds_console_line(text);
 }
 
 /* The unattended test run is going (port_autorun.c): reports are sent without asking, as nobody is there to answer. */
@@ -438,13 +437,13 @@ int bugreport_boot(void) {
     }
 
     crashed = file_exists(DATA_DIR "/last_crash.txt");
-    printf("\n  %s\n\n", crashed ? "The game crashed last time." : "The game did not exit normally last time.");
+    show_console(crashed ? "The game crashed last time." : "The game did not exit normally last time.");
     unattended = test_run_active();
     if (unattended) {
-        printf("  The test run goes on: sending a report.\n\n");
+        show_console("The test run goes on: sending a report.");
     } else {
-        printf("  Send a bug report with its log?\n\n");
-        printf("  A  Send       B  Skip\n\n");
+        show_console("Send a bug report with its log?");
+        show_console("A: Send     B: Skip");
     }
     while (!unattended) {
         u32 down;

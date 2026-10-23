@@ -15,6 +15,7 @@ void bugreport_clean_exit(void);
 void bugreport_watch_thread(const char *name);
 void plat_3ds_console_init(void);
 void plat_3ds_console_line(const char *text);
+void plat_3ds_console_clear(void);
 void update_3ds_start(const char *selfPath);
 int port_autorun_enabled(void);
 
@@ -69,40 +70,6 @@ void plat_3ds_hold_sleep(int hold) {
     LightLock_Unlock(&sSleepLock);
 }
 
-/*
- * The game only uses the top screen; the bottom one shows the controls. Its lines are kept like status messages, so
- * they come back when the Settings menu closes.
- */
-static void show_bottom_screen_help(void) {
-    static const char *const sLines[] = {
-        "",
-        "Diddy Kong Racing",
-        "Native 3DS port of the decomp",
-        "",
-        "Circle Pad   Steer",
-        "A            Accelerate",
-        "B            Brake / reverse",
-        "L / ZL       Use item (Z)",
-        "R / ZR       Hop / drift",
-        "X / Y        C-Up / C-Left",
-        "C-Stick      C buttons",
-        "SELECT       N64 L button",
-        "START        Pause",
-        "",
-        "SELECT+touch Send a bug report",
-        "",
-        "Settings (below): anti-aliasing,",
-        "profiler, test runs, updates and",
-        "bug reports",
-        "",
-        "Saves: sdmc:/3ds/dkr/",
-    };
-    unsigned i;
-    for (i = 0; i < sizeof(sLines) / sizeof(sLines[0]); i++) {
-        plat_3ds_console_line(sLines[i]);
-    }
-}
-
 int plat_main_loop_iteration(void) {
     if (!aptMainLoop() || sQuitRequested) {
         return 0;
@@ -142,9 +109,10 @@ int main(int argc, char **argv) {
     bugreport_watch_thread("main");
     // Offers to report the last run if it did not end normally. Must come before anything is logged.
     if (bugreport_boot()) {
-        consoleClear();
+        plat_3ds_console_clear();
     }
-    show_bottom_screen_help();
+    // The bottom screen shows the controls itself (plat/bottom_screen.c).
+    plat_3ds_console_line("Saves and settings: sdmc:/3ds/dkr/");
 
     port_boot();
     // Loaded here, before the menu's thread can read or change them.

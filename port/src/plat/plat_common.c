@@ -25,6 +25,16 @@ int plat_take_game_pause(void) {
     return 1;
 }
 
+static volatile int sUiSound;
+
+void plat_request_ui_sound(int sound) {
+    sUiSound = sound;
+}
+
+int plat_take_ui_sound(void) {
+    return __atomic_exchange_n(&sUiSound, PLAT_UI_SOUND_NONE, __ATOMIC_ACQ_REL);
+}
+
 void *plat_load_file(const char *path, unsigned int *size) {
     FILE *f = fopen(path, "rb");
     long len;

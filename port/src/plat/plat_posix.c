@@ -42,6 +42,17 @@ void plat_overlay_show(const char *text) {
     (void) text;
 }
 
+void host_bottom_preview(const char *dir);
+
+/* DKR_BOTTOM_PREVIEW=dir: draws the 3DS bottom screen's views to PNG files in dir, then exits. */
+void plat_rom_loaded(void) {
+    const char *dir = getenv("DKR_BOTTOM_PREVIEW");
+    if (dir != NULL) {
+        host_bottom_preview(dir);
+        exit(0);
+    }
+}
+
 /* No bug reports on the host: the results summary goes to the log instead. */
 void plat_send_test_results(const char *title, const char *summary) {
     fprintf(stderr, "test results: %s\n%s\n", title, summary);
