@@ -6,6 +6,9 @@
 #include "memory.h"
 #include "tracks.h"
 #include <ultra64.h>
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 
 #define MAX_NUM_TEXTURES 700
 #define MAX_NUM_SPRITES 100
@@ -577,6 +580,14 @@ TextureHeader *load_texture(s32 id) {
         assetOffset += TEXTURE_GFX_SIZE; // I'm guessing it takes 12 f3d commands to load the texture
         texTemp = (TextureHeader *) ((s32) texTemp + texTemp->textureSize);
     }
+#ifdef TARGET_PORT
+    // Decode the texture for the GPU now, instead of when it is first drawn mid-race.
+    texTemp = tex;
+    for (i = 0; i < numberOfTextures; i++) {
+        port_gfx_texture_loaded(texTemp->cmd, texTemp->numberOfCommands);
+        texTemp = (TextureHeader *) ((s32) texTemp + texTemp->textureSize);
+    }
+#endif
     if (gCiPalettesSize >= MAX_TEX_PALETTE_SIZE) {
         stubbed_printf("TEX Error: Palette memory overflow!!\n");
         return NULL;
@@ -600,6 +611,16 @@ void tex_free(TextureHeader *tex) {
         if ((--tex->numberOfInstances) <= 0) {
             for (i = 0; i < gNumberOfLoadedTextures; i++) {
                 if ((s32) tex == gTextureCache[ASSETCACHE_PTR(i)]) {
+#ifdef TARGET_PORT
+                    {
+                        TextureHeader *frame = tex;
+                        s32 j;
+                        for (j = tex->numOfTextures >> 8; j > 0; j--) {
+                            frame = (TextureHeader *) ((s32) frame + frame->textureSize);
+                        }
+                        port_gfx_texture_freed(tex, frame);
+                    }
+#endif
                     mempool_free(tex);
 
                     gTextureCache[ASSETCACHE_ID(i)] = -1;

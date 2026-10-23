@@ -10,6 +10,7 @@
 #define gfxb_draw_triangles refb_draw_triangles
 #define gfxb_texture_upload refb_texture_upload
 #define gfxb_texture_free refb_texture_free
+#define gfxb_texture_share refb_texture_share
 #define gfxb_soft_save_png refb_save_png
 #define host_frames_rendered ref_frames_rendered
 #include <stdlib.h>
