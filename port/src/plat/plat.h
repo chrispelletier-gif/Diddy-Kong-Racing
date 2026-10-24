@@ -162,6 +162,12 @@ int plat_antialias(void);
  * build takes DKR_WIDESCREEN=1.
  */
 float plat_aspect_scale(void);
+/*
+ * The game's vertical field of view (degrees) for the widescreen style: "Wide" keeps it, so the wider picture shows
+ * more at the sides and stretches things there more; "Zoomed" narrows it so the sides show what 4:3 did (less at the
+ * top and bottom) and nothing is stretched more than on the N64; "Balanced" is half way (in tan terms).
+ */
+float plat_camera_fov(float fovy);
 /* The build's version (git describe), as bug reports show it; "host" for a host build without one. */
 const char *plat_build_version(void);
 

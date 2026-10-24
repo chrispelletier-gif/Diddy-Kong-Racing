@@ -163,13 +163,21 @@ static const char *screen_label(int i) {
     return sLabels[i];
 }
 
+static const char *const sWideStyles[4] = { "Off", "Wide", "Balanced", "Zoomed" };
+
 static void screen_value(int i, char *out, int size) {
-    snprintf(out, size, "%s", plat_3ds_screen_setting(i) ? "On" : "Off");
+    if (i == 0) {
+        snprintf(out, size, "%s", sWideStyles[plat_3ds_screen_setting(0)]);
+    } else {
+        snprintf(out, size, "%s", plat_3ds_screen_setting(i) ? "On" : "Off");
+    }
 }
 
 static const char *screen_hint(int i) {
     if (i == 0) {
-        return "Fill the top screen; HUD stays 4:3";
+        static const char *const sHints[4] = { "4:3 picture in the middle", "Most to the sides; edges stretch most",
+                                               "Between Wide and Zoomed", "4:3's sides, less top; no extra stretch" };
+        return sHints[plat_3ds_screen_setting(0)];
     } else if (i == 1) {
         return plat_3ds_wide800_supported() ? "Sharper picture while 3D is off" : "Not on this console (2DS)";
     }
@@ -177,8 +185,11 @@ static const char *screen_hint(int i) {
 }
 
 static void screen_change(int i, int step) {
-    (void) step;
-    plat_3ds_set_screen_setting(i, !plat_3ds_screen_setting(i));
+    if (i == 0) {
+        plat_3ds_set_screen_setting(0, (plat_3ds_screen_setting(0) + step + 4) % 4);
+    } else {
+        plat_3ds_set_screen_setting(i, !plat_3ds_screen_setting(i));
+    }
 }
 
 static const MenuPage sScreenPage = {

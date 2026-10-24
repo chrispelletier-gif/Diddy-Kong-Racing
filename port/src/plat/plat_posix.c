@@ -73,6 +73,10 @@ float plat_aspect_scale(void) {
     return sWide ? 1.25f : 1.0f;
 }
 
+float plat_camera_fov(float fovy) {
+    return fovy; // The host previews the Wide style.
+}
+
 int plat_antialias(void) {
     return sAntialias;
 }

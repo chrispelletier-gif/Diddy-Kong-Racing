@@ -6,6 +6,7 @@
  */
 #include <3ds.h>
 #include <citro3d.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -597,8 +598,10 @@ void plat_3ds_set_screen_setting(int which, int on) {
     static const char *const sKeys[3] = { "widescreen", "wide800", "stereo3d" };
     volatile int *settings[3] = { &sWideSetting, &s800Setting, &sStereoSetting };
     if (which >= 0 && which < 3) {
-        *settings[which] = on != 0;
-        settings_set(sKeys[which], on != 0);
+        // Widescreen is 0 off, or its style: 1 Wide, 2 Balanced, 3 Zoomed (plat_camera_fov). The others are on or off.
+        int value = which == 0 ? (on < 0 || on > 3 ? 0 : on) : on != 0;
+        *settings[which] = value;
+        settings_set(sKeys[which], value);
     }
 }
 
@@ -613,6 +616,16 @@ int plat_3ds_wide800_supported(void) {
 
 float plat_aspect_scale(void) {
     return sWideSetting ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
+}
+
+float plat_camera_fov(float fovy) {
+    // tan(fovy / 2) times this: Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
+    static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
+    int style = sWideSetting;
+    if (style <= 1 || style > 3) {
+        return fovy;
+    }
+    return 2.0f * atanf(tanf(fovy * (3.14159265f / 360.0f)) * sTanScale[style]) * (360.0f / 3.14159265f);
 }
 
 /*
@@ -648,7 +661,7 @@ static void apply_screen_mode(void) {
     int across = (scale == 2 || wide800) ? 2 : 1;
     int newTarget;
 
-    sWide = sWideSetting;
+    sWide = sWideSetting != 0;
     sScale3D = sWide ? 1.0f : NARROW;
     sEyeSep = stereo ? slider * stereo_max_sep() : 0.0f;
     if (sTarget == NULL ||
@@ -694,7 +707,8 @@ static void alloc_frame_slots(void);
 /* The screen settings (see sWideSetting), and whether the console can show 800 pixels across. */
 static void read_screen_settings(void) {
     u8 model = 0;
-    sWideSetting = settings_get("widescreen", 1) != 0;
+    sWideSetting = settings_get("widescreen", 2);
+    sWideSetting = sWideSetting < 0 || sWideSetting > 3 ? 2 : sWideSetting;
     s800Setting = settings_get("wide800", 1) != 0;
     sStereoSetting = settings_get("stereo3d", 1) != 0;
     if (R_SUCCEEDED(cfguInit())) {
@@ -703,7 +717,7 @@ static void read_screen_settings(void) {
         }
         cfguExit();
     }
-    sWide = sWideSetting;
+    sWide = sWideSetting != 0;
     sScale3D = sWide ? 1.0f : NARROW;
     plat_log("screen: widescreen %d, 800 pixels %d%s, 3D %d", sWideSetting, s800Setting,
              sWideUnsupported ? " (not on a 2DS)" : "", sStereoSetting);
