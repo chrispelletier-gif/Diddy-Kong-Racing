@@ -121,13 +121,13 @@ static void main_change(int i, int step) {
 
 static const MenuPage sMainPage = { "Settings", main_count, main_label, main_value, main_change, main_hint, NULL };
 
-/* The test run (port_autorun.c): stop the one running, or start one of its three kinds. */
+/* The test run (port_autorun.c): stop the one running, or start one of its four kinds. */
 static int test_count(void) {
-    return port_autorun_enabled() ? 1 : 3;
+    return port_autorun_enabled() ? 1 : 4;
 }
 
 static const char *test_label(int i) {
-    static const char *const sStart[3] = { "Full test", "Quick test", "AA bench" };
+    static const char *const sStart[4] = { "Full test", "Quick test", "Boss fights", "AA bench" };
     return port_autorun_enabled() ? "Stop the test run" : sStart[i];
 }
 
@@ -138,8 +138,8 @@ static void test_value(int i, char *out, int size) {
 }
 
 static const char *test_hint(int i) {
-    static const char *const sStart[3] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
-                                           "Heavy races, AA off and on, ~30 min" };
+    static const char *const sStart[4] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
+                                           "All 10 boss races once, ~30 minutes", "Heavy races, AA off and on, ~30 min" };
     return port_autorun_enabled() ? "The results so far go out as a report" : sStart[i];
 }
 
@@ -148,8 +148,8 @@ static void test_change(int i, int step) {
     if (port_autorun_enabled()) {
         port_autorun_request(0);
     } else {
-        // port_autorun_request: 1 the full run, 3 the quick test, 2 the anti-aliasing benchmark.
-        static const long sRequests[3] = { 1, 3, 2 };
+        // port_autorun_request: 1 the full run, 3 the quick test, 4 the boss fights, 2 the anti-aliasing benchmark.
+        static const long sRequests[4] = { 1, 3, 4, 2 };
         port_autorun_request(sRequests[i]);
     }
     // The run turns on or off at the game's next frame.

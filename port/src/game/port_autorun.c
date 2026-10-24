@@ -36,6 +36,15 @@
  *   DKR_AUTORUN_QUICK_PASSES=n        Races per track (2).
  * Its files are quick_test_state.txt and quick_test_results.csv (with a "build" column).
  *
+ * The boss fights test races every boss once (Tricky, Bluey, Bubbler, Smokey and Wizpig, the first and the second
+ * fight of each), with one character, about half an hour. Boss levels aren't on the tracks menu, so the full run
+ * never races them. It is started with the "Boss fights" button in the Test run confirmation, or always runs with:
+ *   DKR_AUTORUN_BOSS=1                Turns it on (instead of the full run).
+ *   DKR_AUTORUN_BOSS_TRACKS=id,...    Levels (default: the ten boss fights).
+ *   DKR_AUTORUN_BOSS_CHARACTER=n      Character (default Bumper, as the other short runs).
+ *   DKR_AUTORUN_BOSS_PASSES=n         Races per boss (1).
+ * Its files are boss_test_state.txt and boss_test_results.csv (with a "build" column).
+ *
  * The order is character by character, each over every track, so stopping early still covers every track.
  * Progress is saved before each race (autorun_state.txt), so after a crash or a hang the next launch resumes with the
  * race after the one that failed, and records that race's failure. Each race adds a line to autorun_results.csv,
@@ -74,6 +83,9 @@
 #define QUICK_STATE_FILE "quick_test_state.txt"
 #define QUICK_RESULTS_FILE "quick_test_results.csv"
 #define QUICK_PASSES 2
+#define BOSS_STATE_FILE "boss_test_state.txt"
+#define BOSS_RESULTS_FILE "boss_test_results.csv"
+#define BOSS_PASSES 1
 
 typedef struct Race {
     s8 track;
@@ -100,10 +112,10 @@ static const char *const sCharacterNames[NUMBER_OF_CHARACTERS] = {
 };
 static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
-enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK };
+enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS };
 
-/* Which run: the full test run, the anti-aliasing benchmark or the quick test. */
-enum Mode { MODE_FULL, MODE_BENCH, MODE_QUICK, MODE_COUNT };
+/* Which run: the full test run, the anti-aliasing benchmark, the quick test or the boss fights. */
+enum Mode { MODE_FULL, MODE_BENCH, MODE_QUICK, MODE_BOSS, MODE_COUNT };
 
 typedef struct ModeInfo {
     const char *name;        // For the bottom screen and the results.
@@ -117,6 +129,7 @@ static const ModeInfo sModes[MODE_COUNT] = {
     { "Test run", STATE_FILE, RESULTS_FILE, NULL, "DKR_AUTORUN" },
     { "AA benchmark", BENCH_STATE_FILE, BENCH_RESULTS_FILE, "aa", "DKR_AUTORUN_BENCH" },
     { "Quick test", QUICK_STATE_FILE, QUICK_RESULTS_FILE, "build", "DKR_AUTORUN_QUICK" },
+    { "Boss fights", BOSS_STATE_FILE, BOSS_RESULTS_FILE, "build", "DKR_AUTORUN_BOSS" },
 };
 
 static s32 sEnabled = -1;
@@ -141,7 +154,11 @@ static s32 sStuckRetraces; // Game time since the kart last got further than eve
 // The most checkpoints passed this race. A kart that goes back past a checkpoint loses one, so a kart circling over
 // a checkpoint passes it again and again without getting anywhere: only a new best counts as progress.
 static s32 sBestProgress;
-static s32 sUnsticks;      // Times this race the kart was put at the next checkpoint.
+static f32 sLastPosition[3]; // The kart's position last frame, for saying where it left the race.
+static s32 sDriving;         // The kart has got going (a boss first talks to the player for a while).
+static s32 sRaceLevel;       // The level the kart got going in.
+static s32 sUnsticks;        // Times this race the kart was put at the next checkpoint.
+static s32 sLastUnstick;     // Lap * 1000 + the checkpoint the kart was last put at.
 static char sUnstuckAt[64]; // Where, as "lap:checkpoint" pairs.
 static s32 sLingerRetraces;
 static const char *sOutcome;
@@ -222,34 +239,42 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
 
 /*
  * The short runs: each track a number of times with one character. The benchmark races BENCH_PASSES times with
- * anti-aliasing off, on, on, off; the quick test leaves anti-aliasing as it is.
+ * anti-aliasing off, on, on, off; the quick test and the boss fights leave anti-aliasing as it is.
  */
 static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 8, 29, 28 };         // Whale Bay, Jungle Falls, Frosty Village
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
-    s32 quick = sMode == MODE_QUICK;
-    const s8 *defaultTracks = quick ? sQuickTracks : sBenchTracks;
-    s32 numDefault = quick ? (s32) ARRAY_COUNT(sQuickTracks) : (s32) ARRAY_COUNT(sBenchTracks);
+    static const s8 sBossTracks[] = {
+        ASSET_LEVEL_TRICKYTOPS1, ASSET_LEVEL_BLUEY1, ASSET_LEVEL_BUBBLER1, ASSET_LEVEL_SMOKEY1, ASSET_LEVEL_WIZPIG1,
+        ASSET_LEVEL_TRICKYTOPS2, ASSET_LEVEL_BLUEY2, ASSET_LEVEL_BUBBLER2, ASSET_LEVEL_SMOKEY2, ASSET_LEVEL_WIZPIG2,
+    };
+    s32 quick = sMode == MODE_QUICK, boss = sMode == MODE_BOSS;
+    const s8 *defaultTracks = boss ? sBossTracks : quick ? sQuickTracks : sBenchTracks;
+    s32 numDefault = boss    ? (s32) ARRAY_COUNT(sBossTracks)
+                     : quick ? (s32) ARRAY_COUNT(sQuickTracks)
+                             : (s32) ARRAY_COUNT(sBenchTracks);
+    const char *prefix = boss ? "DKR_AUTORUN_BOSS" : quick ? "DKR_AUTORUN_QUICK" : "DKR_AUTORUN_BENCH";
+    char name[48];
     s8 tracks[MAX_TRACKS], character[1];
     s32 numTracks, numLevels, numWorlds, t, pass, passes;
 
-    numTracks = parse_list(plat_getenv(quick ? "DKR_AUTORUN_QUICK_TRACKS" : "DKR_AUTORUN_BENCH_TRACKS"), tracks,
-                           MAX_TRACKS);
+    plat_snprintf(name, sizeof(name), "%s_TRACKS", prefix);
+    numTracks = parse_list(plat_getenv(name), tracks, MAX_TRACKS);
     if (numTracks < 0) {
         for (numTracks = 0; numTracks < numDefault; numTracks++) {
             tracks[numTracks] = defaultTracks[numTracks];
         }
     }
-    if (parse_list(plat_getenv(quick ? "DKR_AUTORUN_QUICK_CHARACTER" : "DKR_AUTORUN_BENCH_CHARACTER"), character,
-                   1) != 1 ||
-        character[0] < 0 || character[0] >= NUMBER_OF_CHARACTERS) {
+    plat_snprintf(name, sizeof(name), "%s_CHARACTER", prefix);
+    if (parse_list(plat_getenv(name), character, 1) != 1 || character[0] < 0 ||
+        character[0] >= NUMBER_OF_CHARACTERS) {
         character[0] = 1; // Bumper
     }
     passes = BENCH_PASSES;
-    if (quick) {
-        passes = plat_getenv("DKR_AUTORUN_QUICK_PASSES") ? port_atoi(plat_getenv("DKR_AUTORUN_QUICK_PASSES"))
-                                                         : QUICK_PASSES;
+    if (quick || boss) {
+        plat_snprintf(name, sizeof(name), "%s_PASSES", prefix);
+        passes = plat_getenv(name) ? port_atoi(plat_getenv(name)) : boss ? BOSS_PASSES : QUICK_PASSES;
     }
     level_count(&numLevels, &numWorlds);
     sNumRaces = 0;
@@ -261,7 +286,7 @@ static void build_short_list(void) {
             sRaces[sNumRaces].track = tracks[t];
             sRaces[sNumRaces].character = character[0];
             sRaces[sNumRaces].vehicle = leveltable_vehicle_default(tracks[t]);
-            sRaces[sNumRaces].aa = quick ? -1 : (pass == 1 || pass == 2);
+            sRaces[sNumRaces].aa = (quick || boss) ? -1 : (pass == 1 || pass == 2);
             sNumRaces++;
         }
     }
@@ -434,7 +459,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     if (sMode == MODE_BENCH) {
         // What the race was drawn with (a race that never got going: what it was meant to be).
         plat_snprintf(line + length, sizeof(line) - length, ",%d", stats == &empty ? (int) race->aa : plat_antialias());
-    } else if (sMode == MODE_QUICK) {
+    } else if (sMode == MODE_QUICK || sMode == MODE_BOSS) {
         plat_snprintf(line + length, sizeof(line) - length, ",%s", plat_build_version());
     }
     length = strlen(line);
@@ -498,6 +523,7 @@ static void init(void) {
     const char *benchNames[] = { "DKR_AUTORUN_BENCH_TRACKS", "DKR_AUTORUN_BENCH_CHARACTER" };
     const char *quickNames[] = { "DKR_AUTORUN_QUICK_TRACKS", "DKR_AUTORUN_QUICK_CHARACTER",
                                  "DKR_AUTORUN_QUICK_PASSES" };
+    const char *bossNames[] = { "DKR_AUTORUN_BOSS_TRACKS", "DKR_AUTORUN_BOSS_CHARACTER", "DKR_AUTORUN_BOSS_PASSES" };
     s32 i;
 
     sInitialised = TRUE;
@@ -511,6 +537,11 @@ static void init(void) {
         hash_text("quick test");
         for (i = 0; i < (s32) ARRAY_COUNT(quickNames); i++) {
             hash_text(plat_getenv(quickNames[i]));
+        }
+    } else if (sMode == MODE_BOSS) {
+        hash_text("boss fights");
+        for (i = 0; i < (s32) ARRAY_COUNT(bossNames); i++) {
+            hash_text(plat_getenv(bossNames[i]));
         }
     } else {
         for (i = 0; i < (s32) ARRAY_COUNT(names); i++) {
@@ -604,11 +635,15 @@ s32 port_autorun_active(void) {
 }
 
 /*
- * From any thread (the bottom screen's buttons): start the test run (1), the anti-aliasing benchmark (2) or the quick
- * test (3), or stop whichever is going (0), at the next game frame.
+ * From any thread (the bottom screen's buttons): start the test run (1), the anti-aliasing benchmark (2), the quick
+ * test (3) or the boss fights (4), or stop whichever is going (0), at the next game frame.
  */
 void port_autorun_request(s32 start) {
-    sRequest = start == 3 ? REQUEST_QUICK : start == 2 ? REQUEST_BENCH : start ? REQUEST_START : REQUEST_STOP;
+    sRequest = start == 4   ? REQUEST_BOSS
+               : start == 3 ? REQUEST_QUICK
+               : start == 2 ? REQUEST_BENCH
+               : start      ? REQUEST_START
+                            : REQUEST_STOP;
 }
 
 static void set_phase(s32 phase) {
@@ -653,7 +688,11 @@ static void show_status(void) {
             break;
     }
     plat_snprintf(line[0], sizeof(line[0]), "%s %d  race %d/%d  ok %d bad %d",
-                  sMode == MODE_BENCH ? "AA BENCH" : sMode == MODE_QUICK ? "QUICK TEST" : "TEST RUN", (int) sRun,
+                  sMode == MODE_BENCH   ? "AA BENCH"
+                  : sMode == MODE_QUICK ? "QUICK TEST"
+                  : sMode == MODE_BOSS  ? "BOSS FIGHTS"
+                                        : "TEST RUN",
+                  (int) sRun,
                   (int) sNext + 1, (int) sNumRaces, (int) sFinished, (int) sProblems);
     if (sMode == MODE_BENCH) {
         plat_snprintf(line[1], sizeof(line[1]), "%s AA %s %s", track_name(race->track), race->aa ? "on" : "off",
@@ -708,6 +747,7 @@ s32 port_autorun_title(void) {
     sRaceRetraces = 0;
     sStuckRetraces = 0;
     sBestProgress = -0x10000;
+    sDriving = FALSE;
     sUnsticks = 0;
     sUnstuckAt[0] = '\0';
     sLingerRetraces = 0;
@@ -743,7 +783,10 @@ static double parse_decimal(const char *text) {
 enum BenchColumn {
     COL_RUN = 0,
     COL_TRACK = 3,
+    COL_CHARACTER = 4,
     COL_OUTCOME = 6,
+    COL_RACE_S = 7,
+    COL_POSITION = 8,
     COL_FPS = 11,
     COL_PCT_30FPS = 12,
     COL_WORST_FRAME = 15, // ms
@@ -751,6 +794,7 @@ enum BenchColumn {
     COL_GPU_DRAW = 23,
     COL_WORST_GPU = 27,
     COL_LIMIT = 32,
+    COL_UNSTICKS = 33,
     COL_EXTRA = 35, // After the test run's unsticks and unstuck_at: "aa" (benchmark) or "build" (quick test)
     COL_COUNT
 };
@@ -962,22 +1006,71 @@ static void bench_summary(char *out, s32 size) {
     }
 }
 
+/* The boss fights' summary: one line per race of this run, from its results file, as Markdown. */
+static void boss_summary(char *out, s32 size) {
+    char path[256];
+    char *data, *text, *line, *next;
+    const char *fields[COL_COUNT + 1];
+    unsigned int dataSize;
+    s32 length;
+
+    make_path(path, sizeof(path), results_file());
+    data = plat_load_file(path, &dataSize);
+    if (data == NULL) {
+        return;
+    }
+    text = plat_malloc(dataSize + 1);
+    if (text == NULL) {
+        plat_free(data);
+        return;
+    }
+    bcopy(data, text, dataSize);
+    text[dataSize] = '\0';
+    plat_free(data);
+    length = plat_snprintf(out, size,
+                           "\n### Boss fights\n\n| boss | character | outcome | time s | place | fps | 30 fps | worst frame "
+                           "| unsticks |\n|---|---|---|--:|--:|--:|--:|--:|--:|\n");
+    for (line = text; line != NULL && *line && length < size; line = next) {
+        next = strchr(line, '\n');
+        if (next != NULL) {
+            *next++ = '\0';
+        }
+        if (split_fields(line, fields) < COL_COUNT || port_atoi(fields[COL_RUN]) != sRun) {
+            continue; // The header, or an earlier run.
+        }
+        length += plat_snprintf(out + length, size - length, "| %s | %s | %s | %s | %s | %s | %s%% | %s | %s |\n",
+                                fields[COL_TRACK], fields[COL_CHARACTER], fields[COL_OUTCOME], fields[COL_RACE_S],
+                                fields[COL_POSITION], fields[COL_FPS], fields[COL_PCT_30FPS],
+                                fields[COL_WORST_FRAME], fields[COL_UNSTICKS]);
+    }
+    plat_free(text);
+}
+
 /* Sends the results so far as a GitHub issue (when bug reports are set up), and says so on the bottom screen. */
 static void send_results(const char *why) {
     char title[128];
     static char summary[2048];
     s32 length;
     plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
-                  sMode == MODE_BENCH ? "AA benchmark " : sMode == MODE_QUICK ? "quick test " : "", (int) sRun, (int) (sFinished + sProblems), (int) sNumRaces,
+                  sMode == MODE_BENCH   ? "AA benchmark "
+                  : sMode == MODE_QUICK ? "quick test "
+                  : sMode == MODE_BOSS  ? "boss fights "
+                                        : "",
+                  (int) sRun, (int) (sFinished + sProblems), (int) sNumRaces,
                   (int) sProblems, why);
     length = plat_snprintf(summary, sizeof(summary),
                            "%s %d %s after %d of %d races: %d finished, %d with problems.\n"
                            "Average frame rate of the races finished since the game started: %.1f fps (%d races).\n",
-                           sMode == MODE_BENCH ? "Anti-aliasing benchmark run" : sMode == MODE_QUICK ? "Quick test run" : "Run",
+                           sMode == MODE_BENCH   ? "Anti-aliasing benchmark run"
+                           : sMode == MODE_QUICK ? "Quick test run"
+                           : sMode == MODE_BOSS  ? "Boss fights run"
+                                                 : "Run",
                            (int) sRun, why,
                            (int) (sFinished + sProblems), (int) sNumRaces, (int) sFinished, (int) sProblems,
                            sFpsCount ? sFpsSum / sFpsCount : 0.0, (int) sFpsCount);
-    if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
+    if (sMode == MODE_BOSS && length > 0 && length < (s32) sizeof(summary)) {
+        boss_summary(summary + length, sizeof(summary) - length);
+    } else if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
         bench_summary(summary + length, sizeof(summary) - length);
     }
     plat_status("%s %s: %d races, %d problems", sModes[sMode].name, why, (int) (sFinished + sProblems), (int) sProblems);
@@ -1051,8 +1144,12 @@ static void end_race(const char *outcome, s32 position) {
 static void handle_request(void) {
     s32 request = sRequest;
     sRequest = REQUEST_NONE;
-    if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK) && !port_autorun_active()) {
-        sMode = request == REQUEST_BENCH ? MODE_BENCH : request == REQUEST_QUICK ? MODE_QUICK : MODE_FULL;
+    if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS) &&
+        !port_autorun_active()) {
+        sMode = request == REQUEST_BENCH   ? MODE_BENCH
+                : request == REQUEST_QUICK ? MODE_QUICK
+                : request == REQUEST_BOSS  ? MODE_BOSS
+                                           : MODE_FULL;
         sEnabled = 1;
         sInitialised = FALSE;
         if (!port_autorun_active()) {
@@ -1077,24 +1174,40 @@ static void handle_request(void) {
  * The AI that drives the player's kart sometimes wedges it somewhere a CPU racer never goes (CPU racers use simpler
  * physics, and the AI's own reverse-out only works on the ground). After UNSTICK_SECONDS without a new checkpoint
  * the kart is put just before the next checkpoint, facing along the course, the way the game resets a racer to the
- * start line (func_800230D0). Each time is noted in the results and in autorun_problems.txt, so the spot is known.
+ * start line (func_800230D0). If it gets stuck again before that checkpoint, the checkpoint is counted as passed and
+ * the kart is put before the one after it. Each time is noted in the results and in autorun_problems.txt, so the spot
+ * is known.
  */
 static void unstick(Object *obj, Object_Racer *racer) {
-    CheckpointNode *node = find_next_checkpoint_node(racer->nextCheckpoint, racer->isOnAlternateRoute);
+    s32 checkpoint = racer->nextCheckpoint;
+    CheckpointNode *node;
     Camera *camera;
     char what[128];
     s32 i, length;
 
+    // Put there before and it didn't help (the AI drives back into the same wall): count that checkpoint as passed
+    // and put the kart before the one after it instead.
+    if (sUnsticks > 0 && sLastUnstick == racer->lap * 1000 + checkpoint && get_checkpoint_count() > 0) {
+        // Passed, the way the game counts it (racer.c, after checkpoint_is_passed).
+        checkpoint = (checkpoint + 1) % get_checkpoint_count();
+        racer->nextCheckpoint = checkpoint;
+        if (checkpoint == 0 && racer->courseCheckpoint > 0 && racer->lap < 120) {
+            racer->lap++;
+        }
+        racer->courseCheckpoint++;
+    }
+    sLastUnstick = racer->lap * 1000 + racer->nextCheckpoint;
+    node = find_next_checkpoint_node(checkpoint, racer->isOnAlternateRoute);
     if (node == NULL) {
         return;
     }
     plat_snprintf(what, sizeof(what), "note: put at checkpoint %d of lap %d after %d s without progress, from %.0f,%.0f,%.0f",
-                  (int) racer->nextCheckpoint, (int) racer->lap + 1, UNSTICK_SECONDS, obj->trans.x_position,
+                  (int) checkpoint, (int) racer->lap + 1, UNSTICK_SECONDS, obj->trans.x_position,
                   obj->trans.y_position, obj->trans.z_position);
     record_problem(what);
     length = strlen(sUnstuckAt);
     plat_snprintf(sUnstuckAt + length, sizeof(sUnstuckAt) - length, "%s%d:%d", length ? " " : "", (int) racer->lap + 1,
-                  (int) racer->nextCheckpoint);
+                  (int) checkpoint);
     sUnsticks++;
     obj->trans.x_position = node->x - node->rotationXFrac * 20.0f;
     obj->trans.y_position = node->y;
@@ -1168,8 +1281,28 @@ void port_autorun_frame(s32 updateRate) {
                 break;
             }
             sRaceRetraces += updateRate;
+            if (sDriving && level_id() != sRaceLevel) {
+                // The game took the player out of the race without finishing it (falling off a boss's course sends
+                // them to the hub). Boss races start in another level, for the boss's speech, so the race's level is
+                // the one the kart got going in.
+                char what[96];
+                plat_snprintf(what, sizeof(what), "note: the game left the race for level %d, last at %.0f,%.0f,%.0f",
+                              (int) level_id(), sLastPosition[0], sLastPosition[1], sLastPosition[2]);
+                record_problem(what);
+                end_race("left_level", racer->racePosition);
+                break;
+            }
+            sLastPosition[0] = obj->trans.x_position;
+            sLastPosition[1] = obj->trans.y_position;
+            sLastPosition[2] = obj->trans.z_position;
             progress = racer->courseCheckpoint;
-            if (progress > sBestProgress) {
+            if (!sDriving && (racer->velocity > 1.0f || racer->velocity < -1.0f)) {
+                sDriving = TRUE;
+                sRaceLevel = level_id();
+            }
+            if (!sDriving) {
+                // Not going yet: no time without progress.
+            } else if (progress > sBestProgress) {
                 sBestProgress = progress;
                 sStuckRetraces = 0;
             } else {
