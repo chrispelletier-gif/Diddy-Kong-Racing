@@ -110,6 +110,12 @@ void port_ai_init(void);
 void port_gfx_init(void);
 void port_gfx_run_task(void *task);
 void port_audio_run_task(void *task);
+/*
+ * The rate the game's mixer runs at when it asks for requested (the player can choose a higher one, roadmap O5).
+ * Pitches and reverb lengths are scaled by gPortAudioRateScale (requested / chosen) to sound the same.
+ */
+u32 port_audio_output_rate(u32 requested);
+extern float gPortAudioRateScale;
 void port_audio_output_init(u32 frequency);
 void port_audio_output_queue(const s16 *samples, u32 numBytes);
 u32 port_audio_output_remaining_bytes(void);

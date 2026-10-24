@@ -164,6 +164,8 @@ static s32 sLingerRetraces;
 static const char *sOutcome;
 static s32 sFinished, sProblems;
 static ProfStats sRaceStats;
+/* The sound's gap and drop counters when the race started (roadmap P9 is judged by them). */
+static u32 sAudioGapsStart, sAudioDropsStart;
 
 static s32 str_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
@@ -423,7 +425,8 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                       "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
                       "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
                       "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
-                      "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s\n",
+                      "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
+                      "audio_gaps,audio_drops,sound\n",
                       sModes[sMode].extraColumn ? "," : "",
                       sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
         append_file(results_file(), header);
@@ -463,7 +466,11 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         plat_snprintf(line + length, sizeof(line) - length, ",%s", plat_build_version());
     }
     length = strlen(line);
-    plat_snprintf(line + length, sizeof(line) - length, "\n");
+    // After the mode's own column, so the columns before keep their places in older results files.
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s\n",
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
+                  plat_audio_setup());
     append_file(results_file(), line);
     port_log("autorun: %s", line);
     if (str_equal(outcome, "finished")) {
@@ -792,11 +799,13 @@ enum BenchColumn {
     COL_WORST_FRAME = 15, // ms
     COL_RDP = 20,
     COL_GPU_DRAW = 23,
+    COL_AUDIO = 24,
     COL_WORST_GPU = 27,
     COL_LIMIT = 32,
     COL_UNSTICKS = 33,
     COL_EXTRA = 35, // After the test run's unsticks and unstuck_at: "aa" (benchmark) or "build" (quick test)
-    COL_COUNT
+    COL_COUNT,
+    COL_AUDIO_GAPS = COL_COUNT, // Only in results written since the sound columns were added.
 };
 
 #define BENCH_MAX_TRACKS 8
@@ -806,7 +815,7 @@ typedef struct BenchGroup {
     char track[32];
     char build[40]; // Quick test: the run and its build.
     s32 races;
-    double fps, pct30, rdp, gpu;
+    double fps, pct30, rdp, gpu, audio, gaps;
     s32 worstFrame, worstGpu;
     s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
 } BenchGroup;
@@ -822,7 +831,7 @@ static s32 split_fields(char *line, const char **fields) {
     s32 numFields = 0;
     char *c;
     fields[numFields++] = line;
-    for (c = line; *c && numFields <= COL_COUNT; c++) {
+    for (c = line; *c && numFields < COL_COUNT + 4; c++) {
         if (*c == ',') {
             *c = '\0';
             fields[numFields++] = c + 1;
@@ -840,7 +849,7 @@ static void bench_summary(char *out, s32 size) {
     static BenchGroup groups[BENCH_MAX_TRACKS][2];
     char path[256];
     char *data, *copy, *line, *next;
-    const char *fields[COL_COUNT + 1];
+    const char *fields[COL_COUNT + 4];
     unsigned int dataSize;
     s32 numTracks = 0, length, t, k, i, run, previousRun = 0;
     s32 quick = sMode == MODE_QUICK;
@@ -885,11 +894,13 @@ static void bench_summary(char *out, s32 size) {
     plat_free(copy);
     for (line = data; line != NULL && *line; line = next) {
         BenchGroup *g;
+        s32 numFields;
         next = strchr(line, '\n');
         if (next != NULL) {
             *next++ = '\0';
         }
-        if (split_fields(line, fields) < COL_COUNT || !str_equal(fields[COL_OUTCOME], "finished")) {
+        numFields = split_fields(line, fields);
+        if (numFields < COL_COUNT || !str_equal(fields[COL_OUTCOME], "finished")) {
             continue; // The header, or a race that didn't finish.
         }
         run = port_atoi(fields[COL_RUN]);
@@ -922,6 +933,8 @@ static void bench_summary(char *out, s32 size) {
         g->pct30 += parse_decimal(fields[COL_PCT_30FPS]);
         g->rdp += parse_decimal(fields[COL_RDP]);
         g->gpu += parse_decimal(fields[COL_GPU_DRAW]);
+        g->audio += parse_decimal(fields[COL_AUDIO]);
+        g->gaps += numFields > COL_AUDIO_GAPS ? port_atoi(fields[COL_AUDIO_GAPS]) : 0;
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -942,19 +955,19 @@ static void bench_summary(char *out, s32 size) {
                                    "\n### Quick test (averages of the finished races)\n\n"
                                    "No earlier quick test on this console to compare with; the next one will be.\n\n"
                                    "| track | run, build | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame "
-                                   "| limit |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|\n");
+                                   "| limit | audio ms | sound gaps |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n");
         } else {
             length = plat_snprintf(out, size,
                                    "\n### Quick test: run %d against run %d (averages of the finished races)\n\n"
                                    "| track | run, build | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame "
-                                   "| limit |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|\n",
+                                   "| limit | audio ms | sound gaps |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
                                    (int) sRun, (int) previousRun);
         }
     } else {
         length = plat_snprintf(out, size,
                                "\n### Anti-aliasing off vs on (averages of the finished races)\n\n"
-                               "| track | AA | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame | limit |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|---|\n");
+                               "| track | AA | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame | limit "
+                               "| audio ms | sound gaps |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n");
     }
     for (t = 0; t < numTracks; t++) {
         for (k = 0; k < 2; k++) {
@@ -972,11 +985,12 @@ static void bench_summary(char *out, s32 size) {
                 return;
             }
             length += plat_snprintf(out + length, size - length,
-                                    "| %s | %s | %d | %.1f | %.0f%% | %.1f | %d | %.1f | %d | %s |\n",
+                                    "| %s | %s | %d | %.1f | %.0f%% | %.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
                                     groups[t][0].track, quick ? g->build : k ? "on" : "off", (int) g->races,
                                     bench_avg(g->fps, g->races), bench_avg(g->pct30, g->races),
                                     bench_avg(g->gpu, g->races), (int) g->worstGpu, bench_avg(g->rdp, g->races),
-                                    (int) g->worstFrame, sLimitNames[limit]);
+                                    (int) g->worstFrame, sLimitNames[limit], bench_avg(g->audio, g->races),
+                                    g->gaps);
         }
     }
     for (t = 0; t < numTracks && length < size; t++) {
@@ -987,13 +1001,14 @@ static void bench_summary(char *out, s32 size) {
         if (quick) {
             length += plat_snprintf(out + length, size - length,
                                     "%s%s: %+.1f fps, 30 fps on %+.0f%% of frames, GPU %+.1f ms, rdp %+.1f ms, worst "
-                                    "frame %+d ms.\n",
+                                    "frame %+d ms, audio %+.2f ms.\n",
                                     t == 0 ? "\n" : "", groups[t][0].track,
                                     bench_avg(on->fps, on->races) - bench_avg(off->fps, off->races),
                                     bench_avg(on->pct30, on->races) - bench_avg(off->pct30, off->races),
                                     bench_avg(on->gpu, on->races) - bench_avg(off->gpu, off->races),
                                     bench_avg(on->rdp, on->races) - bench_avg(off->rdp, off->races),
-                                    (int) (on->worstFrame - off->worstFrame));
+                                    (int) (on->worstFrame - off->worstFrame),
+                                    bench_avg(on->audio, on->races) - bench_avg(off->audio, off->races));
         } else {
             length += plat_snprintf(out + length, size - length,
                                     "%s%s: AA costs %.1f ms of GPU time per frame and %.1f fps (30 fps on %.0f%% of "
@@ -1010,7 +1025,7 @@ static void bench_summary(char *out, s32 size) {
 static void boss_summary(char *out, s32 size) {
     char path[256];
     char *data, *text, *line, *next;
-    const char *fields[COL_COUNT + 1];
+    const char *fields[COL_COUNT + 4];
     unsigned int dataSize;
     s32 length;
 
@@ -1272,6 +1287,8 @@ void port_autorun_frame(s32 updateRate) {
         case PHASE_COUNTDOWN:
             if (racer != NULL && get_race_countdown() == 0) {
                 prof_window_start(PROF_WINDOW_SESSION);
+                sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
+                sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
                 set_phase(PHASE_RACING);
             }
             break;
