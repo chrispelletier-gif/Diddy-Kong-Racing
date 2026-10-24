@@ -14,11 +14,16 @@
 #define STBI_WRITE_NO_STDIO_FILES_UNUSED
 #include "../../tools/stb/stb_image_write.h"
 
-#define W GFX_SCREEN_WIDTH
 #define H GFX_SCREEN_HEIGHT
+/* The frame's width: 320, or 400 for a preview of the 3DS's widescreen (DKR_WIDESCREEN=1, roadmap item G3; the game's
+ * camera is widened by plat_aspect_scale, flat draws are kept 4:3 as gfx_flat_x says). */
+#define MAX_W 400
+#define NARROW (320.0f / 400.0f)
+static int W = GFX_SCREEN_WIDTH;
+static int sWide;
 
-static uint8_t sColor[W * H * 4];
-static float sDepth[W * H];
+static uint8_t sColor[MAX_W * H * 4];
+static float sDepth[MAX_W * H];
 static volatile int sFramesRendered;
 static int sMipmaps = -1, sColour = -1; // DKR_MIPMAP, DKR_COLOUR: see read_upgrade_settings
 static int sDumpEvery = -1;
@@ -34,6 +39,8 @@ static void build_mips(GfxTexture *tex);
 void gfxb_init(void) {
     const char *env = getenv("DKR_DUMP_EVERY");
     read_upgrade_settings();
+    sWide = getenv("DKR_WIDESCREEN") != NULL && atoi(getenv("DKR_WIDESCREEN")) != 0;
+    W = sWide ? MAX_W : GFX_SCREEN_WIDTH;
     sDumpEvery = env ? atoi(env) : 0;
     sDumpDir = getenv("DKR_DUMP_DIR");
     if (sDumpDir == NULL) {
@@ -53,15 +60,25 @@ void gfxb_end_frame(void) {
     }
 }
 
-/* Writes the current frame (320x240) to a PNG file. */
+/* Writes the current frame (320x240, or 400x240 in widescreen) to a PNG file. */
 void gfxb_soft_save_png(const char *path) {
     stbi_write_png(path, W, H, 4, sColor, W * 4);
 }
 
+/* A rectangle's x in N64 screen pixels, on this frame: a flat draw's (fills and scissors of flat draws) or a 3D one's. */
+static int frame_x(int x, int flat) {
+    if (!sWide) {
+        return x;
+    }
+    return (int) floorf((flat ? gfx_flat_px(x, NARROW, W) : x * ((float) W / GFX_SCREEN_WIDTH)) + 0.5f);
+}
+
 static void clip_rect(const int16_t in[4], int *x0, int *y0, int *x1, int *y1) {
-    *x0 = in[0] < 0 ? 0 : in[0];
+    *x0 = frame_x(in[0], 1);
+    *x1 = frame_x(in[2], 1);
+    *x0 = *x0 < 0 ? 0 : *x0;
     *y0 = in[1] < 0 ? 0 : in[1];
-    *x1 = in[2] > W ? W : in[2];
+    *x1 = *x1 > W ? W : *x1;
     *y1 = in[3] > H ? H : in[3];
 }
 
@@ -316,8 +333,8 @@ typedef struct ClipVert {
     float r, g, b, a;
 } ClipVert;
 
-static void to_clip(ClipVert *o, const GfxVertex *v) {
-    o->x = v->x;
+static void to_clip(ClipVert *o, const GfxVertex *v, int flat) {
+    o->x = (sWide && flat) ? gfx_flat_x(v->x, v->w, NARROW) : v->x;
     o->y = v->y;
     o->z = v->z;
     o->w = v->w;
@@ -594,9 +611,11 @@ static void log_combiner(const GfxDrawState *st) {
     fflush(f);
 }
 
-void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
+void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, int numTriangles) {
     static int sNullRender = -1;
     int t, i, n;
+    GfxDrawState wideState;
+    const GfxDrawState *state = drawState;
     if (sNullRender < 0) {
         sNullRender = getenv("DKR_NULL_RENDER") != NULL; // Skip rasterising, for profiling everything else.
     }
@@ -604,11 +623,17 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         return;
     }
     log_combiner(state);
+    if (sWide) {
+        wideState = *drawState;
+        wideState.scissor[0] = frame_x(drawState->scissor[0], drawState->flat);
+        wideState.scissor[2] = frame_x(drawState->scissor[2], drawState->flat);
+        state = &wideState;
+    }
     for (t = 0; t < numTriangles; t++) {
         ClipVert in[3], clipped[8];
         ScreenVert s[8];
         for (i = 0; i < 3; i++) {
-            to_clip(&in[i], &verts[t * 3 + i]);
+            to_clip(&in[i], &verts[t * 3 + i], state->flat);
         }
         n = clip_near(in, 3, clipped);
         if (n < 3) {

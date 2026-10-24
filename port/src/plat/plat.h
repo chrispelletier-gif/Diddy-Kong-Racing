@@ -156,6 +156,12 @@ void plat_send_test_results(const char *title, const char *summary);
  */
 void plat_set_antialias(int on);
 int plat_antialias(void);
+/*
+ * Widescreen (roadmap item G3): how much wider than 4:3 the game's camera is to be, 1 for 4:3 or 1.25 to fill the
+ * 3DS's 400x240 top screen. Read by the game thread each frame (src/camera.c); the 3DS Settings menu sets it, the host
+ * build takes DKR_WIDESCREEN=1.
+ */
+float plat_aspect_scale(void);
 /* The build's version (git describe), as bug reports show it; "host" for a host build without one. */
 const char *plat_build_version(void);
 

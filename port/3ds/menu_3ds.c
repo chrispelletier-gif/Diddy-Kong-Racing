@@ -25,6 +25,9 @@ void plat_3ds_set_mipmap_setting(int mode);
 int plat_3ds_mipmap_setting(void);
 void plat_3ds_set_colour_setting(int level);
 int plat_3ds_colour_setting(void);
+void plat_3ds_set_screen_setting(int which, int on);
+int plat_3ds_screen_setting(int which);
+int plat_3ds_wide800_supported(void);
 long port_autorun_enabled(void);
 void port_autorun_request(long start);
 int prof_user_enabled(void);
@@ -52,7 +55,7 @@ static int sFirst;  // First row shown.
 static int sResult; // What a tap asked of the panel (MENU_*).
 static int sDrawnTestRun = -1;
 
-static const MenuPage sMainPage, sTestRunPage;
+static const MenuPage sMainPage, sTestRunPage, sScreenPage;
 
 static void draw(void);
 
@@ -62,9 +65,9 @@ static void open_page(const MenuPage *page) {
     draw();
 }
 
-/* The main page: anti-aliasing, mipmaps, colour boost, the profiler, the added pages, then the test run, updates and
- * bug report. */
-enum { MAIN_AA, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_PROFILER, MAIN_PAGES };
+/* The main page: anti-aliasing, mipmaps, colour boost, the screen page, the profiler, the added pages, then the test
+ * run, updates and bug report. */
+enum { MAIN_AA, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_SCREEN, MAIN_PROFILER, MAIN_PAGES };
 
 static const char *const sColourLevels[4] = { "Off", "Low", "Medium", "High" };
 static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
@@ -81,6 +84,8 @@ static const char *main_label(int i) {
         return "Mipmaps";
     } else if (i == MAIN_COLOUR) {
         return "Colour boost";
+    } else if (i == MAIN_SCREEN) {
+        return "Screen";
     } else if (i == MAIN_PROFILER) {
         return "Profiler";
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -112,6 +117,8 @@ static const char *main_hint(int i) {
         return plat_3ds_mipmap_setting() == 2 ? "Tints each level a colour" : "No shimmer on distant textures";
     } else if (i == MAIN_COLOUR) {
         return "Richer colours on the 3DS screen";
+    } else if (i == MAIN_SCREEN) {
+        return "Widescreen, 800 pixels, 3D";
     } else if (i == MAIN_PROFILER) {
         return "Frame times on this screen";
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -129,6 +136,8 @@ static void main_change(int i, int step) {
         plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + 3) % 3);
     } else if (i == MAIN_COLOUR) {
         plat_3ds_set_colour_setting((plat_3ds_colour_setting() + step + 4) % 4);
+    } else if (i == MAIN_SCREEN) {
+        open_page(&sScreenPage);
     } else if (i == MAIN_PROFILER) {
         prof_set_user_enabled(!prof_user_enabled());
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -143,6 +152,38 @@ static void main_change(int i, int step) {
 }
 
 static const MenuPage sMainPage = { "Settings", main_count, main_label, main_value, main_change, main_hint, NULL };
+
+/* The top screen (roadmap phase 6, gfx_c3d.c): widescreen, the 800 pixel mode and stereo 3D, each on or off. */
+static int screen_count(void) {
+    return 3;
+}
+
+static const char *screen_label(int i) {
+    static const char *const sLabels[3] = { "Widescreen", "800 pixels", "Stereo 3D" };
+    return sLabels[i];
+}
+
+static void screen_value(int i, char *out, int size) {
+    snprintf(out, size, "%s", plat_3ds_screen_setting(i) ? "On" : "Off");
+}
+
+static const char *screen_hint(int i) {
+    if (i == 0) {
+        return "Fill the top screen; HUD stays 4:3";
+    } else if (i == 1) {
+        return plat_3ds_wide800_supported() ? "Sharper picture while 3D is off" : "Not on this console (2DS)";
+    }
+    return "With the 3D slider; no anti-aliasing in 3D";
+}
+
+static void screen_change(int i, int step) {
+    (void) step;
+    plat_3ds_set_screen_setting(i, !plat_3ds_screen_setting(i));
+}
+
+static const MenuPage sScreenPage = {
+    "Screen", screen_count, screen_label, screen_value, screen_change, screen_hint, "Changes show from the next frame"
+};
 
 /* The test run (port_autorun.c): stop the one running, or start one of its four kinds. */
 static int test_count(void) {

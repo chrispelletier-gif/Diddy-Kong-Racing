@@ -3,7 +3,12 @@
 ; like the SM64 3DS port's. The previous shader, which transformed positions and texture coordinates with uniforms,
 ; hung the GPU of a real New 3DS on the first triangle (emulators ran it fine).
 ; The only arithmetic is the colour's: it arrives as four bytes (0 to 255, roadmap item P5), scaled to 0 to 1 the way
-; citro2d's shader does it.
+; citro2d's shader does it; and stereo 3D's (roadmap item G5): each eye's picture is the same frame with the position
+; moved across the screen (clip y, as the screen is turned a quarter) by eye.x * w + eye.y. The renderer writes eye
+; itself before each eye's pass (write_eye in gfx_c3d.c), and (0, 0) when the frame isn't in 3D.
+
+; Uniforms
+.fvec eye
 
 ; Constants
 .constf consts(0.00392156862745098, 0.0, 0.0, 0.0)
@@ -22,7 +27,11 @@
 .alias inclr v3
 
 .proc main
-	mov outpos, inpos
+	mov r0, inpos
+	mul r1, eye.xxxx, inpos.wwww
+	add r1, eye.yyyy, r1
+	add r0.y, r0.y, r1.x
+	mov outpos, r0
 	mov outtc0, intc0
 	mov outtc1, intc1
 	mul outclr, rgba_scale, inclr

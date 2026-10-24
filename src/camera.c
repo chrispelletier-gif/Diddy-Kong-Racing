@@ -873,9 +873,29 @@ void viewport_scissor(Gfx **dList) {
     }
 }
 
+#ifdef TARGET_PORT
+/**
+ * Widescreen in the port: rebuilds the perspective matrix when the camera's aspect ratio setting changes.
+ */
+static void cam_port_update_aspect(void) {
+    static f32 sAspect = 1.0f;
+    f32 aspect = plat_aspect_scale();
+    if (aspect != sAspect) {
+        sAspect = aspect;
+        guPerspectiveF(gPerspectiveMatrixF, &perspNorm, gCurCamFOV, CAMERA_ASPECT, CAMERA_NEAR, CAMERA_FAR,
+                       CAMERA_SCALE);
+        mtxf_to_mtx(&gPerspectiveMatrixF, &gPerspectiveMatrix);
+    }
+}
+#endif
+
 // Official Name: camGetPlayerProjMtx / camSetProjMtx - ??
 void func_80067D3C(Gfx **dList, UNUSED Mtx **mtx) {
     s32 originalCamID;
+
+#ifdef TARGET_PORT
+    cam_port_update_aspect();
+#endif
 
     gSPPerspNormalize((*dList)++, perspNorm);
 

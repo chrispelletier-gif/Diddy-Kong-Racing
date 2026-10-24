@@ -64,6 +64,15 @@ void plat_set_antialias(int on) {
     sAntialias = on < 0 ? 1 : on;
 }
 
+float plat_aspect_scale(void) {
+    static int sWide = -1;
+    if (sWide < 0) {
+        const char *env = getenv("DKR_WIDESCREEN");
+        sWide = env != NULL && atoi(env) != 0;
+    }
+    return sWide ? 1.25f : 1.0f;
+}
+
 int plat_antialias(void) {
     return sAntialias;
 }

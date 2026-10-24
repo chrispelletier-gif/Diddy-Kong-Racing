@@ -17,7 +17,13 @@
 #define SCREEN_WIDTH_FLOAT_HALF ((float)SCREEN_WIDTH / 2)
 #define SCREEN_HEIGHT_FLOAT_HALF ((float)SCREEN_HEIGHT / 2)
 
+#ifdef TARGET_PORT
+// Widescreen: the port can widen the camera to the screen's shape (port/src/plat/plat.h).
+float plat_aspect_scale(void);
+#define CAMERA_ASPECT (SCREEN_WIDTH_FLOAT / SCREEN_HEIGHT_FLOAT * plat_aspect_scale())
+#else
 #define CAMERA_ASPECT (SCREEN_WIDTH_FLOAT / SCREEN_HEIGHT_FLOAT)
+#endif
 #define CAMERA_FAR 15000.0f
 #define CAMERA_NEAR 10.0f
 #define CAMERA_DEFAULT_FOV 60.0f

@@ -25,6 +25,7 @@ typedef struct RspVertex {
     u8 r, g, b, a;
     u8 fog;
     u8 fogValid; // The fog factor is only worked out while G_FOG is set (see load_vertices)
+    u8 flat;     // Loaded with an orthographic matrix: drawn flat on the screen (GfxDrawState.flat)
 } RspVertex;
 
 typedef struct Tile {
@@ -717,6 +718,7 @@ static void build_draw_state(GfxDrawState *s, s32 isRect) {
     for (i = 0; i < 4; i++) {
         s->scissor[i] = g.scissor[i];
     }
+    s->flat = isRect; // Triangles set it per triangle (draw_dkr_triangles).
     if (isRect) {
         s->scissor[2] = scissor_right(cyc);
     }
@@ -813,6 +815,8 @@ static void vertex_fog(RspVertex *v) {
 static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float(*m)[4] = g.matrices[g.curMatrix];
     s32 i, fog = (g.geometryMode & G_FOG) != 0;
+    // An orthographic matrix (the HUD's, menus', fades') gives every vertex the same w.
+    u8 flat = m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f;
 
     for (i = 0; i < count && dest + i < MAX_VERTICES; i++) {
         RspVertex *v = &g.verts[dest + i];
@@ -832,6 +836,7 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
         v->g = src[i].g;
         v->b = src[i].b;
         v->a = src[i].a;
+        v->flat = flat;
         // The fog factor costs a divide, so it is only worked out for vertices loaded with fog on (all fogged
         // geometry, in practice); draw_dkr_triangles catches any others if fog is turned on before they are drawn.
         v->fogValid = fog;
@@ -875,7 +880,7 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     float w0 = 1.0f, h0 = 1.0f, w1 = 1.0f, h1 = 1.0f;
     TexAxis u0, v0, u1, v1;
     Viewport vp;
-    u8 batchedCull = 0xFF;
+    u8 batchedKey = 0xFF; // The batch's culling and flatness
     u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
     s32 tex0, tex1;
 
@@ -930,12 +935,15 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         }
         // Backface culling: flag 0x40 means double sided. The game mirrors the viewport for mirror mode.
         state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : frontCull;
-        if (state.cullMode == batchedCull && sBatchCount > 0 && sBatchCount < MAX_BATCH_TRIANGLES) {
-            // Only the culling changes from one triangle to the next, so the batch's state is still this one.
+        state.flat = g.verts[idx[0]].flat && g.verts[idx[1]].flat && g.verts[idx[2]].flat;
+        if ((state.cullMode | (state.flat << 2)) == batchedKey && sBatchCount > 0 &&
+            sBatchCount < MAX_BATCH_TRIANGLES) {
+            // Only the culling and flatness change from one triangle to the next, so the batch's state is still this
+            // one.
             out = &sBatchVerts[sBatchCount++ * 3];
         } else {
             out = batch_triangle(&state);
-            batchedCull = state.cullMode;
+            batchedKey = state.cullMode | (state.flat << 2);
         }
         for (k = 0; k < 3; k++) {
             finish_vertex(&out[k], &g.verts[idx[k]], &vp, fog);
