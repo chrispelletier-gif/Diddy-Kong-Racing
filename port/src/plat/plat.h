@@ -106,6 +106,8 @@ void plat_log_copy_to(const char *path);
  */
 enum { PLAT_3DS_PARKED_GPU_IDLE = 1, PLAT_3DS_PARKED_GPU_BUSY = 2 };
 void plat_3ds_quit_point(int parkedState);
+/* Whether the renderer is to stop at its next quit point (closing or suspending): see gfxb_end_frame. */
+int plat_3ds_renderer_should_park(void);
 void plat_3ds_pause_renderer(int pause);
 /* Keeps the console awake when the lid closes while held (counted: each hold needs a release). */
 void plat_3ds_hold_sleep(int hold);
