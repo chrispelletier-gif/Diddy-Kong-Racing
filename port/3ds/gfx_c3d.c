@@ -2628,7 +2628,9 @@ static void set_draw_state(const GfxDrawState *state) {
         sGpu.depthMask = depthMask;
     }
     if (!sGpu.known || state->decal != sGpu.decal) {
-        C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f : 0.0f);
+        // Widescreen's camera cuts 4 times closer (CAMERA_NEAR), which spreads depth 4 times as far: decals are pulled
+        // a quarter as much to stay as close to their surfaces.
+        C3D_DepthMap(true, -1.0f, state->decal ? (sWide ? 0.00005f : 0.0002f) : 0.0f);
         sGpu.decal = state->decal;
     }
     if (sNoCull < 0) {
@@ -2688,9 +2690,11 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
 void C3Di_UpdateContext(void);
 
-/* Triangles reaching far off the screen, such as the finish line arch passing over the camera, are cut down to a band
- * twice the screen's size before they reach the GPU, as the N64 does (its guard band). The 3DS's GPU draws such
- * triangles with stray lines of pixels, here a white line down the middle of the screen. DKR_GUARD_BAND=0 = old. */
+/* Triangles reaching far off the screen, such as the "LAP 2" letters flying in from well past the right edge at each
+ * lap, are cut down to a band twice the screen's size before they reach the GPU, as the N64 does (its guard band).
+ * The 3DS's GPU can draw such triangles with stray lines of pixels, here a white line down the middle of the screen.
+ * Flat draws are cut before gfx_flat_x widens them, which moves the texture a little only on what crosses the band.
+ * DKR_GUARD_BAND=0 = old. */
 #define GUARD_BAND 2.0f
 
 static int sGuardBand = -1;
@@ -2798,11 +2802,9 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     float su0, sv0, su1, sv1;
     int i, first, vertex, count, fmt, flat = state->flat;
 
-    if (!flat) {
-        verts = clip_to_guard_band(verts, &numTriangles);
-        if (numTriangles == 0) {
-            return;
-        }
+    verts = clip_to_guard_band(verts, &numTriangles);
+    if (numTriangles == 0) {
+        return;
     }
     count = numTriangles * 3;
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).

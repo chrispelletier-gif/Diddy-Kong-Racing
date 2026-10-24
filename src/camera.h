@@ -23,8 +23,9 @@ float plat_aspect_scale(void);
 float plat_camera_fov(float fovy);
 #define CAMERA_ASPECT (SCREEN_WIDTH_FLOAT / SCREEN_HEIGHT_FLOAT * plat_aspect_scale())
 #define CAMERA_FOV(fovy) plat_camera_fov(fovy)
-// The wider picture shows rock faces right beside the camera that 4:3 never reached, so widescreen cuts closer to it.
-#define CAMERA_NEAR (plat_aspect_scale() > 1.0f ? 5.0f : 10.0f)
+// The wider picture shows rock faces right beside the camera that 4:3 never reached, so widescreen cuts closer to it
+// (decals are pulled less to match, see port/3ds/gfx_c3d.c).
+#define CAMERA_NEAR (plat_aspect_scale() > 1.0f ? 2.5f : 10.0f)
 #else
 #define CAMERA_ASPECT (SCREEN_WIDTH_FLOAT / SCREEN_HEIGHT_FLOAT)
 #define CAMERA_FOV(fovy) (fovy)
