@@ -33,7 +33,7 @@
 #define REPORT_LABEL "3ds-bug-report"
 /* Compressed size of all the files of one report; each 45 KB is one comment on the issue. */
 #define MAX_ATTACHMENT_BYTES (900 * 1024)
-#define MAX_FILES 8
+#define MAX_FILES 10
 
 extern u32 __ctru_heap_size;
 int port_gfx_frame_count(void);
@@ -609,6 +609,9 @@ static void report_now(void) {
         snprintf(report.title, sizeof(report.title), "[3DS bug report] frame %d", frame);
         snprintf(name, sizeof(name), "diff_%05d_log.txt", frame);
         add_file(&report, name);
+        // The recent frame most likely to show the glitch, before the larger files (see save_recent_frames).
+        snprintf(name, sizeof(name), "diff_%05d_recent1.bin", frame);
+        add_file(&report, name);
         snprintf(name, sizeof(name), "diff_%05d_ref.png", frame);
         add_file(&report, name);
         snprintf(name, sizeof(name), "diff_%05d_gpu.bin", frame);
@@ -620,6 +623,11 @@ static void report_now(void) {
                  gPlatGfxStage != NULL ? gPlatGfxStage : "-");
     }
     add_file(&report, "log.txt");
+    if (gPlatSnapshotSaved != before) {
+        char name[64];
+        snprintf(name, sizeof(name), "diff_%05d_recent2.bin", gPlatSnapshotSaved);
+        add_file(&report, name);
+    }
     add_file(&report, "env.txt");
     add_file(&report, "gpu_hang.txt");
     add_file(&report, "gpu_hang_cmd.bin");
