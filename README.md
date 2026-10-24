@@ -5,7 +5,7 @@ This repo contains a decompilation of Diddy Kong Racing for the N64. You will ne
 All versions are supported, and the US 1.0 version (SHA1 = 0cb115d8716dbbc2922fda38e533b9fe63bb9670) of the game is the default if not specified.
 
 <!-- README_SCORE_SUMMARY_BEGIN -->
-As of October 1, 2026, this is our current score:
+As of October 24, 2026, this is our current score:
 
 &emsp;&emsp;&emsp;&emsp;Decomp progress [us.v77]: 100.00%
 
@@ -187,12 +187,12 @@ s32 is_drumstick_unlocked(void) {
 ```
 
 <!-- README_SCORE_BEGIN -->
-As of October 1, 2026, this is our current score:
+As of October 24, 2026, this is our current score:
 ```
  ==========================================
  ADVENTURE ONE (ASM -> C Decompilation) [us.v77]
  ------------ 100.0% Complete -------------
-        # Decompiled functions: 1852
+        # Decompiled functions: 1853
       # Handwritten ASM functions: 85
          # GLOBAL_ASM remaining: 0
         # NON_MATCHING functions: 0
@@ -205,7 +205,7 @@ As of October 1, 2026, this is our current score:
  ==========================================
    ADVENTURE TWO (Cleanup & Documentation)
  ------------ 69.02% Complete -------------
-        # Documented functions: 1285
+        # Documented functions: 1286
        # Undocumented remaining: 278
       # Functions named `func_*`: 143
      # Functions without comments: 278
