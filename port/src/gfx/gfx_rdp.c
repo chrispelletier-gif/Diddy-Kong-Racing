@@ -166,6 +166,8 @@ typedef struct TexCacheEntry {
 } TexCacheEntry;
 
 static TexCacheEntry sTexCache[TEX_CACHE_SIZE];
+/* Each entry's texture address (NULL when unused), packed so that dropping freed textures doesn't read every entry. */
+static const u8 *sTexCacheAddr[TEX_CACHE_SIZE];
 static s32 sPrewarming;       // Decoding textures the game has just loaded, outside of any display list
 static u32 sRecentEvictions;  // Entries replaced although drawn in the last 60 frames (should stay 0)
 
@@ -302,6 +304,7 @@ static void free_entry(TexCacheEntry *e) {
     gfxb_texture_free(&e->tex);
     plat_free((void *) e->tex.pixels);
     e->used = FALSE;
+    sTexCacheAddr[e - sTexCache] = NULL;
 }
 
 /*
@@ -453,6 +456,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     decode_texture(pixels, load, tile, width, height, tlut);
     e->used = TRUE;
     e->addr = load->addr;
+    sTexCacheAddr[e - sTexCache] = load->addr;
     e->tlut = tlut;
     e->hash = hash;
     e->width = width;
@@ -1447,9 +1451,8 @@ void port_gfx_texture_freed(const void *start, const void *end) {
 static void drop_textures(const u8 *start, const u8 *end) {
     s32 i;
     for (i = 0; i < TEX_CACHE_SIZE; i++) {
-        TexCacheEntry *e = &sTexCache[i];
-        if (e->used && e->addr >= start && e->addr < end) {
-            free_entry(e);
+        if (sTexCacheAddr[i] >= start && sTexCacheAddr[i] < end) {
+            free_entry(&sTexCache[i]);
         }
     }
     for (i = 0; i < HASH_CACHE_SIZE; i++) {
@@ -1474,7 +1477,7 @@ static void prewarm_textures(void) {
     const u8 *savedTlut;
     u32 savedTlutCount;
     s32 decoded = 0, freed = 0, i;
-    unsigned long long start;
+    unsigned long long start, elapsed;
 
     if (tail == head) {
         return;
@@ -1526,9 +1529,13 @@ static void prewarm_textures(void) {
     g.tlutAddr = savedTlut;
     g.tlutCount = savedTlutCount;
     sTriStateValid = FALSE;
-    plat_log("textures: %d decoded at load, %d freed, %.1f ms (frame %d, %u replaced while in use, %u not queued)",
-             (int) decoded, (int) freed, (plat_time_ns() - start) / 1e6, (int) sFrameCount, (unsigned) sRecentEvictions,
-             (unsigned) sTexQueueDropped);
+    elapsed = plat_time_ns() - start;
+    // Level loads, not the odd object texture coming and going mid-race.
+    if (decoded + freed >= 16 || elapsed >= 1000000) {
+        plat_log("textures: %d decoded at load, %d freed, %.1f ms (frame %d, %u replaced while in use, %u not queued)",
+                 (int) decoded, (int) freed, elapsed / 1e6, (int) sFrameCount, (unsigned) sRecentEvictions,
+                 (unsigned) sTexQueueDropped);
+    }
 }
 
 /******************************** Entry points ********************************/
