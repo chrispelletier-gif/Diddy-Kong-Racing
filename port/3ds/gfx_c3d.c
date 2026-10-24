@@ -25,7 +25,7 @@
 
 #define TOP_WIDTH 400
 #define TOP_HEIGHT 240
-/* The GPU queue is made longer than citro3d's 32 entries, for a 3D frame: two of everything (see submit_stereo). */
+/* The GPU queue is made longer than citro3d's 32 entries, for a 3D frame: two targets to clear and copy. */
 #define GX_QUEUE_ENTRIES 64
 
 /* The start of citro3d's context, which is not in its public header: the GPU command queue comes first. */
@@ -84,6 +84,7 @@ typedef struct C3DTexture {
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
+static C3D_RenderTarget *sTargetRight; // The right eye's, while the screen is in 3D (see the stereo section)
 /* Render target size relative to the screen: 2 draws at twice the resolution and downsamples (anti-aliasing).
  * sRenderScale is the vertical one (anti-aliasing), sScaleX the horizontal one, which the 800 pixel mode also sets to
  * 2 (see apply_screen_mode). */
@@ -297,7 +298,6 @@ static int use_vertex_format(int fmt) {
 static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
 static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
-static void forget_fog_table(void);
 static void write_eye(float mul, float add);
 
 static int sGpuTestStep;
@@ -545,8 +545,7 @@ static void create_target(int scale, int across) {
 
 /*
  * How the display transfer copies the target to the screen: anti-aliased targets are halved down, and across too
- * unless the screen shows 800 pixels. A 3D frame's target goes to the right eye's framebuffer at the end of the frame,
- * like any other (the left eye's is copied by submit_stereo).
+ * unless the screen shows 800 pixels. In 3D, sTarget is the left eye's and sTargetRight the right eye's.
  */
 static u32 sTransferFlags;
 
@@ -556,9 +555,12 @@ static void link_target(void) {
         scaling = sScaleX == 2 && s800 ? GX_TRANSFER_SCALE_X : GX_TRANSFER_SCALE_XY;
     }
     sTransferFlags = DISPLAY_TRANSFER_FLAGS(scaling);
-    // A target is linked to one side at a time: unlink the other side first.
-    C3D_RenderTargetSetOutput(NULL, GFX_TOP, sStereo ? GFX_LEFT : GFX_RIGHT, 0);
-    C3D_RenderTargetSetOutput(sTarget, GFX_TOP, sStereo ? GFX_RIGHT : GFX_LEFT, sTransferFlags);
+    C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sTransferFlags);
+    if (sStereo && sTargetRight != NULL) {
+        C3D_RenderTargetSetOutput(sTargetRight, GFX_TOP, GFX_RIGHT, sTransferFlags);
+    } else {
+        C3D_RenderTargetSetOutput(NULL, GFX_TOP, GFX_RIGHT, 0);
+    }
 }
 
 /* From any thread (the AA benchmark): anti-aliasing on (1), off (0) or back to the setting (-1), from the next
@@ -683,8 +685,22 @@ static void apply_screen_mode(void) {
             wide800 = 0;
         }
     }
+    if (stereo && sTargetRight == NULL) {
+        // The right eye's target, the same size as the left one's (3D has anti-aliasing off).
+        sTargetRight = C3D_RenderTargetCreate(TOP_HEIGHT, TOP_WIDTH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        if (sTargetRight == NULL) {
+            plat_log("top screen: no VRAM for the right eye's target, 3D off");
+            sStereoSetting = 0;
+            stereo = 0;
+        } else {
+            sFrameStarted = 0; // Cleared like a new target.
+        }
+    } else if (!stereo && sTargetRight != NULL) {
+        C3D_RenderTargetDelete(sTargetRight);
+        sTargetRight = NULL;
+    }
     if (stereo != sStereo || wide800 != s800) {
-        // Takes effect when the next frame is shown.
+        // Takes effect when the next frame is shown. libctru keeps one mode for both: 3D, 800 pixels or neither.
         if (stereo) {
             gfxSet3D(true);
         } else {
@@ -986,7 +1002,6 @@ static int sHangSaved;
  * DKR_OVERLAP=0 waits for the GPU before building each frame, as before (still alternating the slots).
  */
 #define MAX_LIST_PARTS 26 // With the rest of the list, the display transfer and a clear, under citro3d's 32 entries
-#define EYE_LIST_WORDS 32
 typedef struct FrameSlot {
     u8 *vbo;             // VBO_BYTES of vertices
     u32 *cmd;            // The command list, sCmdWords long
@@ -999,7 +1014,6 @@ typedef struct FrameSlot {
     int numDraws;        // Draws in the frame, which can be more than HANG_DRAWS
     int frame;           // sFrameCount when it was built
     u32 words;           // Command list words used
-    u32 *eyeCmd[2];      // The lists that set each eye's offset before the frame, in 3D (see submit_stereo)
 } FrameSlot;
 static FrameSlot sSlots[2];
 static int sNumSlots = 1; // 2 unless the second slot didn't fit
@@ -1023,23 +1037,17 @@ static void alloc_frame_slots(void) {
     for (i = 0; i < 2; i++) {
         sSlots[i].vbo = linearAlloc(VBO_BYTES);
         sSlots[i].cmd = linearAlloc(sCmdWords * 4);
-        sSlots[i].eyeCmd[0] = linearAlloc(EYE_LIST_WORDS * 4 * 2);
-        if (sSlots[i].vbo == NULL || sSlots[i].cmd == NULL || sSlots[i].eyeCmd[0] == NULL) {
+        if (sSlots[i].vbo == NULL || sSlots[i].cmd == NULL) {
             if (sSlots[i].vbo != NULL) {
                 linearFree(sSlots[i].vbo);
             }
             if (sSlots[i].cmd != NULL) {
                 linearFree(sSlots[i].cmd);
             }
-            if (sSlots[i].eyeCmd[0] != NULL) {
-                linearFree(sSlots[i].eyeCmd[0]);
-            }
             sSlots[i].vbo = NULL;
             sSlots[i].cmd = NULL;
-            sSlots[i].eyeCmd[0] = NULL;
             break;
         }
-        sSlots[i].eyeCmd[1] = sSlots[i].eyeCmd[0] + EYE_LIST_WORDS;
     }
     // The queue is empty and stopped this early. Without the longer one, 3D stays off (apply_screen_mode).
     entries = malloc(GX_QUEUE_ENTRIES * sizeof(gxCmdEntry_s));
@@ -1069,16 +1077,12 @@ static void split_command_list(void) {
 /******************************** Stereo ********************************/
 
 /*
- * Stereo 3D (roadmap item G5). The game draws one picture and the 3DS shows one to each eye, each moved across by an
- * amount that grows with distance. Everything is transformed on the CPU, so the frame's command list is built once, as
- * without 3D, and the GPU runs it twice: after a small list that sets the shader's eye offset (shader.v.pica) for the
- * left eye, then for the right, with the render target copied to the left eye's framebuffer in between (citro3d copies
- * it to the right one at the end of the frame, as it does to the screen without 3D). One render target serves both
- * eyes, so 3D needs no more VRAM, but the GPU draws everything twice: anti-aliasing is off while 3D is on.
- * Flat draws (HUD, text, menus) sit at the depth of the screen (to_screen_flat). A list run twice must not rely on
- * GPU settings from before it, since the second run starts where the first ended: a 3D frame sends the fog table and
- * the vertex attribute settings again before using them (gfxb_start_frame); the other settings are sent with the
- * frame's first draw anyway.
+ * Stereo 3D (roadmap item G5), the way the SM64 3DS port does it: each eye has its own render target (sTarget for the
+ * left, sTargetRight for the right), and every draw is sent twice, once to each, with the shader's eye offset
+ * (shader.v.pica) set for that eye in between. citro3d copies both targets to their framebuffers at the end of the
+ * frame. Everything is transformed on the CPU, so both draws read the same vertices. The GPU draws everything twice:
+ * anti-aliasing and the 800 pixel mode are off while 3D is on. Flat draws (HUD, text, menus) sit at the depth of the
+ * screen (to_screen_flat).
  */
 
 /* Writes the shader's eye offset to the command list: the vertex moves across by mul * w + add (in clip space). */
@@ -1095,33 +1099,37 @@ static void write_eye(float mul, float add) {
     GPUCMD_AddWrites(GPUREG_VSH_FLOATUNIFORM_DATA, (u32 *) v.c, 4);
 }
 
-/* Queues the slot's frame for both eyes (the caller hands it over). sEyeSep is positive for the left eye's offset. */
-static void submit_stereo(FrameSlot *slot) {
-    u32 *tailAddr = NULL, tailWords = 0;
-    int eye, i, haveTail;
-    // The rest of the list after the last split; C3D_FrameEnd then finds nothing more to send.
-    haveTail = C3Di_SplitFrame(&tailAddr, &tailWords);
-    for (eye = 0; eye < 2; eye++) {
-        float sep = eye == 0 ? sEyeSep : -sEyeSep;
-        u32 *savedBuf = gpuCmdBuf, savedSize = gpuCmdBufSize, savedOffset = gpuCmdBufOffset;
-        u32 *addr, words;
-        GPUCMD_SetBuffer(slot->eyeCmd[eye], EYE_LIST_WORDS, 0);
-        write_eye(sep, -sep * sEyeConv);
-        GPUCMD_Split(&addr, &words);
-        GPUCMD_SetBuffer(savedBuf, savedSize, savedOffset);
-        GX_ProcessCommandList(addr, words * 4, GX_CMDLIST_FLUSH);
-        for (i = 0; i < slot->numParts; i++) {
-            GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
-        }
-        if (haveTail) {
-            GX_ProcessCommandList(tailAddr, tailWords * 4, GX_CMDLIST_FLUSH);
-        }
-        if (eye == 0) {
-            u32 dim = GX_BUFFER_DIM((u32) sTarget->frameBuf.width, (u32) sTarget->frameBuf.height);
-            GX_DisplayTransfer((u32 *) sTarget->frameBuf.colorBuf, dim,
-                               (u32 *) gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL), dim, sTransferFlags);
-        }
+/*
+ * Points the GPU at a render target, written straight to the command list as citro3d's C3D_FrameBufBind does (both
+ * targets have the same size and formats). citro3d's C3D_SetFrameBuf only works inside one of its frames, and a frame
+ * is mostly built before citro3d's begins (while the GPU draws the last one, see wait_for_gpu), so it can't be used
+ * here: it left every draw on the left eye's target.
+ */
+static void bind_target(C3D_RenderTarget *target) {
+    const C3D_FrameBuf *fb = &target->frameBuf;
+    u32 param[3];
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    param[0] = osConvertVirtToPhys(fb->depthBuf) >> 3;
+    param[1] = osConvertVirtToPhys(fb->colorBuf) >> 3;
+    param[2] = 0x01000000 | (((u32) (fb->height - 1) & 0xFFF) << 12) | (fb->width & 0xFFF);
+    GPUCMD_AddIncrementalWrites(GPUREG_DEPTHBUFFER_LOC, param, 3);
+    GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
+}
+
+/* Draws the vertices once, or in 3D once for each eye. */
+static void draw_arrays(int vertex, int count) {
+    if (!sStereo) {
+        C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+        return;
     }
+    // sEyeSep is positive for the left eye's offset; what is sEyeConv away stays at the depth of the screen.
+    bind_target(sTarget);
+    write_eye(sEyeSep, -sEyeSep * sEyeConv);
+    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    bind_target(sTargetRight);
+    write_eye(-sEyeSep, sEyeSep * sEyeConv);
+    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
 }
 
 static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
@@ -1373,12 +1381,8 @@ void gfxb_start_frame(void) {
     sVfmtBound = -1; // The first draw points the GPU at this slot's buffer.
     sVfmtSwitches = 0;
     GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
-    if (sStereo) {
-        // The list runs once for each eye (submit_stereo): send what it would otherwise rely on from before it.
-        sVfmtAttrSet = -1;
-        forget_fog_table();
-    } else {
-        write_eye(0.0f, 0.0f);
+    if (!sStereo) {
+        write_eye(0.0f, 0.0f); // In 3D, each draw sets it (draw_arrays).
     }
     // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
     // draws nothing (while a level loads) must not show up as a black flash. So only the first frame uses a memory
@@ -1386,9 +1390,13 @@ void gfxb_start_frame(void) {
     // on a real New 3DS, which hung the game after its first frame. Emulators complete it.)
     if (sFrameStarted >= 0) {
         C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+        if (sStereo) {
+            C3D_RenderTargetClear(sTargetRight, C3D_CLEAR_ALL, 0x000000FF, 0);
+        }
     }
     // What C3D_FrameDrawOn does, which needs a citro3d frame begun; the target is marked used when handed over.
     C3D_SetFrameBuf(&sTarget->frameBuf);
+    bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
     forget_gpu_state();
     sMipmapsUsed = sMipmapSetting != 0;
@@ -1521,14 +1529,13 @@ void gfxb_end_frame(void) {
         }
         // C3D_FrameBegin set citro3d's own command buffer: carry on in the slot's, where the frame is.
         GPUCMD_SetBuffer(tail, tailSize, tailOffset);
-        if (sStereo) {
-            submit_stereo(slot);
-        } else {
-            for (i = 0; i < slot->numParts; i++) {
-                GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
-            }
+        for (i = 0; i < slot->numParts; i++) {
+            GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
         }
         sTarget->used = true;
+        if (sStereo) {
+            sTargetRight->used = true;
+        }
         sLastFrameTriangles = sFrameTriangles;
         sLastFrameUsage = usage;
         sFrameTriangles = 0;
@@ -2092,12 +2099,6 @@ static int fog_mode(void) {
 
 static int sLutMul = 0x7FFFFFFF, sLutOffset; // What the fog table was made for
 static int sFogOn = -1;
-
-/* Makes the next fogged draw send the fog table again. */
-static void forget_fog_table(void) {
-    sLutMul = 0x7FFFFFFF;
-    sFogOn = -1;
-}
 
 static void apply_fog(const GfxDrawState *state) {
     static C3D_FogLut sLut;
@@ -2767,7 +2768,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
             out[i].color[3] = v->a;
         }
     }
-    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    draw_arrays(vertex, count);
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
     }
