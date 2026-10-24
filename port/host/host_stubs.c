@@ -25,6 +25,16 @@ static unsigned long long sAudioStart;
 static unsigned long long sAudioQueuedBytes;
 static unsigned int sAudioFrequency = 22050;
 
+const char *plat_audio_setup(void) {
+    return "host";
+}
+
+/* DKR_AUDIO_RATE runs the mixer at another rate (32000 for the 3DS's "High" sound quality). */
+u32 port_audio_output_rate(u32 requested) {
+    const char *env = getenv("DKR_AUDIO_RATE");
+    return (env != NULL && atoi(env) > 0) ? (u32) atoi(env) : requested;
+}
+
 void port_audio_output_init(u32 frequency) {
     sAudioFrequency = frequency;
 }

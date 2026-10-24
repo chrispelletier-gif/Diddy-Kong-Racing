@@ -23,6 +23,10 @@
 #include <os.h>
 #include <stdio.h>
 
+#ifdef TARGET_PORT
+extern float gPortAudioRateScale;
+#endif
+
 // TODO: this comes from a header
 #ident "$Revision: 1.49 $"
 
@@ -135,9 +139,19 @@ s32 alResampleParam(void *filter, s32 paramID, void *param)
         case (AL_FILTER_SET_PITCH):
             data.i = (s32) param;
             r->ratio = data.f;
+#ifdef TARGET_PORT
+            // Pitches are relative to the game's own output rate; the mixer may run at a higher one.
+            r->ratio *= gPortAudioRateScale;
+#endif
             break;
             
 	case (AL_FILTER_SET_UNITY_PITCH):
+#ifdef TARGET_PORT
+            if (gPortAudioRateScale != 1.0f) {
+                r->ratio = gPortAudioRateScale;
+                break;
+            }
+#endif
 	    r->upitch = 1;
             break;
             

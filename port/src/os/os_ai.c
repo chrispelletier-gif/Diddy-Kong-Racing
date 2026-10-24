@@ -6,16 +6,22 @@
 static s32 sAiFrequency = 22050;
 static u32 sAiLastBufferSize;
 static s32 sAiStarted;
+float gPortAudioRateScale = 1.0f;
 
 void port_ai_init(void) {
 }
 
 s32 osAiSetFrequency(u32 frequency) {
-    sAiFrequency = frequency;
     if (!sAiStarted) {
+        u32 rate = port_audio_output_rate(frequency);
         sAiStarted = TRUE;
+        gPortAudioRateScale = (float) frequency / (float) rate;
+        frequency = rate;
         port_audio_output_init(frequency);
+    } else {
+        frequency = sAiFrequency;
     }
+    sAiFrequency = frequency;
     return frequency;
 }
 

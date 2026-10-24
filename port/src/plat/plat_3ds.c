@@ -1,6 +1,7 @@
 /* Nintendo 3DS (libctru) implementation of the platform layer. */
 #include "plat.h"
 #include "bottom_screen.h"
+#include "settings.h"
 
 #include <3ds.h>
 #include <malloc.h>
@@ -71,10 +72,23 @@ void plat_init(void) {
     }
     sRcpCore = (isNew3DS && plat_getenv("DKR_SINGLE_CORE") == NULL) ? 2 : 0;
     plat_status("%s, renderer on core %d", isNew3DS ? "New 3DS" : "Old 3DS", sRcpCore);
-    // The scheduler cannot start the next frame while an audio task is running, so audio tasks must finish quickly:
-    // they run next to the renderer, at a higher priority. (The system core, which only gives applications a
-    // share of its time, made them take several times longer.)
+    // The scheduler cannot start the next frame while an audio task is running, so audio tasks must finish quickly.
+    // By default (roadmap P9) they run on the system core, which is otherwise idle for us but only gives an
+    // application a share of its time: at the default share they took several times longer, so the share is raised
+    // first (DKR_SYSCORE_LIMIT, percent). The Sound page's "Mixing core" setting can put them back next to the
+    // renderer, at a higher priority than it.
     sAudioCore = sRcpCore;
+    if (settings_get("sound_core", 1) && plat_getenv("DKR_SINGLE_CORE") == NULL) {
+        const char *env = plat_getenv("DKR_SYSCORE_LIMIT");
+        int limit = env != NULL ? atoi(env) : 80;
+        Result res = APT_SetAppCpuTimeLimit(limit);
+        if (R_SUCCEEDED(res)) {
+            sAudioCore = 1;
+        }
+        plat_log("system core time limit %d%%: %s (0x%08lX)", limit, R_SUCCEEDED(res) ? "ok" : "failed",
+                 (unsigned long) res);
+    }
+    plat_status("Sound mixed on core %d", sAudioCore);
     watchdog_start();
     {
         // citro3d is set up (and the GPU self test run) on the main thread, as in SM64's 3DS port.
@@ -99,6 +113,11 @@ static void idle_meter(void *arg) {
         // A slice that took much longer than 0.2ms means higher priority threads ran in between.
         sIdleNs += 200000ULL;
     }
+}
+
+/* The Sound page's results label (audio_ndsp.c). */
+int plat_3ds_audio_on_system_core(void) {
+    return sAudioCore == 1;
 }
 
 unsigned long long plat_idle_ns(void) {
@@ -239,6 +258,11 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             break;
     }
     thread->handle = threadCreate(thread_entry, thread, stackSize, prio, core, true);
+    if (thread->handle == NULL && kind == PLAT_THREAD_AUDIO && core != sRcpCore) {
+        plat_log("thread %s: core %d unavailable, using the renderer's core %d", name, core, sRcpCore);
+        core = sAudioCore = sRcpCore;
+        thread->handle = threadCreate(thread_entry, thread, stackSize, prio, core, true);
+    }
     if (thread->handle == NULL && core != 0) {
         plat_log("thread %s: core %d unavailable, using core 0", name, core);
         core = 0;

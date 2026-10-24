@@ -17,6 +17,11 @@ void plat_3ds_console_init(void);
 void plat_3ds_console_line(const char *text);
 void plat_3ds_console_clear(void);
 void update_3ds_start(const char *selfPath);
+/* The Sound page (audio_ndsp.c). */
+int sound_option_count(void);
+const char *sound_option_label(int i);
+void sound_option_value(int i, char *out, int size);
+void sound_option_change(int i, int step);
 int port_autorun_enabled(void);
 
 static volatile int sQuitRequested;
@@ -119,6 +124,7 @@ int main(int argc, char **argv) {
     controls_init();
     menu_3ds_add_page("Controls", controls_option_count, controls_option_label, controls_option_value,
                       controls_option_change);
+    menu_3ds_add_page("Sound", sound_option_count, sound_option_label, sound_option_value, sound_option_change);
     bugreport_start();
     // The Homebrew Launcher passes the path of the .3dsx as argv[0].
     update_3ds_start(argc > 0 ? argv[0] : NULL);

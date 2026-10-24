@@ -38,6 +38,15 @@
  * a few hopefully useful effects.
  */
 #define ms *(((s32)((f32)44.1))&~0x7)
+
+#ifdef TARGET_PORT
+extern float gPortAudioRateScale;
+
+/* A delay of n samples at the game's output rate, in samples at the rate the mixer runs at (a multiple of 8). */
+static s32 port_fx_samples(s32 n) {
+    return gPortAudioRateScale == 1.0f ? n : ((s32) (n / gPortAudioRateScale) + 4) & ~7;
+}
+#endif
  
 
 static s32 SMALLROOM_PARAMS[26] = {
@@ -140,6 +149,10 @@ void alFxNew(ALFx *r, ALSynConfig *c, s16 bus, UNUSED ALHeap *hp)
     
     r->section_count = param[j++];
     r->length 	     = param[j++];
+#ifdef TARGET_PORT
+    // Delay lengths are in samples at the game's own output rate: keep them as long in time at a higher one.
+    r->length = port_fx_samples(r->length);
+#endif
 
     r->delay = mempool_alloc_safe(sizeof(ALDelay) * r->section_count, COLOUR_TAG_CYAN);
     r->base = mempool_alloc_safe(sizeof(s16) * r->length, COLOUR_TAG_CYAN);
@@ -152,6 +165,13 @@ void alFxNew(ALFx *r, ALSynConfig *c, s16 bus, UNUSED ALHeap *hp)
 	d = &r->delay[i];
 	d->input  = param[j++];
 	d->output = param[j++];
+#ifdef TARGET_PORT
+	d->input  = port_fx_samples(d->input);
+	d->output = port_fx_samples(d->output);
+	if (d->output > r->length) {
+	    d->output = r->length;
+	}
+#endif
 	d->fbcoef = param[j++];
 	d->ffcoef = param[j++];
 	d->gain   = param[j++];

@@ -158,6 +158,8 @@ void plat_set_antialias(int on);
 int plat_antialias(void);
 /* The build's version (git describe), as bug reports show it; "host" for a host build without one. */
 const char *plat_build_version(void);
+/* How the sound is being made, for the test runs' results (e.g. "sys/22k/smooth"; "host" on the host). */
+const char *plat_audio_setup(void);
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
