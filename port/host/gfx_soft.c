@@ -20,6 +20,7 @@
 static uint8_t sColor[W * H * 4];
 static float sDepth[W * H];
 static volatile int sFramesRendered;
+static int sMipmaps = -1, sColour = -1; // DKR_MIPMAP, DKR_COLOUR: see read_upgrade_settings
 static int sDumpEvery = -1;
 static const char *sDumpDir;
 
@@ -27,8 +28,12 @@ int host_frames_rendered(void) {
     return sFramesRendered;
 }
 
+static void read_upgrade_settings(void);
+static void build_mips(GfxTexture *tex);
+
 void gfxb_init(void) {
     const char *env = getenv("DKR_DUMP_EVERY");
+    read_upgrade_settings();
     sDumpEvery = env ? atoi(env) : 0;
     sDumpDir = getenv("DKR_DUMP_DIR");
     if (sDumpDir == NULL) {
@@ -99,6 +104,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
             break;
         }
     }
+    build_mips(tex);
     if (dir != NULL && count < 2000) {
         char path[512];
         snprintf(path, sizeof(path), "%s/tex_%04d_%ux%u_f%d.png", dir, count++, tex->width, tex->height,
@@ -107,13 +113,78 @@ void gfxb_texture_upload(GfxTexture *tex) {
     }
 }
 
+/*
+ * Mipmaps and the colour boost of the 3DS renderer (roadmap items G1 and G2), for previewing them: DKR_MIPMAP=1 and
+ * DKR_COLOUR=1 to 3. Both are off by default, so frames stay comparable with the N64 and with earlier commits. The
+ * level is picked as the 3DS GPU does without anti-aliasing (with it, the GPU uses one level sharper).
+ */
+#define MAX_MIP_LEVELS 8
+
+typedef struct SoftMips {
+    int levels; // After the first, which is the texture's own pixels
+    unsigned int w[MAX_MIP_LEVELS + 1], h[MAX_MIP_LEVELS + 1];
+    unsigned int *pixels[MAX_MIP_LEVELS + 1];
+} SoftMips;
+
+static void read_upgrade_settings(void) {
+    if (sMipmaps < 0) {
+        const char *env = getenv("DKR_MIPMAP");
+        sMipmaps = env != NULL && atoi(env) != 0;
+        env = getenv("DKR_COLOUR");
+        sColour = env != NULL ? atoi(env) : 0;
+        sColour = sColour < 0 ? 0 : sColour > 3 ? 3 : sColour;
+    }
+}
+
+static void free_mips(GfxTexture *tex) {
+    SoftMips *m;
+    int i;
+    read_upgrade_settings();
+    if (!sMipmaps || (m = (SoftMips *) tex->backendData) == NULL) {
+        return; // backendData isn't ours (the 3DS's reference renderer shares textures with the GPU one).
+    }
+    for (i = 1; i <= m->levels; i++) {
+        free(m->pixels[i]);
+    }
+    free(m);
+    tex->backendData = NULL;
+}
+
+/* Like the 3DS: bilinear textures of 16x16 or more that repeat, halved down to 8 on the short side (while the size
+ * stays even). */
+static void build_mips(GfxTexture *tex) {
+    SoftMips *m;
+    unsigned int w = tex->width, h = tex->height;
+    read_upgrade_settings();
+    free_mips(tex);
+    if (!sMipmaps || tex->filter == GFX_FILTER_POINT || w < 16 || h < 16 ||
+        (tex->wrapS == GFX_WRAP_CLAMP && tex->wrapT == GFX_WRAP_CLAMP)) {
+        return;
+    }
+    m = calloc(1, sizeof(SoftMips));
+    m->w[0] = w;
+    m->h[0] = h;
+    m->pixels[0] = (unsigned int *) tex->pixels;
+    while (m->levels < MAX_MIP_LEVELS && w % 2 == 0 && h % 2 == 0 && w >= 16 && h >= 16) {
+        unsigned int *next = malloc((w / 2) * (h / 2) * sizeof(unsigned int));
+        gfx_mip_downsample(m->pixels[m->levels], w, h, next);
+        w /= 2;
+        h /= 2;
+        m->levels++;
+        m->pixels[m->levels] = next;
+        m->w[m->levels] = w;
+        m->h[m->levels] = h;
+    }
+    tex->backendData = m;
+}
+
 void gfxb_texture_free(GfxTexture *tex) {
-    (void) tex;
+    free_mips(tex);
 }
 
 void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
-    (void) dst;
     (void) src;
+    build_mips(dst);
 }
 
 /******************************** Texturing ********************************/
@@ -136,9 +207,8 @@ static inline int wrap_coord(int c, int size, int mode) {
     }
 }
 
-static void sample(const GfxTexture *tex, float u, float v, float out[4]) {
-    const unsigned int *px = tex->pixels;
-    int w = tex->width, h = tex->height;
+static void sample_level(const GfxTexture *tex, const unsigned int *px, int w, int h, float u, float v,
+                         float out[4]) {
     if (tex->filter == GFX_FILTER_POINT) {
         int x = wrap_coord((int) floorf(u * w), w, tex->wrapS);
         int y = wrap_coord((int) floorf(v * h), h, tex->wrapT);
@@ -166,6 +236,35 @@ static void sample(const GfxTexture *tex, float u, float v, float out[4]) {
                 out[2] += ((c >> 16) & 0xFF) / 255.0f * weight;
                 out[3] += (c >> 24) / 255.0f * weight;
             }
+        }
+    }
+}
+
+/* Samples tex at (u, v), where a pixel step moves the coordinates by (dudx, dvdx) and (dudy, dvdy). */
+static void sample(const GfxTexture *tex, float u, float v, float dudx, float dvdx, float dudy, float dvdy,
+                   float out[4]) {
+    const SoftMips *m = sMipmaps > 0 ? (const SoftMips *) tex->backendData : NULL;
+    float lod, x, y, rho, frac, other[4];
+    int level, k;
+
+    if (m == NULL) {
+        sample_level(tex, tex->pixels, tex->width, tex->height, u, v, out);
+        return;
+    }
+    x = sqrtf(dudx * dudx * tex->width * tex->width + dvdx * dvdx * tex->height * tex->height);
+    y = sqrtf(dudy * dudy * tex->width * tex->width + dvdy * dvdy * tex->height * tex->height);
+    rho = x > y ? x : y;
+    lod = rho > 1.0f ? log2f(rho) : 0.0f;
+    if (lod >= m->levels) {
+        lod = m->levels;
+    }
+    level = (int) lod;
+    frac = lod - level;
+    sample_level(tex, m->pixels[level], m->w[level], m->h[level], u, v, out);
+    if (frac > 0.0f && level < m->levels) {
+        sample_level(tex, m->pixels[level + 1], m->w[level + 1], m->h[level + 1], u, v, other);
+        for (k = 0; k < 4; k++) {
+            out[k] += (other[k] - out[k]) * frac;
         }
     }
 }
@@ -283,9 +382,42 @@ static void project(ScreenVert *s, const ClipVert *c) {
     s->aw = c->a * invW;
 }
 
+/* The perspective correct texture coordinates of the given unit for barycentric weights w. */
+static void tex_coords(const ScreenVert *v0, const ScreenVert *v1, const ScreenVert *v2, const float w[3], int unit,
+                       float *u, float *v) {
+    float persp = 1.0f / (w[0] * v0->invW + w[1] * v1->invW + w[2] * v2->invW);
+    if (unit == 0) {
+        *u = (w[0] * v0->u0w + w[1] * v1->u0w + w[2] * v2->u0w) * persp;
+        *v = (w[0] * v0->v0w + w[1] * v1->v0w + w[2] * v2->v0w) * persp;
+    } else {
+        *u = (w[0] * v0->u1w + w[1] * v1->u1w + w[2] * v2->u1w) * persp;
+        *v = (w[0] * v0->v1w + w[1] * v1->v1w + w[2] * v2->v1w) * persp;
+    }
+}
+
+static void sample_at(const GfxTexture *tex, const ScreenVert *v0, const ScreenVert *v1, const ScreenVert *v2,
+                      float w0, float w1, float w2, const float dw[2][3], int unit, float out[4]) {
+    float w[3] = { w0, w1, w2 }, u, v, du[2] = { 0.0f, 0.0f }, dv[2] = { 0.0f, 0.0f };
+    int axis, i;
+    tex_coords(v0, v1, v2, w, unit, &u, &v);
+    if (sMipmaps > 0 && tex->backendData != NULL) {
+        for (axis = 0; axis < 2; axis++) {
+            float step[3], su, sv;
+            for (i = 0; i < 3; i++) {
+                step[i] = w[i] + dw[axis][i];
+            }
+            tex_coords(v0, v1, v2, step, unit, &su, &sv);
+            du[axis] = su - u;
+            dv[axis] = sv - v;
+        }
+    }
+    sample(tex, u, v, du[0], dv[0], du[1], dv[1], out);
+}
+
 static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const ScreenVert *v1, const ScreenVert *v2) {
     float area = (v1->x - v0->x) * (v2->y - v0->y) - (v2->x - v0->x) * (v1->y - v0->y);
     int minX, maxX, minY, maxY, x, y, k;
+    float dw[2][3];
     CCInputs in;
 
     if (area == 0.0f) {
@@ -316,6 +448,13 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
         in.env[k] = st->env[k] / 255.0f;
     }
     in.primLod = st->primLodFrac / 255.0f;
+    // How the barycentric weights change a pixel to the right and a pixel down, for picking mipmap levels.
+    dw[0][0] = (v1->y - v2->y) / area;
+    dw[0][1] = (v2->y - v0->y) / area;
+    dw[0][2] = -dw[0][0] - dw[0][1];
+    dw[1][0] = (v2->x - v1->x) / area;
+    dw[1][1] = (v0->x - v2->x) / area;
+    dw[1][2] = -dw[1][0] - dw[1][1];
 
     for (y = minY; y < maxY; y++) {
         for (x = minX; x < maxX; x++) {
@@ -344,14 +483,12 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
             in.shade[2] = (w0 * v0->bw + w1 * v1->bw + w2 * v2->bw) * persp;
             in.shade[3] = (w0 * v0->aw + w1 * v1->aw + w2 * v2->aw) * persp;
             if (st->textures[0] != NULL) {
-                sample(st->textures[0], (w0 * v0->u0w + w1 * v1->u0w + w2 * v2->u0w) * persp,
-                       (w0 * v0->v0w + w1 * v1->v0w + w2 * v2->v0w) * persp, in.tex0);
+                sample_at(st->textures[0], v0, v1, v2, w0, w1, w2, dw, 0, in.tex0);
             } else {
                 in.tex0[0] = in.tex0[1] = in.tex0[2] = in.tex0[3] = 1.0f;
             }
             if (st->textures[1] != NULL) {
-                sample(st->textures[1], (w0 * v0->u1w + w1 * v1->u1w + w2 * v2->u1w) * persp,
-                       (w0 * v0->v1w + w1 * v1->v1w + w2 * v2->v1w) * persp, in.tex1);
+                sample_at(st->textures[1], v0, v1, v2, w0, w1, w2, dw, 1, in.tex1);
             } else {
                 for (k = 0; k < 4; k++) {
                     in.tex1[k] = in.tex0[k];
@@ -367,6 +504,14 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
                 out[3] = cc_eval(&in, &st->combiner.alpha[c], 3);
                 for (k = 0; k < 4; k++) {
                     in.combined[k] = out[k];
+                }
+            }
+            if (sColour > 0) {
+                static const float sStrength[4] = { 0.0f, 0.15f, 0.3f, 0.5f };
+                float luma = 0.299f * out[0] + 0.587f * out[1] + 0.114f * out[2], t = sStrength[sColour];
+                for (k = 0; k < 3; k++) {
+                    out[k] += t * (out[k] - luma);
+                    out[k] = out[k] < 0.0f ? 0.0f : out[k] > 1.0f ? 1.0f : out[k];
                 }
             }
             if (st->alphaTest && out[3] * 255.0f < st->alphaRef) {
