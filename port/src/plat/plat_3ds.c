@@ -122,7 +122,7 @@ static volatile int sPauseRequested;
 static volatile int sRendererPaused;
 
 /*
- * Called by the renderer at the start of each frame (with the GPU idle) and while it waits for the GPU. Holds it while
+ * Called by the renderer between frames (with the GPU idle) and while it waits for the GPU. Holds it while
  * the application is suspended (see plat_3ds_pause_renderer), and parks it for good once the application is closing
  * (see plat_3ds_exit).
  */
@@ -141,6 +141,10 @@ void plat_3ds_quit_point(int parkedState) {
     for (;;) {
         svcSleepThread(1000000000LL);
     }
+}
+
+int plat_3ds_renderer_should_park(void) {
+    return sPauseRequested || sQuitting;
 }
 
 /*

@@ -24,7 +24,9 @@
 
 #define TOP_WIDTH 400
 #define TOP_HEIGHT 240
-#define VBO_VERTICES (3 * 24 * 1024)
+/* Vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most about 3000
+ * triangles, 9000 vertices, a frame. */
+#define VBO_VERTICES (48 * 1024)
 
 /* What the vertex shader receives: positions already in the 3DS screen's clip space, colours from 0 to 1. */
 typedef struct C3DVertex {
@@ -51,7 +53,7 @@ static int sDefaultScale = 2;          // The setting (settings.txt, else DKR_AA
 static volatile int sWantedScale = 2;  // plat_set_antialias, applied by the renderer between frames.
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
-static C3DVertex *sVbo;
+static C3DVertex *sVbo; // The vertex buffer of the frame being built
 static int sVboUsed;
 /* Vertices before this one have been flushed from the CPU cache this frame (see flush_new_vertices). */
 static int sVboFlushed;
@@ -65,7 +67,7 @@ static int sFrameCount, sFrameTriangles;
 /* For the hang report: the size of the last frame handed to the GPU. */
 static int sLastFrameTriangles;
 static float sLastFrameUsage;
-static int sCmdBufSplits;
+static int sDrawsLeftOut;
 /* Command list splits made this frame to let the GPU finish before a blended draw (see drain_before_draw). */
 static int sDrainSplits, sLastDrainSplits;
 
@@ -103,9 +105,6 @@ static void flush_new_vertices(void) {
     sVboFlushed = sVboUsed;
 }
 
-/* Textures freed during a frame are deleted once the GPU is done with it. */
-static C3DTexture **sPendingFrees;
-static int sNumPendingFrees, sPendingFreesCapacity;
 
 /*
  * Each citro3d setter marks its group of GPU settings for writing to the command list, even when the value does not
@@ -417,6 +416,8 @@ static void apply_render_scale(void) {
     }
 }
 
+static void alloc_frame_slots(void);
+
 void gfxb_init(void) {
     static int sDone;
     C3D_AttrInfo *attr;
@@ -462,7 +463,7 @@ void gfxb_init(void) {
     AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
     AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 4);
 
-    sVbo = linearAlloc(sizeof(C3DVertex) * VBO_VERTICES);
+    alloc_frame_slots();
     buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
     BufInfo_Add(buf, sVbo, sizeof(C3DVertex), 4, 0x3210);
@@ -666,10 +667,39 @@ typedef struct HangDraw {
     const C3D_Tex *tex[2];
 } HangDraw;
 #define HANG_DRAWS 1024
-static HangDraw sHangDraws[HANG_DRAWS];
-static int sHangDrawCount; // Draws in the frame, which can be more than HANG_DRAWS
-static u32 *sFrameCmdBase; // The frame's command list
 static int sHangSaved;
+
+/*
+ * The CPU and the GPU work on different frames at the same time (roadmap item P3). The renderer used to wait for the
+ * GPU to finish the last frame before building the next one, because there was one vertex buffer and one command
+ * list, so a frame cost the renderer's time plus the GPU's. Now there are two frame slots: while the GPU draws the
+ * frame in one, the renderer builds the next in the other, and only waits for the GPU when it hands that frame over
+ * (gfxb_end_frame). Nothing of a frame reaches the GPU before then: the command list splits that let the GPU finish
+ * before a blended draw (drain_before_draw) are kept as parts and queued with the rest.
+ * Everything a slot holds lives in linear memory (FCRAM), which the GPU reads directly; VRAM only holds the render
+ * target. Textures freed while a frame is built are deleted once the GPU has drawn that frame.
+ * DKR_OVERLAP=0 waits for the GPU before building each frame, as before (still alternating the slots).
+ */
+#define MAX_LIST_PARTS 26 // With the rest of the list, the display transfer and a clear, under citro3d's 32 entries
+typedef struct FrameSlot {
+    C3DVertex *vbo;      // VBO_VERTICES vertices
+    u32 *cmd;            // The command list, sCmdWords long
+    u32 *partAddr[MAX_LIST_PARTS];
+    u32 partWords[MAX_LIST_PARTS];
+    int numParts;        // Parts split off the list, queued before the rest when the frame is handed over
+    C3DTexture **frees;  // Textures freed while the frame was built
+    int numFrees, freesCapacity;
+    HangDraw draws[HANG_DRAWS];
+    int numDraws;        // Draws in the frame, which can be more than HANG_DRAWS
+    int frame;           // sFrameCount when it was built
+    u32 words;           // Command list words used
+} FrameSlot;
+static FrameSlot sSlots[2];
+static int sNumSlots = 1; // 2 unless the second slot didn't fit
+static int sRec;          // The slot being built
+static int sOnGpu = -1;   // The slot last handed to the GPU
+static u32 sCmdWords;
+static int sOverlap;      // This frame is built while the GPU draws the last one
 
 /* The start of citro3d's context, which is not in its public header: the GPU command queue comes first. */
 typedef struct C3DContextStart {
@@ -678,19 +708,58 @@ typedef struct C3DContextStart {
     size_t cmdBufSize;
 } C3DContextStart;
 extern C3DContextStart __C3D_Context;
+bool C3Di_SplitFrame(u32 **pBuf, u32 *pSize);
 
 static u32 cmd_position(void) {
-    return (u32) (gpuCmdBuf + gpuCmdBufOffset - sFrameCmdBase);
+    return (u32) (gpuCmdBuf + gpuCmdBufOffset - sSlots[sRec].cmd);
+}
+
+/* Two frame slots, each with a vertex buffer and a command list as large as citro3d's own. */
+static void alloc_frame_slots(void) {
+    int i;
+    sCmdWords = __C3D_Context.cmdBufSize;
+    for (i = 0; i < 2; i++) {
+        sSlots[i].vbo = linearAlloc(sizeof(C3DVertex) * VBO_VERTICES);
+        sSlots[i].cmd = linearAlloc(sCmdWords * 4);
+        if (sSlots[i].vbo == NULL || sSlots[i].cmd == NULL) {
+            if (sSlots[i].vbo != NULL) {
+                linearFree(sSlots[i].vbo);
+            }
+            if (sSlots[i].cmd != NULL) {
+                linearFree(sSlots[i].cmd);
+            }
+            sSlots[i].vbo = NULL;
+            sSlots[i].cmd = NULL;
+            break;
+        }
+    }
+    sNumSlots = i > 0 ? i : 1; // None can't happen this early, and nothing could be drawn.
+    plat_log("frame slots: %d, each %lu KB of vertices and %lu KB of commands in linear memory, %lu KB left",
+             sNumSlots, (unsigned long) (sizeof(C3DVertex) * VBO_VERTICES / 1024),
+             (unsigned long) (sCmdWords * 4 / 1024), (unsigned long) (linearSpaceFree() / 1024));
+    sVbo = sSlots[0].vbo;
+}
+
+/* Ends the part of the command list so far, which the GPU then finishes before it starts on the rest. */
+static void split_command_list(void) {
+    FrameSlot *slot = &sSlots[sRec];
+    u32 *addr, words;
+    if (slot->numParts < MAX_LIST_PARTS && C3Di_SplitFrame(&addr, &words)) {
+        slot->partAddr[slot->numParts] = addr;
+        slot->partWords[slot->numParts] = words;
+        slot->numParts++;
+    }
 }
 
 static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
+    FrameSlot *slot = &sSlots[sRec];
     HangDraw *d;
     int i;
-    if (sHangDrawCount >= HANG_DRAWS) {
-        sHangDrawCount++;
+    if (slot->numDraws >= HANG_DRAWS) {
+        slot->numDraws++;
         return NULL;
     }
-    d = &sHangDraws[sHangDrawCount++];
+    d = &slot->draws[slot->numDraws++];
     d->cmdStart = cmd_position();
     d->cmdEnd = d->cmdStart;
     d->triangles = numTriangles;
@@ -714,16 +783,18 @@ static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
     return d;
 }
 
-/* Writes gpu_hang.txt and gpu_hang_cmd.bin, once, when the GPU stops responding during the frame after `frame`. */
-static void save_gpu_hang(int frame) {
+/* Writes gpu_hang.txt and gpu_hang_cmd.bin, once, when the GPU stops responding during the frame last handed over. */
+static void save_gpu_hang(void) {
     const gxCmdQueue_s *queue = &__C3D_Context.gxQueue;
+    const FrameSlot *slot = sOnGpu >= 0 ? &sSlots[sOnGpu] : NULL;
+    const u32 *base = slot != NULL ? slot->cmd : NULL;
     char path[256];
     char *text;
     int size = 64 * 1024 + 48 * 1024, length = 0, i, stuckEntry = -1;
     u32 listStart = 0, listEnd = 0, words = 0;
     FILE *f;
 
-    if (sHangSaved || sFrameCmdBase == NULL || __C3D_Context.cmdBuf != sFrameCmdBase) {
+    if (sHangSaved || slot == NULL) {
         return;
     }
     sHangSaved = 1;
@@ -737,8 +808,9 @@ static void save_gpu_hang(int frame) {
             length += snprintf(text + length, size - length, __VA_ARGS__);                                            \
         }                                                                                                              \
     } while (0)
-    ADD("GPU not responding after frame %d (%d draws, %d triangles, AA %s)\n\n", frame, sHangDrawCount,
-        sLastFrameTriangles, sRenderScale == 2 ? "on" : "off");
+    ADD("GPU not responding after frame %d (%d draws, %d triangles, AA %s, %s)\n\n", slot->frame, slot->numDraws,
+        sLastFrameTriangles, sRenderScale == 2 ? "on" : "off",
+        sOverlap ? "built while the GPU drew the frame before" : "built with the GPU idle");
     // The queue's entries before lastEntry are done; GX runs them in order, so the first one after is where it stopped.
     ADD("GPU command queue: %u entries, %u sent, %u done (the first not done is marked)\n", queue->numEntries,
         queue->curEntry, queue->lastEntry);
@@ -746,9 +818,9 @@ static void save_gpu_hang(int frame) {
         const u32 *data = queue->entries[i].data;
         const char *mark = (i == queue->lastEntry) ? " <-" : "";
         if ((data[0] & 0xFF) == 0x01) {
-            u32 start = (u32) ((const u32 *) data[1] - sFrameCmdBase), end = start + data[2] / 4;
+            u32 start = (u32) ((const u32 *) data[1] - base), end = start + data[2] / 4;
             ADD("  %2d: command list, words %lu to %lu%s\n", i, (unsigned long) start, (unsigned long) end, mark);
-            if (end > words && end <= __C3D_Context.cmdBufSize) {
+            if (end > words && end <= sCmdWords) {
                 words = end;
             }
             if (i == queue->lastEntry) {
@@ -763,8 +835,8 @@ static void save_gpu_hang(int frame) {
     }
     ADD("\nDraws (cmd = word offsets in gpu_hang_cmd.bin; cc = combiner rgb/alpha per cycle; tex = GPU size, format, "
         "address; '*' = in the command list the GPU stopped in)\n");
-    for (i = 0; i < sHangDrawCount && i < HANG_DRAWS; i++) {
-        const HangDraw *d = &sHangDraws[i];
+    for (i = 0; i < slot->numDraws && i < HANG_DRAWS; i++) {
+        const HangDraw *d = &slot->draws[i];
         int inStuck = stuckEntry >= 0 && d->cmdEnd > listStart && d->cmdStart < listEnd;
         int t;
         ADD("%c%4d cmd %5lu-%5lu tris %3u blend %u at %u/%u z %u/%u dec %u fog %u cull %u cyc %u", inStuck ? '*' : ' ',
@@ -782,8 +854,8 @@ static void save_gpu_hang(int frame) {
         }
         ADD("\n");
     }
-    if (sHangDrawCount > HANG_DRAWS) {
-        ADD("(%d more draws not noted)\n", sHangDrawCount - HANG_DRAWS);
+    if (slot->numDraws > HANG_DRAWS) {
+        ADD("(%d more draws not noted)\n", slot->numDraws - HANG_DRAWS);
     }
     ADD("\nRecent log:\n");
     if (length < size) {
@@ -800,7 +872,7 @@ static void save_gpu_hang(int frame) {
     plat_snprintf(path, sizeof(path), "%s/gpu_hang_cmd.bin", plat_data_dir());
     f = fopen(path, "wb");
     if (f != NULL) {
-        fwrite(sFrameCmdBase, 4, words, f);
+        fwrite(base, 4, words, f);
         fclose(f);
     }
     if (stuckEntry >= 0) {
@@ -827,23 +899,35 @@ void gfxb_3ds_shutdown(void) {
     C3D_Fini();
 }
 
-static void process_pending_frees(void) {
+/* Deletes the textures freed while the slot's frame was built, once the GPU has drawn it. */
+static void process_pending_frees(FrameSlot *slot) {
     int i;
-    for (i = 0; i < sNumPendingFrees; i++) {
-        if (!sPendingFrees[i]->shared) {
-            C3D_TexDelete(&sPendingFrees[i]->tex);
+    for (i = 0; i < slot->numFrees; i++) {
+        if (!slot->frees[i]->shared) {
+            C3D_TexDelete(&slot->frees[i]->tex);
         }
-        free(sPendingFrees[i]);
+        free(slot->frees[i]);
     }
-    sNumPendingFrees = 0;
+    slot->numFrees = 0;
 }
 
-void gfxb_start_frame(void) {
+static int overlap_setting(void) {
+    static int sSetting = -1;
+    if (sSetting < 0) {
+        const char *env = plat_getenv("DKR_OVERLAP");
+        sSetting = env == NULL || atoi(env) != 0;
+        plat_log("frames built while the GPU draws the last one: %s",
+                 !sSetting ? "no (DKR_OVERLAP=0)" : sNumSlots < 2 ? "no (one slot)" : "yes");
+    }
+    return sSetting && sNumSlots == 2;
+}
+
+/*
+ * Waits for the GPU to finish the frame it was given last, and begins a citro3d frame (which sets citro3d's own
+ * command buffer: the caller sets the slot's). Then that frame's freed textures are deleted.
+ */
+static void wait_for_gpu(int measure) {
     unsigned long long waitStart;
-    // No vblank throttling here: the emulated VI already paces the game. Beginning a frame still waits for the GPU
-    // to finish the previous one, after which its textures can be deleted and the vertex buffer reused.
-    capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
-    apply_render_scale();
     if (sFrameCount < 3) {
         plat_log("frame %d: waiting for the GPU", sFrameCount);
     }
@@ -857,27 +941,22 @@ void gfxb_start_frame(void) {
             if (!reported && plat_time_ns() - start > 3000000000ULL) {
                 reported = 1;
                 gPlatGfxStage = "GPU not responding";
-                plat_status("GPU stuck after frame %d (%d triangles, cmd buffer %.0f%%)", sFrameCount - 1,
-                            sLastFrameTriangles, sLastFrameUsage * 100.0f);
-                save_gpu_hang(sFrameCount - 1);
+                plat_status("GPU stuck after frame %d (%d triangles, cmd buffer %.0f%%)",
+                            sOnGpu >= 0 ? sSlots[sOnGpu].frame : -1, sLastFrameTriangles, sLastFrameUsage * 100.0f);
+                save_gpu_hang();
             }
             plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_BUSY);
             plat_sleep_ns(250000);
         }
     }
-    if (prof_enabled()) {
+    if (measure && prof_enabled()) {
         prof_add(PROF_GPU_WAIT, plat_time_ns() - waitStart);
-        if (sFrameCount > 0) {
+        if (sOnGpu >= 0) {
             // How long the GPU took to draw the previous frame, which it has just finished.
             prof_add(PROF_GPU_DRAW, (unsigned long long) (C3D_GetDrawingTime() * 1000000.0f));
         }
     }
-    // The application is closing: stop here, with the GPU idle and no frame being built, so it can be shut down.
-    plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
-    sFrameCmdBase = gpuCmdBuf;
-    sHangDrawCount = 0;
-    gPlatGfxStage = "drawing";
-    if (sSnapshotPending) {
+    if (sSnapshotPending && sOnGpu >= 0 && sSlots[sOnGpu].frame == sLogFrame) {
         // The snapshot's log file is closed here, once the GPU has drawn the frame and its textures are checked.
         sSnapshotPending = 0;
         check_textures_after_frame();
@@ -891,7 +970,39 @@ void gfxb_start_frame(void) {
     if (sFrameCount == 1) {
         plat_status("First frame drawn");
     }
-    process_pending_frees();
+    if (sOnGpu >= 0) {
+        process_pending_frees(&sSlots[sOnGpu]);
+    }
+}
+
+void gfxb_start_frame(void) {
+    FrameSlot *slot;
+    // No vblank throttling here: the emulated VI already paces the game.
+    capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
+    apply_render_scale();
+    // The first frame of a render target clears it with the GPU idle, and a snapshot frame is checked once the GPU
+    // has drawn it, before the next is built: those wait for the GPU first, as every frame used to.
+    sOverlap = overlap_setting() && sFrameStarted < 0 && !sSnapshotPending;
+    if (!sOverlap) {
+        wait_for_gpu(1);
+        // The application is closing or suspended: stop here, with the GPU idle and no frame being built.
+        plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
+    }
+    gPlatGfxStage = "drawing";
+
+    slot = &sSlots[sRec];
+    slot->numParts = 0;
+    slot->numDraws = 0;
+    slot->frame = sFrameCount;
+    sVbo = slot->vbo;
+    sVboUsed = 0;
+    sVboFlushed = 0;
+    {
+        C3D_BufInfo *buf = C3D_GetBufInfo();
+        BufInfo_Init(buf);
+        BufInfo_Add(buf, sVbo, sizeof(C3DVertex), 4, 0x3210);
+    }
+    GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
     // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
     // draws nothing (while a level loads) must not show up as a black flash. So only the first frame uses a memory
     // fill; after that the depth buffer is cleared by drawing. (A memory fill of the depth buffer alone never finished
@@ -899,14 +1010,14 @@ void gfxb_start_frame(void) {
     if (sFrameStarted >= 0) {
         C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
     }
-    C3D_FrameDrawOn(sTarget);
+    // What C3D_FrameDrawOn does, which needs a citro3d frame begun; the target is marked used when handed over.
+    C3D_SetFrameBuf(&sTarget->frameBuf);
+    C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
     forget_gpu_state();
     sMipmapsUsed = sMipmapSetting != 0;
     sMipmapsShown = sMipmapSetting == 2;
     sColourBoost = sColourSetting;
     sFrameFirstDraw = 1;
-    sVboUsed = 0;
-    sVboFlushed = 0;
     if (sFrameStarted < 0) {
         static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
         draw_clear_rect(sFullScreen, 0, 1);
@@ -1006,7 +1117,18 @@ void gfxb_end_frame(void) {
     }
     {
         static float sMaxUsage;
-        float usage = C3D_GetCmdBufUsage();
+        FrameSlot *slot = &sSlots[sRec];
+        u32 *tail = gpuCmdBuf, tailSize = gpuCmdBufSize, tailOffset = gpuCmdBufOffset;
+        float usage;
+        int i;
+
+        if (full_flush()) {
+            GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
+        } else {
+            flush_new_vertices();
+        }
+        slot->words = (u32) (gpuCmdBuf + gpuCmdBufOffset - slot->cmd);
+        usage = (float) slot->words / sCmdWords;
         if (usage > sMaxUsage) {
             sMaxUsage = usage;
         }
@@ -1014,20 +1136,37 @@ void gfxb_end_frame(void) {
             plat_log("frame %d: %d triangles at %llu ms, command buffer %.0f%% (max %.0f%%), %d splits", sFrameCount,
                      sFrameTriangles, plat_time_ns() / 1000000ULL, usage * 100.0f, sMaxUsage * 100.0f, sDrainSplits);
         }
-    }
-    sLastFrameTriangles = sFrameTriangles;
-    sLastFrameUsage = C3D_GetCmdBufUsage();
-    sFrameTriangles = 0;
-    sLastDrainSplits = sDrainSplits;
-    sDrainSplits = 0;
-    if (full_flush()) {
-        GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
-        C3D_FrameEnd(0); // Also flushes the whole linear heap.
-    } else {
-        flush_new_vertices();
-        C3D_FrameEnd(GX_CMDLIST_FLUSH);
+        if (sOverlap) {
+            // Built while the GPU drew the last frame: wait for it now, then hand this one over.
+            wait_for_gpu(1);
+        }
+        // C3D_FrameBegin set citro3d's own command buffer: carry on in the slot's, where the frame is.
+        GPUCMD_SetBuffer(tail, tailSize, tailOffset);
+        for (i = 0; i < slot->numParts; i++) {
+            GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
+        }
+        sTarget->used = true;
+        sLastFrameTriangles = sFrameTriangles;
+        sLastFrameUsage = usage;
+        sFrameTriangles = 0;
+        sLastDrainSplits = sDrainSplits;
+        sDrainSplits = 0;
+        sOnGpu = sRec;
+        sRec = (sRec + 1) % sNumSlots;
+        if (full_flush()) {
+            C3D_FrameEnd(0); // Also flushes the whole linear heap.
+        } else {
+            C3D_FrameEnd(GX_CMDLIST_FLUSH);
+        }
     }
     sFrameStarted = -1; // A frame has been drawn, so the target holds an image.
+    if (sOverlap && plat_3ds_renderer_should_park()) {
+        // The application is closing or being suspended: stop with the GPU idle. The HOME menu changes the GPU's
+        // settings, so no frame built before it may be handed over after it (citro3d rewrites them all afterwards).
+        wait_for_gpu(0);
+        plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
+        C3D_FrameEnd(GX_CMDLIST_FLUSH); // Empty: ends the frame wait_for_gpu began.
+    }
 }
 
 /******************************** Textures ********************************/
@@ -1356,14 +1495,16 @@ static void verify_texture(const GfxTexture *tex) {
 
 void gfxb_texture_free(GfxTexture *tex) {
     C3DTexture *t = (C3DTexture *) tex->backendData;
+    FrameSlot *slot = &sSlots[sRec];
     if (t == NULL) {
         return;
     }
     tex->backendData = NULL;
-    // The GPU may still be drawing with it: delete it once the next frame has begun.
-    if (sNumPendingFrees == sPendingFreesCapacity) {
-        int capacity = sPendingFreesCapacity ? sPendingFreesCapacity * 2 : 256;
-        C3DTexture **list = realloc(sPendingFrees, capacity * sizeof(C3DTexture *));
+    // The GPU may still be drawing with it, and this frame may have used it: delete it once the GPU has drawn this
+    // frame (process_pending_frees).
+    if (slot->numFrees == slot->freesCapacity) {
+        int capacity = slot->freesCapacity ? slot->freesCapacity * 2 : 256;
+        C3DTexture **list = realloc(slot->frees, capacity * sizeof(C3DTexture *));
         if (list == NULL) {
             if (!t->shared) {
                 C3D_TexDelete(&t->tex); // Out of memory: delete now and risk a glitch.
@@ -1371,10 +1512,10 @@ void gfxb_texture_free(GfxTexture *tex) {
             free(t);
             return;
         }
-        sPendingFrees = list;
-        sPendingFreesCapacity = capacity;
+        slot->frees = list;
+        slot->freesCapacity = capacity;
     }
-    sPendingFrees[sNumPendingFrees++] = t;
+    slot->frees[slot->numFrees++] = t;
 }
 
 void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
@@ -1990,7 +2131,7 @@ static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
         (sDrainSplits < SMALL_DRAWS_ONLY || numTriangles <= 4)) {
         // The GPU reads the vertices so far when it runs the first part of the list.
         flush_new_vertices();
-        C3D_FrameSplit(GX_CMDLIST_FLUSH);
+        split_command_list();
         sDrainSplits++;
     }
     if (sRewrite && (sFrameFirstDraw || key != sLastKey)) {
@@ -2141,21 +2282,16 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     float su0, sv0, su1, sv1;
     int i, first, count = numTriangles * 3;
 
-    if (sVboUsed + count > VBO_VERTICES) {
+    if (sVboUsed + count > VBO_VERTICES || gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+        // Out of room in the frame's vertex buffer or command list (a full command list stops the program, and
+        // nothing of the frame reaches the GPU before it ends, so splitting it would not make room): leave the rest
+        // of the frame's triangles out. Races use under a fifth of either.
+        if (sDrawsLeftOut++ < 5) {
+            plat_log("frame %d: %s full (%d vertices, %lu command words), triangles left out", sFrameCount,
+                     sVboUsed + count > VBO_VERTICES ? "vertex buffer" : "command list", sVboUsed,
+                     (unsigned long) cmd_position());
+        }
         return;
-    }
-    if (gpuCmdBufOffset > gpuCmdBufSize - gpuCmdBufSize / 10) {
-        // A full command buffer silently drops commands, and a half written command can hang the real GPU (an
-        // emulator shrugs it off). Hand what is there to the GPU and carry on in an empty buffer instead.
-        if (sCmdBufSplits++ < 5) {
-            plat_log("frame %d: command buffer full, splitting it", sFrameCount);
-        }
-        if (full_flush()) {
-            GSPGPU_FlushDataCache((void *) __ctru_linear_heap, __ctru_linear_heap_size);
-        } else {
-            flush_new_vertices();
-        }
-        C3D_FrameSplit(GX_CMDLIST_FLUSH);
     }
     if (sLogFrame == -2) {
         const char *env = plat_getenv("DKR_LOG_DRAWS");
