@@ -109,7 +109,7 @@ static const char *main_hint(int i) {
     if (i == MAIN_AA) {
         return "Smoother edges; the GPU draws 4x";
     } else if (i == MAIN_MIPMAPS) {
-        return plat_3ds_mipmap_setting() == 2 ? "Levels tinted from the next track" : "No shimmer on distant textures";
+        return plat_3ds_mipmap_setting() == 2 ? "Tints each level a colour" : "No shimmer on distant textures";
     } else if (i == MAIN_COLOUR) {
         return "Richer colours on the 3DS screen";
     } else if (i == MAIN_PROFILER) {

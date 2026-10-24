@@ -85,8 +85,8 @@ font, colourful font, blue arrows and ON / OFF labels, all read from your ROM li
 the game is shipped. Taps on the menu play the game's own menu sounds. Until the ROM is loaded the screen uses a plain
 8x8 font.
 - **Anti-aliasing**: on or off, from the next frame (see Graphics).
-- **Mipmaps**: Off, On, or Show (on, with the levels of textures loaded from then on tinted red, green, blue and
-  yellow, to see where the GPU uses them), from the next frame (see Graphics).
+- **Mipmaps**: Off, On, or Show (on, with the levels tinted red, green, blue and yellow, to see where the GPU uses
+  them), from the next frame (see Graphics).
 - **Colour boost**: Off, Low, Medium or High, from the next frame (see Graphics).
 - **Profiler**: frame times on the bottom screen (see Profiler).
 - **Test run**: start a full test, a quick test or the AA bench, or stop the one running.

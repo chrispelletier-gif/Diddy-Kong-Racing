@@ -41,6 +41,7 @@ typedef struct C3DTexture {
     int shared; // tex's memory belongs to another texture (gfxb_texture_share)
     int levels; // Mipmap levels after the first that tex holds (see mip_levels)
     int point;  // Point sampled, so the levels are never used
+    int tinted; // The levels are tinted (the "Show" mipmap setting)
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
@@ -71,7 +72,7 @@ static int sDrainSplits, sLastDrainSplits;
 /* The graphics settings, as the Settings menu sets them (any thread) and as the renderer applies them, from the start
  * of each frame: mipmaps on or off (G1, see mip_levels), and the colour boost level (G2, see add_colour_boost). */
 static volatile int sMipmapSetting = 1, sColourSetting;
-static int sMipmapsUsed = 1, sColourBoost;
+static int sMipmapsUsed = 1, sMipmapsShown, sColourBoost;
 
 /* The N64 picture is 320 pixels wide; by default it is shown centred on the 400 pixel wide top screen. */
 static float sScreenScaleX = 320.0f / 400.0f;
@@ -442,6 +443,7 @@ void gfxb_init(void) {
         sMipmapSetting = 1;
     }
     sMipmapsUsed = sMipmapSetting != 0;
+    sMipmapsShown = sMipmapSetting == 2;
     sColourSetting = sColourBoost = settings_get("colour", 0);
     if (sColourSetting < 0 || sColourSetting > 3) {
         sColourSetting = sColourBoost = 0;
@@ -900,6 +902,7 @@ void gfxb_start_frame(void) {
     C3D_FrameDrawOn(sTarget);
     forget_gpu_state();
     sMipmapsUsed = sMipmapSetting != 0;
+    sMipmapsShown = sMipmapSetting == 2;
     sColourBoost = sColourSetting;
     sFrameFirstDraw = 1;
     sVboUsed = 0;
@@ -1205,9 +1208,9 @@ static void swizzle_level(u8 *data, const unsigned int *pixels, unsigned int w, 
 }
 
 /*
- * The "Show" mipmap setting: textures loaded while it is on get their levels tinted halfway towards red (level 1),
- * green (2), blue (3), then yellow, so the picture shows where each level is used. Textures loaded before keep
- * their colours until the next track loads them again.
+ * The "Show" mipmap setting: the levels are tinted halfway towards red (level 1), green (2), blue (3), then yellow,
+ * so the picture shows where each level is used. A texture whose levels don't match the setting has them built
+ * again when it is next drawn (bind_texture), so switching takes effect at once, with a one-off hitch.
  */
 static void tint_level(unsigned int *pixels, unsigned int count, int level) {
     static const unsigned int sTints[4] = { 0x0000FF, 0x00FF00, 0xFF0000, 0x00FFFF };
@@ -1234,11 +1237,12 @@ static int upload_mip_levels(C3DTexture *t, const GfxTexture *tex, int format) {
             pixels[y * pw + x] = pot_texel(tex, pw, ph, t->resample, x, y);
         }
     }
+    t->tinted = sMipmapsShown;
     for (level = 1; level <= t->levels; level++) {
         gfx_mip_downsample(pixels, pw, ph, pixels);
         pw /= 2;
         ph /= 2;
-        if (sMipmapSetting == 2) {
+        if (t->tinted) {
             // Tints the copy the next level is made from too, which only makes the tints of later levels stronger.
             tint_level(pixels, pw * ph, level);
         }
@@ -1855,6 +1859,14 @@ static int bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV)
     C3DTexture *t = (tex != NULL) ? (C3DTexture *) tex->backendData : NULL;
     C3D_Tex *bind = (t != NULL) ? &t->tex : &sWhiteTex;
     int changed = !sGpu.known || bind != sGpu.tex[unit];
+    if (t != NULL && t->levels > 0 && t->tinted != sMipmapsShown && tex->pixels != NULL) {
+        // The Show setting changed since the levels were built. The GPU may still be drawing the last frame with
+        // them, which can show one frame of mixed levels.
+        if (upload_mip_levels(t, tex, gpu_format(tex))) {
+            GSPGPU_FlushDataCache(t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
+        }
+        t->tinted = sMipmapsShown;
+    }
     if (t != NULL) {
         int maxLevel = (sMipmapsUsed && !t->point) ? t->levels : 0;
         if (t->tex.maxLevel != maxLevel) {
