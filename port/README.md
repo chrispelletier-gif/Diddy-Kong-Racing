@@ -139,10 +139,10 @@ The top screen is anti-aliased by default: frames are drawn at twice the resolut
 downsampled when they are sent to the screen. It only costs GPU time (the CPU work is unchanged). Turn it off in the
 Settings menu (until it has been set there, `DKR_AA=0` in `sdmc:/3ds/dkr/env.txt` also turns it off).
 
-Mipmaps (on by default) stop distant track textures from shimmering: every texture that repeats (ground, walls,
-water) also gets smaller, pre-filtered copies when it is loaded, and the GPU reads the one that fits the distance.
-That takes a third more memory for those textures. Textures drawn once (shadows, signs) and point sampled ones (text)
-are left as they were.
+Mipmaps (on by default) stop distant track textures from shimmering: every texture that repeats or is opaque
+(ground, walls, cliffs, water) also gets smaller, pre-filtered copies when it is loaded, and the GPU reads the one that
+fits the distance. That takes a third more memory for those textures. Clamped textures with transparency (shadows,
+decals) and point sampled ones (text) are left as they were.
 
 Colour boost (off by default) makes colours more saturated, as the 3DS screen looks washed out next to a CRT. It is
 done in the GPU's colour combiner for every draw, so it costs no time; greys, black and white stay as they were.

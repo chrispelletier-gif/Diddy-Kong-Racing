@@ -1131,12 +1131,10 @@ static inline u32 get_texel(const void *tile, int format, int i) {
 
 /*
  * Mipmaps (roadmap item G1). Without them, a distant track texture is sampled a few texels apart from one pixel to
- * the next, so it shimmers as the kart moves. Each bilinear filtered texture of at least 16x16 that repeats (the
- * ground, walls, water) gets a chain of smaller copies down to 8 texels on its short side (the GPU's smallest), box
- * filtered on the CPU when it is uploaded, which costs a third more texture memory. The GPU then picks the level,
- * blending between two (trilinear). Textures that are clamped on both axes keep one level: they are drawn once, not
- * tiled (kart shadows, signs, decals), and blurring them only shows their edges, as a shadow seen at a low angle came
- * out as a dark rectangle. Point filtered textures (text and other 2D) keep one level too. The Settings menu switches
+ * the next, so it shimmers as the kart moves. Each texture gfx_wants_mipmaps picks (bilinear ones that repeat, or are
+ * opaque) gets a chain of smaller copies down to 8 texels on its short side (the GPU's smallest), box filtered on the
+ * CPU when it is uploaded, which costs a third more texture memory. The GPU then picks the level, blending between
+ * two (trilinear). Point filtered textures (text and other 2D) keep one level. The Settings menu switches
  * between using the levels and level 0 only, from the next frame; the levels are built either way so that switching
  * shows the difference at once. DKR_MIPMAP=0 never builds them; DKR_MIP_FILTER=0 takes the nearest level instead of
  * blending two.
@@ -1172,8 +1170,7 @@ int plat_3ds_mipmap_setting(void) {
 
 /* The number of levels after the first to give a texture of the GPU size pw x ph. */
 static int mip_levels(const GfxTexture *tex, unsigned int pw, unsigned int ph) {
-    if (tex->filter == GFX_FILTER_POINT || (tex->wrapS == GFX_WRAP_CLAMP && tex->wrapT == GFX_WRAP_CLAMP) || pw < 16 ||
-        ph < 16 || !mipmaps_built()) {
+    if (!mipmaps_built() || !gfx_wants_mipmaps(tex)) {
         return 0;
     }
     return C3D_TexCalcMaxLevel(pw, ph);

@@ -150,15 +150,13 @@ static void free_mips(GfxTexture *tex) {
     tex->backendData = NULL;
 }
 
-/* Like the 3DS: bilinear textures of 16x16 or more that repeat, halved down to 8 on the short side (while the size
- * stays even). */
+/* Like the 3DS (gfx_wants_mipmaps), halved down to 8 on the short side while the size stays even. */
 static void build_mips(GfxTexture *tex) {
     SoftMips *m;
     unsigned int w = tex->width, h = tex->height;
     read_upgrade_settings();
     free_mips(tex);
-    if (!sMipmaps || tex->filter == GFX_FILTER_POINT || w < 16 || h < 16 ||
-        (tex->wrapS == GFX_WRAP_CLAMP && tex->wrapT == GFX_WRAP_CLAMP)) {
+    if (!sMipmaps || !gfx_wants_mipmaps(tex)) {
         return;
     }
     m = calloc(1, sizeof(SoftMips));

@@ -176,6 +176,28 @@ static inline unsigned int gfx_texel_bytes(int format) {
 }
 
 /*
+ * Whether a texture gets mipmaps (roadmap item G1): bilinear, at least 16x16, and either repeating on an axis (ground,
+ * water) or opaque. Clamped opaque textures are mostly walls and cliffs, which DKR cuts into one texture per tile.
+ * Clamped textures with transparency (kart shadows, decals) keep one level: their shape runs out to the edges, so
+ * small levels have see-through edges that aren't, and a shadow seen at a low angle came out as a dark rectangle.
+ */
+static inline int gfx_wants_mipmaps(const GfxTexture *tex) {
+    unsigned int i, n = tex->width * tex->height;
+    if (tex->filter == GFX_FILTER_POINT || tex->width < 16 || tex->height < 16) {
+        return 0;
+    }
+    if (tex->wrapS != GFX_WRAP_CLAMP || tex->wrapT != GFX_WRAP_CLAMP) {
+        return 1;
+    }
+    for (i = 0; i < n; i++) {
+        if ((tex->pixels[i] >> 24) != 0xFF) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
  * The next smaller mipmap level (roadmap item G1): each 2x2 block of src (w x h, RGBA8888) averaged into one pixel of
  * dst ((w / 2) x (h / 2), which may be src itself). Colours are weighted by alpha, so the colour hidden under
  * transparent texels (often black) doesn't darken the edges of cutouts such as trees and fences.
