@@ -137,19 +137,20 @@ s32 generate_collision_candidates(s32 numPoints, Vec3f *origins, Vec3f *targets,
                 continue;
             }
 
-            // Skip batches with no texture, since the surface type is stored in the texture data
+            // Batches with no texture are still solid, with the default surface (surface type is stored in the
+            // texture data). The original assembly only reads the texture's surface type when there is one.
             if (seg->batches[batchIndex].textureIndex == 255) {
-                continue;
-            }
-
-            // Skip surfaces that are non-solid or selectively passable depending on the vehicle type:
-            // - SURFACE_WATER_CALM is passable by all objects (treated like water surface).
-            // - SURFACE_INVIS_WALL can be passed through only by planes.
-            // - SURFACE_UNK12 is impassable only for cars, but passable by other vehicle types.
-            surface = gCurrentLevelModel->textures[seg->batches[batchIndex].textureIndex].surfaceType;
-            if (surface == SURFACE_WATER_CALM || (vehicleID == VEHICLE_PLANE && surface == SURFACE_INVIS_WALL) ||
-                (vehicleID != VEHICLE_CAR && surface == SURFACE_UNK12)) {
-                continue;
+                surface = SURFACE_DEFAULT;
+            } else {
+                // Skip surfaces that are non-solid or selectively passable depending on the vehicle type:
+                // - SURFACE_WATER_CALM is passable by all objects (treated like water surface).
+                // - SURFACE_INVIS_WALL can be passed through only by planes.
+                // - SURFACE_UNK12 is impassable only for cars, but passable by other vehicle types.
+                surface = gCurrentLevelModel->textures[seg->batches[batchIndex].textureIndex].surfaceType;
+                if (surface == SURFACE_WATER_CALM || (vehicleID == VEHICLE_PLANE && surface == SURFACE_INVIS_WALL) ||
+                    (vehicleID != VEHICLE_CAR && surface == SURFACE_UNK12)) {
+                    continue;
+                }
             }
 
             // Iterate over triangles in the batch and add eligible ones based on grid mask intersection
@@ -259,7 +260,7 @@ s32 compute_grid_overlap_mask(LevelModelSegmentBoundingBox *bbox, s32 x1, s32 z1
     cell_z = bbox_z1;
 
     for (i = 0; i < 8; i++) {
-        if (cell_z + cell_height >= z1 && z2 >= bbox_z1) {
+        if (cell_z + cell_height >= z1 && z2 >= cell_z) {
             mask |= v1;
         }
 
