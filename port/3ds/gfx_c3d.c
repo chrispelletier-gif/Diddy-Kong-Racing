@@ -18,10 +18,12 @@
 #include "shader_shbin.h"
 
 /* The display transfer converts to the screen's format and, with anti-aliasing, averages each 2x2 (or 2x1) block of
- * pixels. */
-#define DISPLAY_TRANSFER_FLAGS(inFormat, scaling)                                                                      \
-    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |                                 \
-     GX_TRANSFER_IN_FORMAT(inFormat) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_SCALING(scaling))
+ * pixels. It can't widen pixels: an RGB565 target hangs a real 3DS's transfer to an RGB8 screen (emulators do it), so
+ * with 16-bit buffers the top screen is RGB565 too (see link_target). */
+#define DISPLAY_TRANSFER_FLAGS(format, scaling)                                                                        \
+    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | GX_TRANSFER_IN_FORMAT(format) |  \
+     GX_TRANSFER_OUT_FORMAT((format) == GX_TRANSFER_FMT_RGB565 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGB8) |     \
+     GX_TRANSFER_SCALING(scaling))
 
 #define TOP_WIDTH 400
 #define TOP_HEIGHT 240
@@ -575,6 +577,10 @@ static void link_target(void) {
         scaling = sScaleX == 2 && !s800 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_X;
     }
     sTransferFlags = DISPLAY_TRANSFER_FLAGS(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8, scaling);
+    // Called with the GPU idle, so no transfer is still writing the old framebuffers (which this may reallocate).
+    if (gfxGetScreenFormat(GFX_TOP) != (sTargetFb16 ? GSP_RGB565_OES : GSP_BGR8_OES)) {
+        gfxSetScreenFormat(GFX_TOP, sTargetFb16 ? GSP_RGB565_OES : GSP_BGR8_OES);
+    }
     C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sTransferFlags);
     if (sStereo && sTargetRight != NULL) {
         C3D_RenderTargetSetOutput(sTargetRight, GFX_TOP, GFX_RIGHT, sTransferFlags);
@@ -1013,9 +1019,18 @@ static void capture_pending_frame(void) {
                                 GX_BUFFER_DIM(w, h),
                                 GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                                     GX_TRANSFER_IN_FORMAT(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8) |
-                                    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_OUT_FORMAT(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8) |
                                     GX_TRANSFER_SCALING(halve ? GX_TRANSFER_SCALE_X : GX_TRANSFER_SCALE_NO));
         GSPGPU_InvalidateDataCache(pixels, w * h * 4);
+        if (sTargetFb16) {
+            // The transfer can't widen pixels (see DISPLAY_TRANSFER_FLAGS): RGB565 to RGBA8 here, from the end back.
+            const u16 *in = (const u16 *) pixels;
+            u32 i;
+            for (i = w * h; i-- > 0;) {
+                u32 p = in[i], r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
+                pixels[i] = ((r << 3 | r >> 2) << 24) | ((g << 2 | g >> 4) << 16) | ((b << 3 | b >> 2) << 8) | 0xFF;
+            }
+        }
         file = fopen(sCapturePath, "wb");
         if (file != NULL) {
             fwrite(&w, 4, 1, file);
