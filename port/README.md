@@ -91,6 +91,18 @@ the game is shipped. Taps on the menu play the game's own menu sounds. Until the
 - **Profiler**: frame times on the bottom screen (see Profiler).
 - **Test run**: start a full test, a quick test or the AA bench, or stop the one running.
 - **Controls**: button layout, remapping and circle pad deadzone, sensitivity and response (see Controls).
+- **Sound** (roadmap P9 and O5):
+  - *Mixing core*: Renderer (default) mixes the sound next to the renderer. System mixes it on the 3DS's system
+    core instead, with the application's share of it raised to 80% and below the system's own services there
+    (the first try, at the renderer's priority, held up the GPU's service and doubled frame times). Applies on the
+    next start.
+  - *Mixer rate*: 22 kHz (the game's own) or 32 kHz, which keeps more of the high frequencies when sounds are
+    pitched up, for about 45% more mixing work. Pitches and reverb lengths are scaled to sound the same. Applies on
+    the next start.
+  - *Smooth resampling*: ON (default) lets the DSP use its polyphase filter to bring the mix up to its output rate
+    instead of linear interpolation, which is softer on high frequencies. Free on the CPU; from the next sound.
+  - *Sound buffer*: Large keeps 50 ms more sound queued, so a late audio frame doesn't leave a gap, at the cost of
+    the sound coming 50 ms later.
 - **Check for updates** and **Send a bug report** (see below).
 
 Other parts of the port add a page to the menu with `menu_3ds_add_page` (`3ds/menu_3ds.h`): its rows are a label, a
@@ -190,7 +202,11 @@ controls) work there, as do these renderer switches:
 - `DKR_TEX_NATIVE=0` (stores every texture on the GPU as 32 bit RGBA8 again, instead of the 16 and 8 bit formats that hold it exactly)
 - `DKR_MIPMAP=0` (never builds mipmaps, so they take no memory; the Settings switch then does nothing)
 - `DKR_MIP_FILTER=0` (reads the nearest mipmap instead of blending the two nearest)
-- `DKR_SINGLE_CORE=1` (on a New 3DS, keeps the renderer on the main core as on an Old 3DS)
+- `DKR_SINGLE_CORE=1` (on a New 3DS, keeps the renderer on the main core as on an Old 3DS, and the sound with it)
+- `DKR_AUDIO_SIMD=0` (mixes the sound with the plain C loops instead of the ARM SIMD ones; the sound is the same)
+- `DKR_AUDIO_RATE=n` (runs the mixer at n Hz, whatever the Sound page says; also works on the host build)
+- `DKR_SYSCORE_LIMIT=n` (the share of the system core, in percent, asked for when the sound is mixed there; 80)
+- `DKR_SYSCORE_PRIO=n` (the sound thread's priority on the system core, 0x18 highest to 0x3F lowest; 0x30)
 
 ## Bug reports
 
