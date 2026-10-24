@@ -2,6 +2,12 @@
 ; Everything is computed on the CPU (gfx_c3d.c, gfxb_draw_triangles), so the shader only passes the vertex through,
 ; like the SM64 3DS port's. The previous shader, which transformed positions and texture coordinates with uniforms,
 ; hung the GPU of a real New 3DS on the first triangle (emulators ran it fine).
+; The only arithmetic is the colour's: it arrives as four bytes (0 to 255, roadmap item P5), scaled to 0 to 1 the way
+; citro2d's shader does it.
+
+; Constants
+.constf consts(0.00392156862745098, 0.0, 0.0, 0.0)
+.alias rgba_scale consts.xxxx
 
 ; Outputs
 .out outpos position
@@ -19,6 +25,6 @@
 	mov outpos, inpos
 	mov outtc0, intc0
 	mov outtc1, intc1
-	mov outclr, inclr
+	mul outclr, rgba_scale, inclr
 	end
 .end
