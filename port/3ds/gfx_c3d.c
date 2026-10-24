@@ -17,11 +17,11 @@
 #include "plat/settings.h"
 #include "shader_shbin.h"
 
-/* The display transfer converts to the screen's format and, with anti-aliasing, averages each 2x2 block of pixels. */
-#define DISPLAY_TRANSFER_FLAGS(scaling)                                                                                \
+/* The display transfer converts to the screen's format and, with anti-aliasing, averages each 2x2 (or 2x1) block of
+ * pixels. */
+#define DISPLAY_TRANSFER_FLAGS(inFormat, scaling)                                                                      \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |                                 \
-     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |                    \
-     GX_TRANSFER_SCALING(scaling))
+     GX_TRANSFER_IN_FORMAT(inFormat) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_SCALING(scaling))
 
 #define TOP_WIDTH 400
 #define TOP_HEIGHT 240
@@ -87,10 +87,18 @@ static C3D_RenderTarget *sTarget;
 static C3D_RenderTarget *sTargetRight; // The right eye's, while the screen is in 3D (see the stereo section)
 /* Render target size relative to the screen: 2 draws at twice the resolution and downsamples (anti-aliasing).
  * sRenderScale is the vertical one (anti-aliasing), sScaleX the horizontal one, which the 800 pixel mode also sets to
- * 2 (see apply_screen_mode). */
+ * 2 (see apply_screen_mode). PLAT_AA_4X doubles both, PLAT_AA_2X only the vertical one: half the GPU's extra work,
+ * smoothing the edges closer to horizontal. */
 static int sRenderScale = 1, sScaleX = 1;
-static int sDefaultScale = 2;          // The setting (settings.txt, else DKR_AA).
-static volatile int sWantedScale = 2;  // plat_set_antialias, applied by the renderer between frames.
+static int sDefaultAa = PLAT_AA_4X;              // The setting (settings.txt, else DKR_AA).
+static volatile int sWantedAa = PLAT_AA_4X;      // plat_set_gpu_config, applied by the renderer between frames.
+/* 16-bit buffers (RGB565 colour, 16-bit depth) halve the memory the GPU reads and writes per pixel; the N64 game drew
+ * to a 16-bit framebuffer itself. The setting (settings.txt, else DKR_FB16), the wanted one and the targets' own. */
+static int sDefaultFb16;
+static volatile int sWantedFb16;
+static int sTargetFb16;
+/* A memory fill of the colour buffer takes a pixel in the buffer's format: black either way. */
+#define CLEAR_BLACK (sTargetFb16 ? 0 : 0x000000FF)
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
 static u8 *sVbo; // The vertex buffer of the frame being built
@@ -351,7 +359,7 @@ static void gpu_test_step(const char *what) {
     sVboUsed = 0;
     sVfmtBound = -1;
     C3D_FrameBegin(0);
-    C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+    C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, CLEAR_BLACK, 0);
     C3D_FrameDrawOn(sTarget);
     write_eye(0.0f, 0.0f);
 }
@@ -525,19 +533,31 @@ static void gpu_self_test(void) {
     gpu_test_mark_passed();
 }
 
+static const char *aa_name(int aa) {
+    return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
+}
+
+/* A render target in the current buffer formats (sTargetFb16). */
+static C3D_RenderTarget *new_target(int width, int height) {
+    return C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
+                                  sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+}
+
 /*
  * The render target for the top screen: twice the screen's resolution down for anti-aliasing (scale), and across for
- * anti-aliasing or the 800 pixel mode (across). The doubled one needs 3MB of VRAM, so fall back if it does not fit.
+ * 4x anti-aliasing or the 800 pixel mode (across), with 16-bit buffers or not. The doubled one needs 3MB of VRAM
+ * (half that with 16-bit buffers), so fall back if it does not fit.
  */
-static void create_target(int scale, int across) {
+static void create_target(int scale, int across, int fb16) {
+    sTargetFb16 = fb16;
     sTarget = NULL;
     if (scale == 2 || across == 2) {
-        sTarget = C3D_RenderTargetCreate(TOP_HEIGHT * scale, TOP_WIDTH * 2, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        sTarget = new_target(TOP_HEIGHT * scale, TOP_WIDTH * across);
         sRenderScale = scale;
-        sScaleX = 2;
+        sScaleX = across;
     }
     if (sTarget == NULL) {
-        sTarget = C3D_RenderTargetCreate(TOP_HEIGHT, TOP_WIDTH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        sTarget = new_target(TOP_HEIGHT, TOP_WIDTH);
         sRenderScale = 1;
         sScaleX = 1;
     }
@@ -552,9 +572,9 @@ static u32 sTransferFlags;
 static void link_target(void) {
     u32 scaling = GX_TRANSFER_SCALE_NO;
     if (sRenderScale == 2) {
-        scaling = sScaleX == 2 && s800 ? GX_TRANSFER_SCALE_X : GX_TRANSFER_SCALE_XY;
+        scaling = sScaleX == 2 && !s800 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_X;
     }
-    sTransferFlags = DISPLAY_TRANSFER_FLAGS(scaling);
+    sTransferFlags = DISPLAY_TRANSFER_FLAGS(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8, scaling);
     C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sTransferFlags);
     if (sStereo && sTargetRight != NULL) {
         C3D_RenderTargetSetOutput(sTargetRight, GFX_TOP, GFX_RIGHT, sTransferFlags);
@@ -563,21 +583,33 @@ static void link_target(void) {
     }
 }
 
-/* From any thread (the AA benchmark): anti-aliasing on (1), off (0) or back to the setting (-1), from the next
- * frame. */
-void plat_set_antialias(int on) {
-    sWantedScale = on < 0 ? sDefaultScale : on ? 2 : 1;
+/* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) and 16-bit buffers for the frames from the next
+ * one; -1 for either is the player's setting. */
+void plat_set_gpu_config(int aa, int fb16) {
+    sWantedAa = aa < 0 ? sDefaultAa : aa;
+    sWantedFb16 = fb16 < 0 ? sDefaultFb16 : fb16 != 0;
 }
 
-/* The Settings menu: the player's anti-aliasing choice, saved, and used from the next frame. */
-void plat_3ds_set_antialias_setting(int on) {
-    sDefaultScale = on ? 2 : 1;
-    sWantedScale = sDefaultScale;
-    settings_set("aa", on != 0);
+/* The Settings menu: the player's anti-aliasing choice (PLAT_AA_*), saved, and used from the next frame. */
+void plat_3ds_set_antialias_setting(int aa) {
+    sDefaultAa = aa < PLAT_AA_OFF || aa > PLAT_AA_2X ? PLAT_AA_OFF : aa;
+    sWantedAa = sDefaultAa;
+    settings_set("aa", sDefaultAa);
 }
 
 int plat_3ds_antialias_setting(void) {
-    return sDefaultScale == 2;
+    return sDefaultAa;
+}
+
+/* The Settings menu: 16-bit colour and depth buffers on or off, saved, and used from the next frame. */
+void plat_3ds_set_fb16_setting(int on) {
+    sDefaultFb16 = on != 0;
+    sWantedFb16 = sDefaultFb16;
+    settings_set("fb16", sDefaultFb16);
+}
+
+int plat_3ds_fb16_setting(void) {
+    return sDefaultFb16;
 }
 
 /* The Settings menu: the colour boost level (0 off, 1 to 3 stronger; see add_colour_boost), from the next frame. */
@@ -590,9 +622,13 @@ int plat_3ds_colour_setting(void) {
     return sColourSetting;
 }
 
-/* Whether the frames being drawn now are anti-aliased. */
+/* The anti-aliasing (PLAT_AA_*) of the frames being drawn now. With 800 pixels across, either is 2x. */
 int plat_antialias(void) {
-    return sRenderScale == 2;
+    return sRenderScale != 2 ? PLAT_AA_OFF : sScaleX == 2 && !s800 ? PLAT_AA_4X : PLAT_AA_2X;
+}
+
+int plat_fb16(void) {
+    return sTargetFb16;
 }
 
 /* The Settings menu's screen page (phase 6, see sWideSetting): each is saved and used from the next frame. */
@@ -665,8 +701,9 @@ static void apply_screen_mode(void) {
     float slider = osGet3DSliderState();
     int stereo = sStereoSetting && slider > 0.0f && __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
     int wide800 = s800Setting && !stereo && !sWideUnsupported;
-    int scale = stereo ? 1 : sWantedScale;
-    int across = (scale == 2 || wide800) ? 2 : 1;
+    int aa = stereo ? PLAT_AA_OFF : sWantedAa, fb16 = sWantedFb16;
+    int scale = aa != PLAT_AA_OFF ? 2 : 1;
+    int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;
 
     if ((sWideSetting != 0) != sWide && sTarget != NULL) {
@@ -677,7 +714,7 @@ static void apply_screen_mode(void) {
     sScale3D = sWide ? 1.0f : NARROW;
     sEyeSep = stereo ? slider * stereo_max_sep() : 0.0f;
     if (sTarget == NULL ||
-        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX)) {
+        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX && fb16 == sTargetFb16)) {
         return;
     }
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
@@ -685,10 +722,14 @@ static void apply_screen_mode(void) {
         plat_sleep_ns(250000);
     }
     C3D_FrameEnd(0);
-    newTarget = scale != sRenderScale || across != sScaleX;
+    newTarget = scale != sRenderScale || across != sScaleX || fb16 != sTargetFb16;
     if (newTarget) {
         C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
-        create_target(scale, across);
+        if (sTargetRight != NULL) {
+            C3D_RenderTargetDelete(sTargetRight); // Made again below, in the new formats.
+            sTargetRight = NULL;
+        }
+        create_target(scale, across, fb16);
         sFrameStarted = 0;
         if (wide800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target: don't try again every frame.
@@ -697,7 +738,7 @@ static void apply_screen_mode(void) {
     }
     if (stereo && sTargetRight == NULL) {
         // The right eye's target, the same size as the left one's (3D has anti-aliasing off).
-        sTargetRight = C3D_RenderTargetCreate(TOP_HEIGHT, TOP_WIDTH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        sTargetRight = new_target(TOP_HEIGHT, TOP_WIDTH);
         if (sTargetRight == NULL) {
             plat_log("top screen: no VRAM for the right eye's target, 3D off");
             sStereoSetting = 0;
@@ -720,11 +761,11 @@ static void apply_screen_mode(void) {
     sStereo = stereo;
     s800 = wide800;
     link_target();
-    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s)",
+    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s, %s buffers)",
              sStereo ? "3D" : s800 ? "800 pixels" : "400 pixels", sScaleX, sRenderScale,
-             sRenderScale == 2 ? "on" : "off");
+             aa_name(plat_antialias()), sTargetFb16 ? "16-bit" : "32-bit");
     if (newTarget && scale == 2 && sRenderScale != 2) {
-        sWantedScale = sRenderScale; // Didn't fit: don't try again every frame.
+        sWantedAa = PLAT_AA_OFF; // Didn't fit: don't try again every frame.
     }
 }
 
@@ -761,13 +802,20 @@ void gfxb_init(void) {
     sDone = 1;
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
     {
-        // Anti-aliasing is the Settings menu's choice; until one is made, on unless DKR_AA=0.
+        // Anti-aliasing is the Settings menu's choice; until one is made, 4x unless DKR_AA says otherwise (0 off, 1 4x,
+        // 2 2x, as settings.txt has it). The same for 16-bit buffers: off unless DKR_FB16=1.
         const char *aa = plat_getenv("DKR_AA");
-        sDefaultScale = settings_get("aa", aa == NULL || atoi(aa) != 0) ? 2 : 1;
-        sWantedScale = sDefaultScale;
+        const char *fb16 = plat_getenv("DKR_FB16");
+        sDefaultAa = settings_get("aa", aa == NULL ? PLAT_AA_4X : atoi(aa));
+        if (sDefaultAa < PLAT_AA_OFF || sDefaultAa > PLAT_AA_2X) {
+            sDefaultAa = PLAT_AA_4X;
+        }
+        sDefaultFb16 = settings_get("fb16", fb16 != NULL && atoi(fb16) != 0) != 0;
+        sWantedAa = sDefaultAa;
+        sWantedFb16 = sDefaultFb16;
         read_screen_settings();
         s800 = s800Setting && !sWideUnsupported;
-        create_target(sDefaultScale, (sDefaultScale == 2 || s800) ? 2 : 1);
+        create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1, sDefaultFb16);
         if (s800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target.
             s800 = 0;
@@ -776,7 +824,8 @@ void gfxb_init(void) {
             gfxSetWide(true);
         }
         link_target();
-        plat_status("Graphics started%s%s", sRenderScale == 2 ? " (anti-aliased)" : "", s800 ? " (800 pixels)" : "");
+        plat_status("Graphics started (anti-aliasing %s, %s buffers%s)", aa_name(plat_antialias()),
+                    sTargetFb16 ? "16-bit" : "32-bit", s800 ? ", 800 pixels" : "");
     }
     sMipmapSetting = settings_get("mipmaps", 1);
     if (sMipmapSetting < 0 || sMipmapSetting > 2) {
@@ -946,8 +995,10 @@ void gfxb_capture_frame(const char *path) {
 
 static void capture_pending_frame(void) {
     // The framebuffer is rotated (240 wide, 400 tall, times the render scale). It is copied at full resolution; the
-    // comparison tool downsamples anti-aliased captures itself.
-    const u32 w = TOP_HEIGHT * sRenderScale, h = TOP_WIDTH * sScaleX;
+    // comparison tool downsamples anti-aliased captures itself. 2x anti-aliasing (doubled one way only) is halved
+    // here, which the tool doesn't expect.
+    const int halve = sRenderScale == 2 && sScaleX == 1;
+    const u32 w = TOP_HEIGHT * (halve ? 1 : sRenderScale), h = TOP_WIDTH * sScaleX;
     u32 *pixels;
     FILE *file;
 
@@ -957,11 +1008,13 @@ static void capture_pending_frame(void) {
     pixels = linearAlloc(w * h * 4);
     if (pixels != NULL) {
         GSPGPU_FlushDataCache(pixels, w * h * 4);
-        C3D_SyncDisplayTransfer((u32 *) sTarget->frameBuf.colorBuf, GX_BUFFER_DIM(w, h), pixels, GX_BUFFER_DIM(w, h),
+        C3D_SyncDisplayTransfer((u32 *) sTarget->frameBuf.colorBuf,
+                                GX_BUFFER_DIM(TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX), pixels,
+                                GX_BUFFER_DIM(w, h),
                                 GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_IN_FORMAT(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8) |
                                     GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+                                    GX_TRANSFER_SCALING(halve ? GX_TRANSFER_SCALE_X : GX_TRANSFER_SCALE_NO));
         GSPGPU_InvalidateDataCache(pixels, w * h * 4);
         file = fopen(sCapturePath, "wb");
         if (file != NULL) {
@@ -1321,7 +1374,7 @@ static void save_gpu_hang(void) {
         }                                                                                                              \
     } while (0)
     ADD("GPU not responding after frame %d (%d draws, %d triangles, AA %s, %s)\n\n", slot->frame, slot->numDraws,
-        sLastFrameTriangles, sRenderScale == 2 ? "on" : "off",
+        sLastFrameTriangles, aa_name(plat_antialias()),
         sOverlap ? "built while the GPU drew the frame before" : "built with the GPU idle");
     // The queue's entries before lastEntry are done; GX runs them in order, so the first one after is where it stopped.
     ADD("GPU command queue: %u entries, %u sent, %u done (the first not done is marked)\n", queue->numEntries,
@@ -1523,9 +1576,9 @@ void gfxb_start_frame(void) {
     // fill; after that the depth buffer is cleared by drawing. (A memory fill of the depth buffer alone never finished
     // on a real New 3DS, which hung the game after its first frame. Emulators complete it.)
     if (sFrameStarted >= 0) {
-        C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+        C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, CLEAR_BLACK, 0);
         if (sStereo) {
-            C3D_RenderTargetClear(sTargetRight, C3D_CLEAR_ALL, 0x000000FF, 0);
+            C3D_RenderTargetClear(sTargetRight, C3D_CLEAR_ALL, CLEAR_BLACK, 0);
         }
     }
     // What C3D_FrameDrawOn does, which needs a citro3d frame begun; the target is marked used when handed over.

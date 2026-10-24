@@ -18,6 +18,13 @@
 #include <ultralog.h>
 #include <assert.h>
 #include <sched.h>
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+// The frame rate cap: retraces before the game gets a finished frame back (2 is 30 fps; the 60 fps setting makes it 1).
+#define SC_FRAME_RETRACES plat_frame_retraces()
+#else
+#define SC_FRAME_RETRACES 2
+#endif
 // TODO: this comes from a header
 #ident "$Revision: 1.17 $"
 
@@ -373,7 +380,7 @@ void __scHandleRetrace(OSSched *sc) {
     gRetraceCounter32++;
     sc->frameCount+=1; // If you want to make the game 60FPS, change this to 2.
 
-    if ((sc->unkTask) && (sc->frameCount >= 2)) {
+    if ((sc->unkTask) && (sc->frameCount >= SC_FRAME_RETRACES)) {
         unkTask = sc->unkTask;
         if (unkTask->msgQ) {
             if ((unkTask->unk68) || (unkTask->msg)) {
@@ -526,7 +533,7 @@ s32 __scTaskComplete(OSSched *sc, OSScTask *t) {
     if ((t->state & OS_SC_RCP_MASK) == 0) {
         if (t->msgQ) {
             if (t->flags & OS_SC_LAST_TASK) {
-                if (sc->frameCount <= 1) {
+                if (sc->frameCount < SC_FRAME_RETRACES) {
                     sc->unkTask = t;
                     return 1;
                 }

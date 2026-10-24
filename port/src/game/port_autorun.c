@@ -13,16 +13,18 @@
  *   DKR_AUTORUN_RESTART=1           Start from the first race instead of resuming.
  *   DKR_AUTORUN_SNAPSHOT=1          Also save a snapshot (GPU and reference images) after each race finishes.
  *
- * The anti-aliasing benchmark (roadmap item G0) is a short run instead: the heaviest races of the hardware test runs,
- * each raced four times with anti-aliasing off, on, on, off (so warming up or a hot console favours neither), with
- * the profiler's numbers for the two set side by side in the results. About half an hour. It is started with the "AA
- * bench" button in the Test run confirmation, or always runs with:
+ * The GPU benchmark is a short run instead: the heaviest races of the hardware test runs, each raced once with every
+ * render setting of sBenchConfigs (anti-aliasing 4x, 2x or off, 32 or 16-bit buffers, 30 or 60 fps), with the
+ * profiler's numbers for each set side by side in the results. About 50 minutes. It replaced the anti-aliasing
+ * benchmark of roadmap item G0 (AA off and on only). It is started with the "GPU bench" button in the Test run
+ * confirmation, or always runs with:
  *   DKR_AUTORUN_BENCH=1               Turns it on (instead of the full run).
- *   DKR_AUTORUN_BENCH_TRACKS=id,...   Tracks (default: Whale Bay, Jungle Falls and Frosty Village, the slowest
- *                                     tracks of hardware test run issue #10, two renderer-bound and one GPU-bound).
+ *   DKR_AUTORUN_BENCH_TRACKS=id,...   Tracks (default: Jungle Falls, Crescent Island and Haunted Woods, the slowest
+ *                                     tracks of the quick tests after P5, all GPU-bound with 4x anti-aliasing).
  *   DKR_AUTORUN_BENCH_CHARACTER=n     Character (default Bumper, whose races were the heaviest there).
- * It keeps its own files (aa_bench_state.txt, aa_bench_results.csv with an "aa" column), so a full run it interrupts
- * carries on afterwards. DKR_AUTORUN_TIMEOUT, _LOOP and _RESTART apply to it too.
+ *   DKR_AUTORUN_BENCH_CONFIGS=n,...   The settings to race (indexes into sBenchConfigs; default all).
+ * It keeps its own files (gpu_bench_state.txt, gpu_bench_results.csv with "config" and "pct_60fps" columns), so a
+ * full run it interrupts carries on afterwards. DKR_AUTORUN_TIMEOUT, _LOOP and _RESTART apply to it too.
  *
  * The quick test is the other short run: the slowest tracks of the full run, twice each with one character and the
  * player's own anti-aliasing setting, about 20 minutes. It is for telling whether a change made the slow spots
@@ -77,9 +79,8 @@
 #define RESULTS_FILE "autorun_results.csv"
 #define PROBLEMS_FILE "autorun_problems.txt"
 #define HANG_FILE "autorun_hang.txt"
-#define BENCH_STATE_FILE "aa_bench_state.txt"
-#define BENCH_RESULTS_FILE "aa_bench_results.csv"
-#define BENCH_PASSES 4
+#define BENCH_STATE_FILE "gpu_bench_state.txt"
+#define BENCH_RESULTS_FILE "gpu_bench_results.csv"
 #define QUICK_STATE_FILE "quick_test_state.txt"
 #define QUICK_RESULTS_FILE "quick_test_results.csv"
 #define QUICK_PASSES 2
@@ -91,8 +92,38 @@ typedef struct Race {
     s8 track;
     s8 character;
     s8 vehicle;
-    s8 aa; // Anti-aliasing for the race (the benchmark), or -1 to leave it as it is.
+    s8 config; // The render settings for the race (the benchmark: an index into sBenchConfigs), or -1 to leave them.
 } Race;
+
+/* The GPU benchmark's render settings. The first is the default ones, which the others are compared with. */
+typedef struct BenchConfig {
+    s8 aa;    // PLAT_AA_*
+    s8 fb16;  // 16-bit colour and depth buffers
+    s8 fps60; // The 60 fps cap
+    const char *name;
+} BenchConfig;
+
+static const BenchConfig sBenchConfigs[] = {
+    { PLAT_AA_4X, 0, 0, "AA 4x" },
+    { PLAT_AA_4X, 1, 0, "AA 4x, 16-bit" },
+    { PLAT_AA_2X, 0, 0, "AA 2x" },
+    { PLAT_AA_2X, 1, 0, "AA 2x, 16-bit" },
+    { PLAT_AA_OFF, 0, 0, "AA off" },
+    { PLAT_AA_OFF, 1, 0, "AA off, 16-bit" },
+    { PLAT_AA_OFF, 1, 1, "60 fps, AA off, 16-bit" },
+    { PLAT_AA_2X, 1, 1, "60 fps, AA 2x, 16-bit" },
+};
+#define BENCH_CONFIGS ((s32) ARRAY_COUNT(sBenchConfigs))
+
+static void apply_config(s32 config) {
+    if (config < 0 || config >= BENCH_CONFIGS) {
+        plat_set_gpu_config(-1, -1);
+        plat_set_60fps(-1);
+        return;
+    }
+    plat_set_gpu_config(sBenchConfigs[config].aa, sBenchConfigs[config].fb16);
+    plat_set_60fps(sBenchConfigs[config].fps60);
+}
 
 static void set_phase(s32 phase);
 static void turn_off(const char *why);
@@ -114,7 +145,7 @@ static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
 enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS };
 
-/* Which run: the full test run, the anti-aliasing benchmark, the quick test or the boss fights. */
+/* Which run: the full test run, the GPU benchmark, the quick test or the boss fights. */
 enum Mode { MODE_FULL, MODE_BENCH, MODE_QUICK, MODE_BOSS, MODE_COUNT };
 
 typedef struct ModeInfo {
@@ -127,7 +158,7 @@ typedef struct ModeInfo {
 
 static const ModeInfo sModes[MODE_COUNT] = {
     { "Test run", STATE_FILE, RESULTS_FILE, NULL, "DKR_AUTORUN" },
-    { "AA benchmark", BENCH_STATE_FILE, BENCH_RESULTS_FILE, "aa", "DKR_AUTORUN_BENCH" },
+    { "GPU benchmark", BENCH_STATE_FILE, BENCH_RESULTS_FILE, "config,pct_60fps", "DKR_AUTORUN_BENCH" },
     { "Quick test", QUICK_STATE_FILE, QUICK_RESULTS_FILE, "build", "DKR_AUTORUN_QUICK" },
     { "Boss fights", BOSS_STATE_FILE, BOSS_RESULTS_FILE, "build", "DKR_AUTORUN_BOSS" },
 };
@@ -240,11 +271,11 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
 }
 
 /*
- * The short runs: each track a number of times with one character. The benchmark races BENCH_PASSES times with
- * anti-aliasing off, on, on, off; the quick test and the boss fights leave anti-aliasing as it is.
+ * The short runs: each track a number of times with one character. The benchmark races each track once with each of
+ * its render settings; the quick test and the boss fights leave the settings as they are.
  */
 static void build_short_list(void) {
-    static const s8 sBenchTracks[] = { 8, 29, 28 };         // Whale Bay, Jungle Falls, Frosty Village
+    static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {
@@ -258,8 +289,8 @@ static void build_short_list(void) {
                              : (s32) ARRAY_COUNT(sBenchTracks);
     const char *prefix = boss ? "DKR_AUTORUN_BOSS" : quick ? "DKR_AUTORUN_QUICK" : "DKR_AUTORUN_BENCH";
     char name[48];
-    s8 tracks[MAX_TRACKS], character[1];
-    s32 numTracks, numLevels, numWorlds, t, pass, passes;
+    s8 tracks[MAX_TRACKS], character[1], configs[BENCH_CONFIGS];
+    s32 numTracks, numLevels, numWorlds, t, pass, passes, numConfigs;
 
     plat_snprintf(name, sizeof(name), "%s_TRACKS", prefix);
     numTracks = parse_list(plat_getenv(name), tracks, MAX_TRACKS);
@@ -273,7 +304,13 @@ static void build_short_list(void) {
         character[0] >= NUMBER_OF_CHARACTERS) {
         character[0] = 1; // Bumper
     }
-    passes = BENCH_PASSES;
+    numConfigs = parse_list(plat_getenv("DKR_AUTORUN_BENCH_CONFIGS"), configs, BENCH_CONFIGS);
+    if (numConfigs < 0) {
+        for (numConfigs = 0; numConfigs < BENCH_CONFIGS; numConfigs++) {
+            configs[numConfigs] = numConfigs;
+        }
+    }
+    passes = numConfigs;
     if (quick || boss) {
         plat_snprintf(name, sizeof(name), "%s_PASSES", prefix);
         passes = plat_getenv(name) ? port_atoi(plat_getenv(name)) : boss ? BOSS_PASSES : QUICK_PASSES;
@@ -288,7 +325,7 @@ static void build_short_list(void) {
             sRaces[sNumRaces].track = tracks[t];
             sRaces[sNumRaces].character = character[0];
             sRaces[sNumRaces].vehicle = leveltable_vehicle_default(tracks[t]);
-            sRaces[sNumRaces].aa = (quick || boss) ? -1 : (pass == 1 || pass == 2);
+            sRaces[sNumRaces].config = (quick || boss) ? -1 : configs[pass];
             sNumRaces++;
         }
     }
@@ -339,7 +376,7 @@ static void build_race_list(void) {
                     sRaces[sNumRaces].track = tracks[t];
                     sRaces[sNumRaces].character = characters[c];
                     sRaces[sNumRaces].vehicle = v;
-                    sRaces[sNumRaces].aa = -1;
+                    sRaces[sNumRaces].config = -1;
                     sNumRaces++;
                 }
             }
@@ -460,8 +497,9 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         stats->gameFrames ? prof_limit(stats) : "-", (int) sUnsticks, sUnstuckAt);
     length = strlen(line);
     if (sMode == MODE_BENCH) {
-        // What the race was drawn with (a race that never got going: what it was meant to be).
-        plat_snprintf(line + length, sizeof(line) - length, ",%d", stats == &empty ? (int) race->aa : plat_antialias());
+        // The settings the race was meant to have (the log says what the renderer made of them), and the frames at 60.
+        plat_snprintf(line + length, sizeof(line) - length, ",%d,%d", (int) race->config,
+                      (int) pct(stats->rateFrames[1], stats->gameFrames));
     } else if (sMode == MODE_QUICK || sMode == MODE_BOSS) {
         plat_snprintf(line + length, sizeof(line) - length, ",%s", plat_build_version());
     }
@@ -527,7 +565,8 @@ static void init(void) {
     unsigned int size;
     char *state, *hang;
     const char *names[] = { "DKR_AUTORUN_TRACKS", "DKR_AUTORUN_CHARACTERS", "DKR_AUTORUN_VEHICLES" };
-    const char *benchNames[] = { "DKR_AUTORUN_BENCH_TRACKS", "DKR_AUTORUN_BENCH_CHARACTER" };
+    const char *benchNames[] = { "DKR_AUTORUN_BENCH_TRACKS", "DKR_AUTORUN_BENCH_CHARACTER",
+                                 "DKR_AUTORUN_BENCH_CONFIGS" };
     const char *quickNames[] = { "DKR_AUTORUN_QUICK_TRACKS", "DKR_AUTORUN_QUICK_CHARACTER",
                                  "DKR_AUTORUN_QUICK_PASSES" };
     const char *bossNames[] = { "DKR_AUTORUN_BOSS_TRACKS", "DKR_AUTORUN_BOSS_CHARACTER", "DKR_AUTORUN_BOSS_PASSES" };
@@ -536,7 +575,7 @@ static void init(void) {
     sInitialised = TRUE;
     sConfigHash = 0;
     if (sMode == MODE_BENCH) {
-        hash_text("aa bench");
+        hash_text("gpu bench");
         for (i = 0; i < (s32) ARRAY_COUNT(benchNames); i++) {
             hash_text(plat_getenv(benchNames[i]));
         }
@@ -695,14 +734,15 @@ static void show_status(void) {
             break;
     }
     plat_snprintf(line[0], sizeof(line[0]), "%s %d  race %d/%d  ok %d bad %d",
-                  sMode == MODE_BENCH   ? "AA BENCH"
+                  sMode == MODE_BENCH   ? "GPU BENCH"
                   : sMode == MODE_QUICK ? "QUICK TEST"
                   : sMode == MODE_BOSS  ? "BOSS FIGHTS"
                                         : "TEST RUN",
                   (int) sRun,
                   (int) sNext + 1, (int) sNumRaces, (int) sFinished, (int) sProblems);
     if (sMode == MODE_BENCH) {
-        plat_snprintf(line[1], sizeof(line[1]), "%s AA %s %s", track_name(race->track), race->aa ? "on" : "off",
+        plat_snprintf(line[1], sizeof(line[1]), "%s, %s %s", track_name(race->track),
+                      race->config >= 0 && race->config < BENCH_CONFIGS ? sBenchConfigs[(s32) race->config].name : "?",
                       what);
     } else {
         plat_snprintf(line[1], sizeof(line[1]), "%s %s %s %s", sCharacterNames[(s32) race->character],
@@ -747,8 +787,8 @@ s32 port_autorun_title(void) {
     port_log("autorun: race %d/%d: %s, %s, %s", (int) sNext + 1, (int) sNumRaces, track_name(race->track),
              sCharacterNames[(s32) race->character], sVehicleNames[(s32) race->vehicle]);
     save_state(sNext);
-    if (race->aa >= 0) {
-        plat_set_antialias(race->aa); // The renderer switches while the race loads.
+    if (race->config >= 0) {
+        apply_config(race->config); // The renderer switches while the race loads.
     }
     set_phase(PHASE_LOADING);
     sRaceRetraces = 0;
@@ -803,9 +843,10 @@ enum BenchColumn {
     COL_WORST_GPU = 27,
     COL_LIMIT = 32,
     COL_UNSTICKS = 33,
-    COL_EXTRA = 35, // After the test run's unsticks and unstuck_at: "aa" (benchmark) or "build" (quick test)
+    COL_EXTRA = 35, // After the test run's unsticks and unstuck_at: "config" (benchmark) or "build" (quick test)
     COL_COUNT,
-    COL_AUDIO_GAPS = COL_COUNT, // Only in results written since the sound columns were added.
+    COL_AUDIO_GAPS = COL_COUNT, // Only in results written since the sound columns were added (the benchmark: one on).
+    COL_PCT_60FPS = COL_COUNT,  // The benchmark's second column of its own.
 };
 
 #define BENCH_MAX_TRACKS 8
@@ -815,7 +856,7 @@ typedef struct BenchGroup {
     char track[32];
     char build[40]; // Quick test: the run and its build.
     s32 races;
-    double fps, pct30, rdp, gpu, audio, gaps;
+    double fps, pct30, pct60, rdp, gpu, audio, gaps;
     s32 worstFrame, worstGpu;
     s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
 } BenchGroup;
@@ -842,11 +883,11 @@ static s32 split_fields(char *line, const char **fields) {
 
 /*
  * A short run's summary, from the finished races in its results file (so races from before a crash count too), as
- * Markdown. The benchmark: one line per track for anti-aliasing off and one for on, then what AA costs. The quick
+ * Markdown. The benchmark: one line per track and render setting, with the GPU time it saves. The quick
  * test: one line per track for the quick test before this one and one for this one, then the difference.
  */
 static void bench_summary(char *out, s32 size) {
-    static BenchGroup groups[BENCH_MAX_TRACKS][2];
+    static BenchGroup groups[BENCH_MAX_TRACKS][BENCH_CONFIGS];
     char path[256];
     char *data, *copy, *line, *next;
     const char *fields[COL_COUNT + 4];
@@ -894,7 +935,7 @@ static void bench_summary(char *out, s32 size) {
     plat_free(copy);
     for (line = data; line != NULL && *line; line = next) {
         BenchGroup *g;
-        s32 numFields;
+        s32 numFields, gapsColumn;
         next = strchr(line, '\n');
         if (next != NULL) {
             *next++ = '\0';
@@ -913,7 +954,10 @@ static void bench_summary(char *out, s32 size) {
             if (run != sRun) {
                 continue;
             }
-            k = port_atoi(fields[COL_EXTRA]) != 0;
+            k = port_atoi(fields[COL_EXTRA]);
+            if (k < 0 || k >= BENCH_CONFIGS) {
+                continue;
+            }
         }
         for (t = 0; t < numTracks && !str_equal(groups[t][0].track, fields[COL_TRACK]); t++) {}
         if (t == numTracks) {
@@ -931,10 +975,14 @@ static void bench_summary(char *out, s32 size) {
         g->races++;
         g->fps += parse_decimal(fields[COL_FPS]);
         g->pct30 += parse_decimal(fields[COL_PCT_30FPS]);
+        if (!quick && numFields > COL_PCT_60FPS) {
+            g->pct60 += parse_decimal(fields[COL_PCT_60FPS]);
+        }
         g->rdp += parse_decimal(fields[COL_RDP]);
         g->gpu += parse_decimal(fields[COL_GPU_DRAW]);
         g->audio += parse_decimal(fields[COL_AUDIO]);
-        g->gaps += numFields > COL_AUDIO_GAPS ? port_atoi(fields[COL_AUDIO_GAPS]) : 0;
+        gapsColumn = quick ? COL_AUDIO_GAPS : COL_AUDIO_GAPS + 1;
+        g->gaps += numFields > gapsColumn ? port_atoi(fields[gapsColumn]) : 0;
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -965,9 +1013,39 @@ static void bench_summary(char *out, s32 size) {
         }
     } else {
         length = plat_snprintf(out, size,
-                               "\n### Anti-aliasing off vs on (averages of the finished races)\n\n"
-                               "| track | AA | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame | limit "
-                               "| audio ms | sound gaps |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n");
+                               "\n### Render settings (averages of the finished races)\n\n"
+                               "GPU saved is against the first setting, %s.\n\n"
+                               "| track | settings | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | worst GPU | "
+                               "rdp ms | worst frame | limit | audio ms | sound gaps |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
+                               sBenchConfigs[0].name);
+        for (t = 0; t < numTracks; t++) {
+            for (k = 0; k < BENCH_CONFIGS; k++) {
+                BenchGroup *g = &groups[t][k], *base = &groups[t][0];
+                s32 limit = 0;
+                if (g->races == 0) {
+                    continue;
+                }
+                for (i = 1; i < BENCH_LIMITS; i++) {
+                    if (g->limits[i] > g->limits[limit]) {
+                        limit = i;
+                    }
+                }
+                if (length >= size) {
+                    return;
+                }
+                length += plat_snprintf(
+                    out + length, size - length,
+                    "| %s | %s | %d | %.1f | %.0f%% | %.0f%% | %.1f | %s%.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
+                    groups[t][0].track, sBenchConfigs[k].name, (int) g->races, bench_avg(g->fps, g->races),
+                    bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
+                    base->races ? "" : "?",
+                    base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
+                    (int) g->worstGpu, bench_avg(g->rdp, g->races), (int) g->worstFrame, sLimitNames[limit],
+                    bench_avg(g->audio, g->races), g->gaps);
+            }
+        }
+        return;
     }
     for (t = 0; t < numTracks; t++) {
         for (k = 0; k < 2; k++) {
@@ -986,7 +1064,7 @@ static void bench_summary(char *out, s32 size) {
             }
             length += plat_snprintf(out + length, size - length,
                                     "| %s | %s | %d | %.1f | %.0f%% | %.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
-                                    groups[t][0].track, quick ? g->build : k ? "on" : "off", (int) g->races,
+                                    groups[t][0].track, g->build, (int) g->races,
                                     bench_avg(g->fps, g->races), bench_avg(g->pct30, g->races),
                                     bench_avg(g->gpu, g->races), (int) g->worstGpu, bench_avg(g->rdp, g->races),
                                     (int) g->worstFrame, sLimitNames[limit], bench_avg(g->audio, g->races),
@@ -998,26 +1076,16 @@ static void bench_summary(char *out, s32 size) {
         if (off->races == 0 || on->races == 0) {
             continue;
         }
-        if (quick) {
-            length += plat_snprintf(out + length, size - length,
-                                    "%s%s: %+.1f fps, 30 fps on %+.0f%% of frames, GPU %+.1f ms, rdp %+.1f ms, worst "
-                                    "frame %+d ms, audio %+.2f ms.\n",
-                                    t == 0 ? "\n" : "", groups[t][0].track,
-                                    bench_avg(on->fps, on->races) - bench_avg(off->fps, off->races),
-                                    bench_avg(on->pct30, on->races) - bench_avg(off->pct30, off->races),
-                                    bench_avg(on->gpu, on->races) - bench_avg(off->gpu, off->races),
-                                    bench_avg(on->rdp, on->races) - bench_avg(off->rdp, off->races),
-                                    (int) (on->worstFrame - off->worstFrame),
-                                    bench_avg(on->audio, on->races) - bench_avg(off->audio, off->races));
-        } else {
-            length += plat_snprintf(out + length, size - length,
-                                    "%s%s: AA costs %.1f ms of GPU time per frame and %.1f fps (30 fps on %.0f%% of "
-                                    "frames instead of %.0f%%).\n",
-                                    t == 0 ? "\n" : "", groups[t][0].track,
-                                    bench_avg(on->gpu, on->races) - bench_avg(off->gpu, off->races),
-                                    bench_avg(off->fps, off->races) - bench_avg(on->fps, on->races),
-                                    bench_avg(on->pct30, on->races), bench_avg(off->pct30, off->races));
-        }
+        length += plat_snprintf(out + length, size - length,
+                                "%s%s: %+.1f fps, 30 fps on %+.0f%% of frames, GPU %+.1f ms, rdp %+.1f ms, worst "
+                                "frame %+d ms, audio %+.2f ms.\n",
+                                t == 0 ? "\n" : "", groups[t][0].track,
+                                bench_avg(on->fps, on->races) - bench_avg(off->fps, off->races),
+                                bench_avg(on->pct30, on->races) - bench_avg(off->pct30, off->races),
+                                bench_avg(on->gpu, on->races) - bench_avg(off->gpu, off->races),
+                                bench_avg(on->rdp, on->races) - bench_avg(off->rdp, off->races),
+                                (int) (on->worstFrame - off->worstFrame),
+                                bench_avg(on->audio, on->races) - bench_avg(off->audio, off->races));
     }
 }
 
@@ -1064,10 +1132,10 @@ static void boss_summary(char *out, s32 size) {
 /* Sends the results so far as a GitHub issue (when bug reports are set up), and says so on the bottom screen. */
 static void send_results(const char *why) {
     char title[128];
-    static char summary[2048];
+    static char summary[6144];
     s32 length;
     plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
-                  sMode == MODE_BENCH   ? "AA benchmark "
+                  sMode == MODE_BENCH   ? "GPU benchmark "
                   : sMode == MODE_QUICK ? "quick test "
                   : sMode == MODE_BOSS  ? "boss fights "
                                         : "",
@@ -1076,7 +1144,7 @@ static void send_results(const char *why) {
     length = plat_snprintf(summary, sizeof(summary),
                            "%s %d %s after %d of %d races: %d finished, %d with problems.\n"
                            "Average frame rate of the races finished since the game started: %.1f fps (%d races).\n",
-                           sMode == MODE_BENCH   ? "Anti-aliasing benchmark run"
+                           sMode == MODE_BENCH   ? "GPU benchmark run"
                            : sMode == MODE_QUICK ? "Quick test run"
                            : sMode == MODE_BOSS  ? "Boss fights run"
                                                  : "Run",
@@ -1100,7 +1168,7 @@ static void turn_off(const char *why) {
     set_phase(PHASE_OFF);
     save_state(-1);
     if (sMode == MODE_BENCH) {
-        plat_set_antialias(-1); // Back to the player's setting.
+        apply_config(-1); // Back to the player's settings.
     }
     sMode = MODE_FULL;
     prof_set_status(NULL);
