@@ -167,6 +167,19 @@ void port_autorun_frame(s32 updateRate);
 /* Sets up a one player tracks mode race as the menus would, and returns the menu result that starts it (menu.c). */
 s32 port_autorun_setup_race(s32 levelId, s32 character, s32 vehicle);
 
+/*
+ * Camera options (port/src/game/port_camera.c). The Modern chase camera (Settings > Camera, saved as camera= in
+ * settings.txt; DKR_CAMERA=1 in env.txt for a test) cuts the N64 camera's lag and roll; the look-back button turns
+ * player one's chase camera round while held. PORT_BUTTON_LOOK_BACK is a bit the N64 controller never sets: the
+ * controls mapping (plat/controls.c, CTRL_N64_LOOK_BACK) puts it in a pad's buttons and os_si.c takes it out again
+ * before the game sees them.
+ */
+#define PORT_BUTTON_LOOK_BACK 0x0040
+s32 port_modern_camera(void);
+void port_set_modern_camera(s32 on);
+s32 port_look_back_held(void);
+void port_set_look_back_held(s32 held);
+
 /* Logging. */
 void port_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void port_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));

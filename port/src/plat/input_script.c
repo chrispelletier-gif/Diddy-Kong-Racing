@@ -1,7 +1,8 @@
 /*
  * Scripted input for automated testing, shared by every platform. DKR_INPUT (see plat_getenv) is a list of
  * "poll:BUTTONS" steps separated by spaces, e.g. "200:START 260: 300:A 330:". BUTTONS is a '+' separated list of
- * A B Z START L R CU CD CL CR DU DD DL DR, or STICK=x,y. Each step lasts until the next one.
+ * A B Z START L R CU CD CL CR DU DD DL DR, LOOK (the look-back camera) or STICK=x,y. Each step lasts until the next
+ * one.
  */
 #include "plat.h"
 
@@ -15,7 +16,7 @@ static const struct {
 } sButtonNames[] = {
     { "A", 0x8000 },  { "B", 0x4000 },  { "Z", 0x2000 },  { "START", 0x1000 }, { "DU", 0x0800 },
     { "DD", 0x0400 }, { "DL", 0x0200 }, { "DR", 0x0100 }, { "L", 0x0020 },     { "R", 0x0010 },
-    { "CU", 0x0008 }, { "CD", 0x0004 }, { "CL", 0x0002 }, { "CR", 0x0001 },
+    { "CU", 0x0008 }, { "CD", 0x0004 }, { "CL", 0x0002 }, { "CR", 0x0001 },    { "LOOK", 0x0040 },
 };
 
 int plat_input_script(int poll, unsigned short *buttons, signed char *stickX, signed char *stickY) {
