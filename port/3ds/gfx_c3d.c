@@ -620,14 +620,20 @@ float plat_aspect_scale(void) {
     return sWideSetting ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
 }
 
-float plat_camera_fov(float fovy) {
-    // tan(fovy / 2) times this: Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
+float plat_fov_tan_scale(void) {
+    // Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
     static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
     int style = sWideSetting;
-    if (style <= 1 || style > 3) {
+    return style >= 0 && style <= 3 ? sTanScale[style] : 1.0f;
+}
+
+float plat_camera_fov(float fovy) {
+    float scale = plat_fov_tan_scale();
+    if (scale == 1.0f) {
         return fovy;
     }
-    return 2.0f * atanf(tanf(fovy * (3.14159265f / 360.0f)) * sTanScale[style]) * (360.0f / 3.14159265f);
+    // Half the angle in radians, and the whole angle back in degrees.
+    return 2.0f * atanf(tanf(fovy * (3.14159265f / 360.0f)) * scale) * (180.0f / 3.14159265f);
 }
 
 /*
@@ -663,6 +669,10 @@ static void apply_screen_mode(void) {
     int across = (scale == 2 || wide800) ? 2 : 1;
     int newTarget;
 
+    if ((sWideSetting != 0) != sWide && sTarget != NULL) {
+        // The game only clears its 4:3 part of the screen: clear the sides of the last wide picture.
+        sFrameStarted = 0;
+    }
     sWide = sWideSetting != 0;
     sScale3D = sWide ? 1.0f : NARROW;
     sEyeSep = stereo ? slider * stereo_max_sep() : 0.0f;

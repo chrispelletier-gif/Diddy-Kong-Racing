@@ -168,6 +168,8 @@ float plat_aspect_scale(void);
  * top and bottom) and nothing is stretched more than on the N64; "Balanced" is half way (in tan terms).
  */
 float plat_camera_fov(float fovy);
+/* What the style multiplies tan(fovy / 2) by: 1 for Wide, below 1 for the narrower ones (plat_camera_fov). */
+float plat_fov_tan_scale(void);
 /* The build's version (git describe), as bug reports show it; "host" for a host build without one. */
 const char *plat_build_version(void);
 

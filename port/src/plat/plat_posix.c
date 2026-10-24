@@ -74,15 +74,25 @@ float plat_aspect_scale(void) {
     return sWide ? 1.25f : 1.0f;
 }
 
-float plat_camera_fov(float fovy) {
+float plat_fov_tan_scale(void) {
     // DKR_WIDESCREEN picks the style to preview, as the 3DS's setting does: 1 Wide, 2 Balanced, 3 Zoomed.
     static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
-    const char *env = getenv("DKR_WIDESCREEN");
-    int style = env != NULL ? atoi(env) : 0;
-    if (style <= 1 || style > 3) {
+    static int sStyle = -1;
+    if (sStyle < 0) {
+        const char *env = getenv("DKR_WIDESCREEN");
+        sStyle = env != NULL ? atoi(env) : 0;
+        sStyle = sStyle >= 0 && sStyle <= 3 ? sStyle : 0;
+    }
+    return sTanScale[sStyle];
+}
+
+float plat_camera_fov(float fovy) {
+    float scale = plat_fov_tan_scale();
+    if (scale == 1.0f) {
         return fovy;
     }
-    return 2.0f * atanf(tanf(fovy * (3.14159265f / 360.0f)) * sTanScale[style]) * (360.0f / 3.14159265f);
+    // Half the angle in radians, and the whole angle back in degrees.
+    return 2.0f * atanf(tanf(fovy * (3.14159265f / 360.0f)) * scale) * (180.0f / 3.14159265f);
 }
 
 int plat_antialias(void) {

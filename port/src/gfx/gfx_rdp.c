@@ -817,6 +817,14 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     s32 i, fog = (g.geometryMode & G_FOG) != 0;
     // An orthographic matrix (the HUD's, menus', fades') gives every vertex the same w.
     u8 flat = m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f;
+    // Billboard (sprite) vertices are offsets in clip space, sized for the N64's camera; on the port's wider (G3) or
+    // narrower (the widescreen style's field of view) camera they are scaled to keep their size next to the 3D world.
+    // Their matrix has no perspective, but they belong to the 3D world, not the flat HUD.
+    float bbScaleY = 1.0f, bbScaleX = 1.0f;
+    if (g.billboard) {
+        bbScaleY = 1.0f / plat_fov_tan_scale();
+        bbScaleX = bbScaleY / plat_aspect_scale();
+    }
 
     for (i = 0; i < count && dest + i < MAX_VERTICES; i++) {
         RspVertex *v = &g.verts[dest + i];
@@ -825,18 +833,19 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
         v->y = x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1];
         v->z = x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2];
         v->w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
+        v->flat = flat;
         if (g.billboard && dest + i > 0) {
             // Billboard vertices are offsets from the anchor vertex, in clip space.
-            v->x += g.verts[0].x;
-            v->y += g.verts[0].y;
+            v->x = v->x * bbScaleX + g.verts[0].x;
+            v->y = v->y * bbScaleY + g.verts[0].y;
             v->z += g.verts[0].z;
             v->w += g.verts[0].w;
+            v->flat = 0;
         }
         v->r = src[i].r;
         v->g = src[i].g;
         v->b = src[i].b;
         v->a = src[i].a;
-        v->flat = flat;
         // The fog factor costs a divide, so it is only worked out for vertices loaded with fog on (all fogged
         // geometry, in practice); draw_dkr_triangles catches any others if fog is turned on before they are drawn.
         v->fogValid = fog;
