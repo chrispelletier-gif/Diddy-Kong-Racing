@@ -176,17 +176,18 @@ static inline unsigned int gfx_texel_bytes(int format) {
 }
 
 /*
- * Whether a texture gets mipmaps (roadmap item G1): bilinear, at least 16x16, and either repeating on an axis (ground,
- * water) or opaque. Clamped opaque textures are mostly walls and cliffs, which DKR cuts into one texture per tile.
- * Clamped textures with transparency (kart shadows, decals) keep one level: their shape runs out to the edges, so
- * small levels have see-through edges that aren't, and a shadow seen at a low angle came out as a dark rectangle.
+ * Whether a texture gets mipmaps (roadmap item G1): bilinear, at least 16x16, and either opaque or repeating on both
+ * axes. A texture with transparency that is clamped on an axis is drawn once along it, often on a polygon much bigger
+ * than its shape (kart shadows, the start line, track borders): its shape fades out before the edge texels that
+ * the clamp stretches over the rest of the polygon. Smaller levels average the shape into those edge texels, so the
+ * GPU spread it over the whole polygon: shadows became dark rectangles and start lines red and yellow stripes.
  */
 static inline int gfx_wants_mipmaps(const GfxTexture *tex) {
     unsigned int i, n = tex->width * tex->height;
     if (tex->filter == GFX_FILTER_POINT || tex->width < 16 || tex->height < 16) {
         return 0;
     }
-    if (tex->wrapS != GFX_WRAP_CLAMP || tex->wrapT != GFX_WRAP_CLAMP) {
+    if (tex->wrapS != GFX_WRAP_CLAMP && tex->wrapT != GFX_WRAP_CLAMP) {
         return 1;
     }
     for (i = 0; i < n; i++) {

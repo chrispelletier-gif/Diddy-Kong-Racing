@@ -1134,13 +1134,12 @@ static inline u32 get_texel(const void *tile, int format, int i) {
 
 /*
  * Mipmaps (roadmap item G1). Without them, a distant track texture is sampled a few texels apart from one pixel to
- * the next, so it shimmers as the kart moves. Each texture gfx_wants_mipmaps picks (bilinear ones that repeat, or are
- * opaque) gets a chain of smaller copies down to 8 texels on its short side (the GPU's smallest), box filtered on the
- * CPU when it is uploaded, which costs a third more texture memory. The GPU then picks the level, blending between
- * two (trilinear). Point filtered textures (text and other 2D) keep one level. The Settings menu switches
- * between using the levels and level 0 only, from the next frame; the levels are built either way so that switching
- * shows the difference at once. DKR_MIPMAP=0 never builds them; DKR_MIP_FILTER=0 takes the nearest level instead of
- * blending two.
+ * the next, so it shimmers as the kart moves. Each texture gfx_wants_mipmaps picks (bilinear ones that are opaque,
+ * or repeat on both axes) gets a chain of smaller copies down to 8 texels on its short side (the GPU's smallest), box
+ * filtered on the CPU when it is uploaded, which costs a third more texture memory. The GPU then picks the level,
+ * blending between two (trilinear). The Settings menu switches between using the levels and level 0 only, from the
+ * next frame; the levels are built either way so that switching shows the difference at once. DKR_MIPMAP=0 never
+ * builds them; DKR_MIP_FILTER=0 takes the nearest level instead of blending two.
  */
 static int mipmaps_built(void) {
     static int sBuild = -1;
