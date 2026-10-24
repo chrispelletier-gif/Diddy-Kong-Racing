@@ -819,6 +819,127 @@ void gfxb_init(void) {
  */
 static char sCapturePath[256];
 
+/*
+ * Recent frames for bug reports. A glitch that lasts a second is gone by the time the snapshot is taken, so every
+ * RECENT_EVERY-th frame the screen's picture is copied, exactly as it was shown, into a ring of RECENT_SLOTS
+ * (about 1.6 seconds). A snapshot keeps the two that look most like they hold a bright vertical line
+ * (a screen column is a row of the rotated picture). DKR_RECENT_FRAMES=0 turns it off.
+ */
+#define RECENT_SLOTS 16
+#define RECENT_EVERY 3
+#define RECENT_KEEP 2
+#define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8)
+static u8 *sRecent[RECENT_SLOTS];
+static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS];
+static int sRecentCount = -1, sRecentNext, sRecentFrozen;
+
+/* Called before C3D_FrameEnd with the screen buffer the frame's display transfer will write (the back buffer until
+ * citro3d swaps it in once the GPU is done), and after it to queue the copy. */
+static u8 *sRecentScreen;
+static int sRecentScreenRows;
+
+static void find_recent_screen(void) {
+    u16 w = 0, h = 0;
+    sRecentScreen = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
+    sRecentScreenRows = (w == TOP_HEIGHT && gfxGetScreenFormat(GFX_TOP) == GSP_BGR8_OES) ? h : 0;
+}
+
+static void record_recent_frame(void) {
+    u32 bytes = sRecentScreenRows * TOP_HEIGHT * 3;
+    u8 *slot;
+
+    if (sRecentCount < 0) {
+        const char *env = plat_getenv("DKR_RECENT_FRAMES");
+        sRecentCount = 0;
+        // Leave plenty of linear memory for textures (each slot is 576 KB).
+        while (env == NULL || atoi(env) != 0) {
+            if (sRecentCount == RECENT_SLOTS || linearSpaceFree() < RECENT_MAX_BYTES + 12 * 1024 * 1024) {
+                break;
+            }
+            sRecent[sRecentCount] = linearAlloc(RECENT_MAX_BYTES);
+            if (sRecent[sRecentCount] == NULL) {
+                break;
+            }
+            sRecentFrame[sRecentCount++] = -1;
+        }
+        plat_log("recent frames for bug reports: %d slots, one frame in %d", sRecentCount, RECENT_EVERY);
+    }
+    if (sRecentCount == 0 || sRecentFrozen || sFrameCount % RECENT_EVERY != 0 || sRecentScreen == NULL ||
+        bytes == 0 || bytes > RECENT_MAX_BYTES) {
+        return;
+    }
+    slot = sRecent[sRecentNext];
+    // A plain copy of the screen buffer, queued after the frame's display transfer, so it holds what was shown. The
+    // buffer is only drawn into again two frames later, and the next frame waits for this queue to finish.
+    GX_TextureCopy((u32 *) sRecentScreen, 0, (u32 *) slot, 0, bytes, GX_TRANSFER_RAW_COPY(1));
+    sRecentFrame[sRecentNext] = sFrameCount - 1; // The frame just ended (sFrameCount already counts it).
+    sRecentRows[sRecentNext] = sRecentScreenRows;
+    sRecentNext = (sRecentNext + 1) % sRecentCount;
+}
+
+/* How much a frame looks like it holds a bright vertical line: the most pixels in one screen column (a row here)
+ * that are clearly brighter than the columns 3 to each side. */
+static int line_score(const u8 *pixels, int rows, int *where) {
+    int r, x, best = 0;
+    *where = -1;
+    for (r = 3; r < rows - 3; r++) {
+        const u8 *row = pixels + r * TOP_HEIGHT * 3, *left = row - 9 * TOP_HEIGHT, *right = row + 9 * TOP_HEIGHT;
+        int count = 0;
+        for (x = 0; x < TOP_HEIGHT; x++) {
+#define LUMA(p) ((p)[0] + (p)[1] * 2 + (p)[2]) // 0..1020
+            int c = LUMA(row + x * 3);
+            if (c > LUMA(left + x * 3) + 80 && c > LUMA(right + x * 3) + 80) {
+                count++;
+            }
+#undef LUMA
+        }
+        if (count > best) {
+            best = count;
+            *where = r;
+        }
+    }
+    return best;
+}
+
+/* Saves the recent frames most likely to show a line as diff_NNNNN_recentK.bin (width, height, then BGR8), and
+ * logs every frame's score. Called once the GPU has finished the snapshot frame, so the ring is idle. */
+static void save_recent_frames(int snapshotFrame) {
+    int score[RECENT_SLOTS], where[RECENT_SLOTS], i, k;
+    char path[256];
+
+    for (i = 0; i < sRecentCount; i++) {
+        score[i] = -1;
+        if (sRecentFrame[i] >= 0) {
+            GSPGPU_InvalidateDataCache(sRecent[i], sRecentRows[i] * TOP_HEIGHT * 3);
+            score[i] = line_score(sRecent[i], sRecentRows[i], &where[i]);
+            plat_log("recent frame %d: line score %d at column %d", sRecentFrame[i], score[i],
+                     where[i] < 0 ? -1 : where[i] * TOP_WIDTH / sRecentRows[i]);
+        }
+    }
+    for (k = 0; k < RECENT_KEEP; k++) {
+        int pick = -1;
+        for (i = 0; i < sRecentCount; i++) {
+            if (score[i] >= 0 && (pick < 0 || score[i] > score[pick])) {
+                pick = i;
+            }
+        }
+        if (pick >= 0) {
+            u32 header[2] = { TOP_HEIGHT, (u32) sRecentRows[pick] };
+            u32 bytes = sRecentRows[pick] * TOP_HEIGHT * 3;
+            u8 *file = malloc(8 + bytes);
+            score[pick] = -1;
+            if (file != NULL) {
+                memcpy(file, header, 8);
+                memcpy(file + 8, sRecent[pick], bytes);
+                plat_snprintf(path, sizeof(path), "%s/diff_%05d_recent%d.bin", plat_data_dir(), snapshotFrame, k + 1);
+                plat_save_file(path, file, 8 + bytes);
+                free(file);
+                plat_log("kept recent frame %d as recent%d", sRecentFrame[pick], k + 1);
+            }
+        }
+    }
+}
+
 void gfxb_capture_frame(const char *path) {
     snprintf(sCapturePath, sizeof(sCapturePath), "%s", path);
 }
@@ -1281,6 +1402,7 @@ void gfxb_log_draws(int snapshotFrame) {
     sSnapshotFrame = snapshotFrame;
     sSnapshotPending = snapshotFrame >= 0;
     if (sSnapshotPending) {
+        sRecentFrozen = 1; // Keep the frames from before the snapshot.
         log_buffers();
     }
 }
@@ -1351,6 +1473,8 @@ static void wait_for_gpu(int measure) {
         // The snapshot's log file is closed here, once the GPU has drawn the frame and its textures are checked.
         sSnapshotPending = 0;
         check_textures_after_frame();
+        save_recent_frames(sSnapshotFrame);
+        sRecentFrozen = 0;
         plat_log_copy_to(NULL);
         plat_status("Snapshot saved (frame %d)", sSnapshotFrame);
         gPlatSnapshotSaved = sSnapshotFrame;
@@ -1553,11 +1677,13 @@ void gfxb_end_frame(void) {
         sDrainSplits = 0;
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
+        find_recent_screen();
         if (full_flush()) {
             C3D_FrameEnd(0); // Also flushes the whole linear heap.
         } else {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
+        record_recent_frame();
     }
     sFrameStarted = -1; // A frame has been drawn, so the target holds an image.
     if (sOverlap && plat_3ds_renderer_should_park()) {
