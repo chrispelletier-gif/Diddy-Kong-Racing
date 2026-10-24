@@ -271,6 +271,16 @@ columns plus `build`), which `autorun_report.py` also splits by track and build.
 every start; `DKR_AUTORUN_QUICK_TRACKS`, `DKR_AUTORUN_QUICK_CHARACTER` and `DKR_AUTORUN_QUICK_PASSES` change the
 tracks, the character and the races per track.
 
+### Boss fights
+
+Tap Settings, Test run, then Boss fights. Boss levels aren't on the tracks menu, so the full run never races them;
+this races each of the ten boss fights once (Tricky, Bluey, Bubbler, Smokey and Wizpig, first and second fight) with
+Bumper and the AI driving: about half an hour. The results issue ("[3DS test run] boss fights ...") has one line per
+fight with its outcome, time, place, frame rate and how often the kart had to be put back on the course; a fall
+through the ground shows up as unsticks or as a race that never finishes. The races are in `boss_test_results.csv`
+(the test run's columns plus `build`). `DKR_AUTORUN_BOSS=1` runs it at every start; `DKR_AUTORUN_BOSS_TRACKS`,
+`DKR_AUTORUN_BOSS_CHARACTER` and `DKR_AUTORUN_BOSS_PASSES` change the levels, the character and the races per boss.
+
 ### Anti-aliasing benchmark
 
 Tap Settings, Test run, then AA bench. It is a short test run (about half an hour) that measures what anti-aliasing costs on
