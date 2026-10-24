@@ -511,7 +511,7 @@ static int sNumChecked;
 static int sSnapshotPending;
 
 static u32 texture_words(const C3DTexture *t) {
-    return t->tex.width * t->tex.height;
+    return t->tex.size / 4;
 }
 
 /* Makes the CPU see the memory the GPU reads (flushing first, so nothing the CPU wrote is thrown away). */
@@ -1024,11 +1024,38 @@ static GPU_TEXTURE_WRAP_PARAM wrap_param(unsigned char mode) {
 }
 
 /*
- * The GPU texel at (px, py) of the power of two sized texture. Wrapping textures that aren't a power of two are
- * stretched to fit, others are padded (repeating their edge texels) and their coordinates scaled.
+ * The GPU format a texture is stored in: the frontend's pick (16 or 8 bits a texel for most of DKR's textures), or
+ * RGBA8 for all of them with DKR_TEX_NATIVE=0.
  */
-static u32 gpu_texel(const GfxTexture *tex, unsigned int pw, unsigned int ph, int resample, unsigned int px,
-                     unsigned int py) {
+static int gpu_format(const GfxTexture *tex) {
+    static int sNative = -1;
+    if (sNative < 0) {
+        const char *env = plat_getenv("DKR_TEX_NATIVE");
+        sNative = env == NULL || env[0] != '0';
+    }
+    return sNative ? tex->format : GFX_TEXFMT_RGBA8;
+}
+
+static GPU_TEXCOLOR gpu_texcolor(int format) {
+    switch (format) {
+        case GFX_TEXFMT_RGBA5551:
+            return GPU_RGBA5551;
+        case GFX_TEXFMT_LA8:
+            return GPU_LA8;
+        case GFX_TEXFMT_LA4:
+            return GPU_LA4;
+        default:
+            return GPU_RGBA8;
+    }
+}
+
+/*
+ * The GPU texel at (px, py) of the power of two sized texture, in the GPU format's bits. Wrapping textures that
+ * aren't a power of two are stretched to fit, others are padded (repeating their edge texels) and their coordinates
+ * scaled.
+ */
+static u32 gpu_texel(const GfxTexture *tex, int format, unsigned int pw, unsigned int ph, int resample,
+                     unsigned int px, unsigned int py) {
     unsigned int w = tex->width, h = tex->height;
     unsigned int sx, sy;
     u32 c;
@@ -1040,8 +1067,33 @@ static u32 gpu_texel(const GfxTexture *tex, unsigned int pw, unsigned int ph, in
         sy = (py < h) ? py : h - 1;
     }
     c = tex->pixels[sy * w + sx];
-    // RGBA8888 with R in the low byte -> the GPU's RGBA8 (R in the high byte).
-    return ((c & 0xFF) << 24) | ((c & 0xFF00) << 8) | ((c >> 8) & 0xFF00) | (c >> 24);
+    return gfx_texel_encode(c, format);
+}
+
+/* Writes texel i of an 8x8 tile (in the GPU's order) to a texture of the given format. */
+static inline void put_texel(void *tile, int format, int i, u32 v) {
+    switch (gfx_texel_bytes(format)) {
+        case 4:
+            ((u32 *) tile)[i] = v;
+            break;
+        case 2:
+            ((u16 *) tile)[i] = v;
+            break;
+        default:
+            ((u8 *) tile)[i] = v;
+            break;
+    }
+}
+
+static inline u32 get_texel(const void *tile, int format, int i) {
+    switch (gfx_texel_bytes(format)) {
+        case 4:
+            return ((const u32 *) tile)[i];
+        case 2:
+            return ((const u16 *) tile)[i];
+        default:
+            return ((const u8 *) tile)[i];
+    }
 }
 
 void gfxb_texture_upload(GfxTexture *tex) {
@@ -1049,13 +1101,19 @@ void gfxb_texture_upload(GfxTexture *tex) {
     unsigned int w = tex->width, h = tex->height;
     unsigned int pw = next_pot(w), ph = next_pot(h);
     int resample = (tex->wrapS != GFX_WRAP_CLAMP && pw != w) || (tex->wrapT != GFX_WRAP_CLAMP && ph != h);
-    u32 *data;
+    int format = gpu_format(tex);
+    unsigned int bytes = gfx_texel_bytes(format);
+    u8 *data;
     unsigned int tx, ty;
     int i;
 
+    if (t != NULL && t->tex.fmt != gpu_texcolor(format)) {
+        gfxb_texture_free(tex); // Uploaded again in another format: start afresh.
+        t = NULL;
+    }
     if (t == NULL) {
         t = calloc(1, sizeof(C3DTexture));
-        if (t == NULL || !C3D_TexInit(&t->tex, pw, ph, GPU_RGBA8)) {
+        if (t == NULL || !C3D_TexInit(&t->tex, pw, ph, gpu_texcolor(format))) {
             static int sFailures;
             gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
             if ((sFailures++ % 50) == 0) {
@@ -1070,12 +1128,13 @@ void gfxb_texture_upload(GfxTexture *tex) {
     // Swizzled straight into the texture's memory in 8x8 tiles, top row first (the GPU samples t = 0 from the start
     // of the data). No temporary buffer: when the heap was short, skipping the upload left whatever the memory held
     // before, such as an old solid black texture.
-    data = (u32 *) t->tex.data;
+    data = (u8 *) t->tex.data;
     for (ty = 0; ty < ph; ty += 8) {
         for (tx = 0; tx < pw; tx += 8) {
-            u32 *tile = &data[(ty / 8) * (pw / 8) * 64 + (tx / 8) * 64];
+            u8 *tile = &data[((ty / 8) * (pw / 8) + tx / 8) * 64 * bytes];
             for (i = 0; i < 64; i++) {
-                tile[sTileOrder[i]] = gpu_texel(tex, pw, ph, resample, tx + (i & 7), ty + (i >> 3));
+                put_texel(tile, format, sTileOrder[i], gpu_texel(tex, format, pw, ph, resample, tx + (i & 7),
+                                                                  ty + (i >> 3)));
             }
         }
     }
@@ -1088,7 +1147,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
         C3D_TexSetFilter(&t->tex, GPU_LINEAR, GPU_LINEAR);
     }
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
-    GSPGPU_FlushDataCache(data, pw * ph * 4);
+    GSPGPU_FlushDataCache(data, pw * ph * bytes);
     forget_gpu_state();
 }
 
@@ -1097,8 +1156,8 @@ static void verify_texture(const GfxTexture *tex) {
     const C3DTexture *t = (const C3DTexture *) tex->backendData;
     unsigned int pw, ph, tx, ty, wrong = 0, firstAt = 0;
     u32 firstGot = 0, firstWant = 0;
-    const u32 *data;
-    int i;
+    const u8 *data;
+    int format, i;
 
     if (t == NULL) {
         plat_log("  texture %p %dx%d has no GPU copy", (const void *) tex, tex->width, tex->height);
@@ -1106,19 +1165,21 @@ static void verify_texture(const GfxTexture *tex) {
     }
     pw = t->tex.width;
     ph = t->tex.height;
-    data = (const u32 *) t->tex.data;
+    format = gpu_format(tex);
+    data = (const u8 *) t->tex.data;
     // Read what is in memory, not what the CPU cache holds.
-    GSPGPU_FlushDataCache(data, pw * ph * 4);
-    GSPGPU_InvalidateDataCache(data, pw * ph * 4);
+    GSPGPU_FlushDataCache(data, t->tex.size);
+    GSPGPU_InvalidateDataCache(data, t->tex.size);
     for (ty = 0; ty < ph; ty += 8) {
         for (tx = 0; tx < pw; tx += 8) {
-            const u32 *tile = &data[(ty / 8) * (pw / 8) * 64 + (tx / 8) * 64];
+            const u8 *tile = &data[((ty / 8) * (pw / 8) + tx / 8) * 64 * gfx_texel_bytes(format)];
             for (i = 0; i < 64; i++) {
-                u32 want = gpu_texel(tex, pw, ph, t->resample, tx + (i & 7), ty + (i >> 3));
-                if (tile[sTileOrder[i]] != want) {
+                u32 want = gpu_texel(tex, format, pw, ph, t->resample, tx + (i & 7), ty + (i >> 3));
+                u32 got = get_texel(tile, format, sTileOrder[i]);
+                if (got != want) {
                     if (wrong++ == 0) {
                         firstAt = (ty + (i >> 3)) * pw + tx + (i & 7);
-                        firstGot = tile[sTileOrder[i]];
+                        firstGot = got;
                         firstWant = want;
                     }
                 }
