@@ -121,7 +121,9 @@ typedef struct GfxDrawState {
  * w = 1) to clip x on the wide screen, the 4:3 picture being `narrow` of its width (0.8 for 400 pixels).
  */
 static inline float gfx_flat_x(float x, float w, float narrow) {
-    float edge = 0.995f * (w < 0.0f ? -w : w);
+    // Within a pixel and a half of the edge: the game's scissor often ends at x = 319, and a full screen draw
+    // clipped to it must still reach the edge (the race finish backgrounds left the old picture at the right).
+    float edge = 0.99f * (w < 0.0f ? -w : w);
     return (x >= edge || x <= -edge) ? x : x * narrow;
 }
 

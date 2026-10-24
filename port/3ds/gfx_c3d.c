@@ -2435,6 +2435,9 @@ static void set_scissor(const short rect[4], int flat) {
         float scale = (flat ? NARROW : sScale3D) * ((float) TOP_WIDTH / GFX_SCREEN_WIDTH);
         x0 = TOP_WIDTH / 2 + (rect[0] - GFX_SCREEN_WIDTH / 2) * scale;
         x1 = TOP_WIDTH / 2 + (rect[2] - GFX_SCREEN_WIDTH / 2) * scale;
+        if (sWide && !flat && rect[2] >= GFX_SCREEN_WIDTH - 1) {
+            x1 = TOP_WIDTH; // A scissor ending at x = 319 would leave the last columns of the wide screen undrawn.
+        }
     }
     // Framebuffer x runs along the screen's y axis (bottom to top), framebuffer y along the screen's x axis.
     left = TOP_HEIGHT - rect[3];
