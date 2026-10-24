@@ -6,6 +6,7 @@
 #include <semaphore.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <time.h>
 #include <errno.h>
@@ -74,7 +75,14 @@ float plat_aspect_scale(void) {
 }
 
 float plat_camera_fov(float fovy) {
-    return fovy; // The host previews the Wide style.
+    // DKR_WIDESCREEN picks the style to preview, as the 3DS's setting does: 1 Wide, 2 Balanced, 3 Zoomed.
+    static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
+    const char *env = getenv("DKR_WIDESCREEN");
+    int style = env != NULL ? atoi(env) : 0;
+    if (style <= 1 || style > 3) {
+        return fovy;
+    }
+    return 2.0f * atanf(tanf(fovy * (3.14159265f / 360.0f)) * sTanScale[style]) * (360.0f / 3.14159265f);
 }
 
 int plat_antialias(void) {
