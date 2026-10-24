@@ -1521,7 +1521,14 @@ void track_setup_racers(Vehicle vehicle, u32 entranceID, s32 playerCount) {
             // Taj will teleport straight to the player to initiate a challenge.
             if (j) {
                 set_taj_voice_line(SOUND_VOICE_TAJ_CHALLENGE_RACE);
+#ifdef AVOID_UB
+                // 1 << (j + 31): the N64 only uses the low 5 bits of a shift, so this is 1 << (j - 1), the challenge's
+                // "unlocked" flag. On ARM a shift of 32 or more gives 0, so the flag was never set and Taj challenged
+                // the player every time they came back to the hub.
+                settings->tajFlags |= 1 << ((j + 31) & 31);
+#else
                 settings->tajFlags |= 1 << (j + 31);
+#endif
                 set_taj_status(TAJ_TELEPORT);
                 set_next_taj_challenge_menu(j);
                 safe_mark_write_save_file(get_save_file_index());
