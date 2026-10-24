@@ -11,6 +11,7 @@ volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
 const char *volatile gPlatGfxStage = "not started";
 volatile int gPlatSnapshotRequested;
 volatile int gPlatSnapshotSaved;
+volatile char gPlatGameNote[64];
 static volatile int sGamePauseRequested;
 
 void plat_request_game_pause(void) {

@@ -822,8 +822,8 @@ static char sCapturePath[256];
 /*
  * Recent frames for bug reports. A glitch that lasts a second is gone by the time the snapshot is taken, so every
  * RECENT_EVERY-th frame the screen's picture is copied, exactly as it was shown, into a ring of RECENT_SLOTS
- * (about 1.6 seconds). A snapshot keeps the two that look most like they hold a bright vertical line
- * (a screen column is a row of the rotated picture). DKR_RECENT_FRAMES=0 turns it off.
+ * (about 1.6 seconds), both eyes in 3D. A snapshot keeps the two that look most like they hold a bright vertical
+ * line (a screen column is a row of the rotated picture). DKR_RECENT_FRAMES=0 turns it off.
  */
 #define RECENT_SLOTS 16
 #define RECENT_EVERY 3
@@ -838,10 +838,52 @@ static int sRecentCount = -1, sRecentNext, sRecentFrozen;
 static u8 *sRecentScreen;
 static int sRecentScreenRows;
 
+static u8 *sRecentRight; // The right eye's, in 3D (then 400 rows each, so both fit a slot)
+
+/*
+ * Every frame's timing and what the player's kart was doing (gPlatGameNote), so a report shows what happened around
+ * the glitch: the time between frame ends (two ends in one 16.7 ms screen refresh could replace the picture while the
+ * screen shows it) and how long the GPU took.
+ */
+#define TIMING_FRAMES 64
+static struct {
+    int frame;
+    unsigned int gapUs, gpuUs;
+    char note[sizeof(gPlatGameNote)];
+} sTiming[TIMING_FRAMES];
+static int sTimingNext;
+static u64 sLastEndTick;
+
 static void find_recent_screen(void) {
     u16 w = 0, h = 0;
     sRecentScreen = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
     sRecentScreenRows = (w == TOP_HEIGHT && gfxGetScreenFormat(GFX_TOP) == GSP_BGR8_OES) ? h : 0;
+    sRecentRight = sStereo && h == TOP_WIDTH ? gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, NULL, NULL) : NULL;
+}
+
+static void record_timing(void) {
+    u64 now = svcGetSystemTick();
+    if (!sRecentFrozen) {
+        sTiming[sTimingNext].frame = sFrameCount - 1;
+        sTiming[sTimingNext].gapUs = sLastEndTick != 0 ? (unsigned int) ((now - sLastEndTick) / (SYSCLOCK_ARM11 / 1000000)) : 0;
+        sTiming[sTimingNext].gpuUs = (unsigned int) (C3D_GetDrawingTime() * 1000.0f);
+        memcpy(sTiming[sTimingNext].note, (const char *) gPlatGameNote, sizeof(sTiming[0].note));
+        sTiming[sTimingNext].note[sizeof(sTiming[0].note) - 1] = '\0';
+        sTimingNext = (sTimingNext + 1) % TIMING_FRAMES;
+    }
+    sLastEndTick = now;
+}
+
+static void log_timing(void) {
+    int i;
+    plat_log("last %d frames (time since the previous frame ended, GPU time of the one before, player):", TIMING_FRAMES);
+    for (i = 0; i < TIMING_FRAMES; i++) {
+        int k = (sTimingNext + i) % TIMING_FRAMES;
+        if (sTiming[k].frame > 0) {
+            plat_log("  frame %d: +%u.%u ms, gpu %u.%u ms, %s", sTiming[k].frame, sTiming[k].gapUs / 1000,
+                     sTiming[k].gapUs / 100 % 10, sTiming[k].gpuUs / 1000, sTiming[k].gpuUs / 100 % 10, sTiming[k].note);
+        }
+    }
 }
 
 static void record_recent_frame(void) {
@@ -864,6 +906,7 @@ static void record_recent_frame(void) {
         }
         plat_log("recent frames for bug reports: %d slots, one frame in %d", sRecentCount, RECENT_EVERY);
     }
+    record_timing();
     if (sRecentCount == 0 || sRecentFrozen || sFrameCount % RECENT_EVERY != 0 || sRecentScreen == NULL ||
         bytes == 0 || bytes > RECENT_MAX_BYTES) {
         return;
@@ -874,6 +917,11 @@ static void record_recent_frame(void) {
     GX_TextureCopy((u32 *) sRecentScreen, 0, (u32 *) slot, 0, bytes, GX_TRANSFER_RAW_COPY(1));
     sRecentFrame[sRecentNext] = sFrameCount - 1; // The frame just ended (sFrameCount already counts it).
     sRecentRows[sRecentNext] = sRecentScreenRows;
+    if (sRecentRight != NULL && bytes * 2 <= RECENT_MAX_BYTES) {
+        // In 3D the right eye goes after the left, so the saved picture shows the two side by side.
+        GX_TextureCopy((u32 *) sRecentRight, 0, (u32 *) (slot + bytes), 0, bytes, GX_TRANSFER_RAW_COPY(1));
+        sRecentRows[sRecentNext] *= 2;
+    }
     sRecentNext = (sRecentNext + 1) % sRecentCount;
 }
 
@@ -907,6 +955,7 @@ static void save_recent_frames(int snapshotFrame) {
     int score[RECENT_SLOTS], where[RECENT_SLOTS], i, k;
     char path[256];
 
+    log_timing();
     for (i = 0; i < sRecentCount; i++) {
         score[i] = -1;
         if (sRecentFrame[i] >= 0) {
