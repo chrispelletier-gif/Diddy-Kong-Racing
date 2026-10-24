@@ -275,6 +275,27 @@ static void decode_texture(u32 *out, const TmemLoad *load, const Tile *tile, u32
     }
 }
 
+/* The texture format decode_texture's pixels fit exactly (see enum GfxTextureFormat). */
+static u8 texture_format(const Tile *tile, u8 tlutType) {
+    switch (tile->siz) {
+        case G_IM_SIZ_4b:
+            if (tile->fmt == G_IM_FMT_CI) {
+                return (tlutType == (G_TT_IA16 >> G_MDSFT_TEXTLUT)) ? GFX_TEXFMT_LA8 : GFX_TEXFMT_RGBA5551;
+            }
+            // IA4 has 3 bit intensity, which 4 bits don't widen to exactly.
+            return (tile->fmt == G_IM_FMT_IA) ? GFX_TEXFMT_LA8 : GFX_TEXFMT_LA4;
+        case G_IM_SIZ_8b:
+            if (tile->fmt == G_IM_FMT_CI) {
+                return GFX_TEXFMT_RGBA5551;
+            }
+            return (tile->fmt == G_IM_FMT_IA) ? GFX_TEXFMT_LA4 : GFX_TEXFMT_LA8;
+        case G_IM_SIZ_16b:
+            return (tile->fmt == G_IM_FMT_IA) ? GFX_TEXFMT_LA8 : GFX_TEXFMT_RGBA5551;
+        default:
+            return GFX_TEXFMT_RGBA8;
+    }
+}
+
 static u8 wrap_mode(u8 cm, u8 mask) {
     if ((cm & G_TX_CLAMP) || mask == 0) {
         return GFX_WRAP_CLAMP;
@@ -471,6 +492,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     e->tex.width = width;
     e->tex.height = height;
     e->tex.pixels = (const unsigned int *) pixels;
+    e->tex.format = texture_format(tile, tlutType);
     e->tex.filter = filter;
     e->tex.wrapS = wrapS;
     e->tex.wrapT = wrapT;

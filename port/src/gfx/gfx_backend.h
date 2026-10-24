@@ -64,10 +64,23 @@ enum GfxBlendMode {
 enum GfxTextureFilter { GFX_FILTER_POINT, GFX_FILTER_BILINEAR };
 enum GfxTextureWrap { GFX_WRAP_REPEAT, GFX_WRAP_MIRROR, GFX_WRAP_CLAMP };
 
+/*
+ * The smallest format that holds a texture's pixels exactly, picked from the N64 format it was decoded from. The
+ * 3DS renderer stores the texture on the GPU in it (roadmap item P7): 16 or 8 bits a texel instead of 32, so the GPU
+ * reads less memory. RGBA5551 and LA4 channels are widened by repeating their bits, like the N64 does.
+ */
+enum GfxTextureFormat {
+    GFX_TEXFMT_RGBA8,    /* 32 bit RGBA and anything else */
+    GFX_TEXFMT_RGBA5551, /* RGBA16, and CI textures with an RGBA16 palette */
+    GFX_TEXFMT_LA8,      /* IA16, IA4, I8 (intensity and alpha the same), CI4 with an IA16 palette */
+    GFX_TEXFMT_LA4       /* IA8, I4 */
+};
+
 /* A texture prepared by the frontend. Pixels are RGBA8888 (R in the lowest byte). */
 typedef struct GfxTexture {
     unsigned int width, height;
     const unsigned int *pixels;
+    unsigned char format; /* enum GfxTextureFormat: the pixels fit it exactly */
     unsigned char filter;
     unsigned char wrapS, wrapT;
     void *backendData; /* Owned by the backend. */
@@ -111,5 +124,55 @@ void gfxb_texture_free(GfxTexture *tex);
 /* Makes dst (a copy of src with another filter) draw from src's GPU copy instead of uploading its own. Both are freed
  * with gfxb_texture_free, together. */
 void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src);
+
+/* A pixel (RGBA8888, R in the lowest byte) in a texture format's bits, and back the way the 3DS GPU widens them. */
+static inline unsigned int gfx_texel_encode(unsigned int c, int format) {
+    unsigned int r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF, a = c >> 24;
+    switch (format) {
+        case GFX_TEXFMT_RGBA5551:
+            return ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a >> 7);
+        case GFX_TEXFMT_LA8:
+            return (r << 8) | a;
+        case GFX_TEXFMT_LA4:
+            return ((r >> 4) << 4) | (a >> 4);
+        default:
+            return (r << 24) | (g << 16) | (b << 8) | a; /* The GPU's RGBA8 has R in the highest byte */
+    }
+}
+
+static inline unsigned int gfx_texel_decode(unsigned int v, int format) {
+    unsigned int r, g, b, a;
+    switch (format) {
+        case GFX_TEXFMT_RGBA5551:
+            r = (v >> 11) & 0x1F;
+            g = (v >> 6) & 0x1F;
+            b = (v >> 1) & 0x1F;
+            r = (r << 3) | (r >> 2);
+            g = (g << 3) | (g >> 2);
+            b = (b << 3) | (b >> 2);
+            a = (v & 1) ? 255 : 0;
+            break;
+        case GFX_TEXFMT_LA8:
+            r = g = b = (v >> 8) & 0xFF;
+            a = v & 0xFF;
+            break;
+        case GFX_TEXFMT_LA4:
+            r = g = b = ((v >> 4) & 0xF) * 17;
+            a = (v & 0xF) * 17;
+            break;
+        default:
+            r = v >> 24;
+            g = (v >> 16) & 0xFF;
+            b = (v >> 8) & 0xFF;
+            a = v & 0xFF;
+            break;
+    }
+    return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+/* Bytes per texel. */
+static inline unsigned int gfx_texel_bytes(int format) {
+    return (format == GFX_TEXFMT_RGBA8) ? 4 : (format == GFX_TEXFMT_LA4) ? 1 : 2;
+}
 
 #endif

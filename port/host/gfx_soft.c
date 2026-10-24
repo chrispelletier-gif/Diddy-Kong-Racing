@@ -85,8 +85,20 @@ void gfxb_clear_depth(const int16_t rect[4]) {
 }
 
 void gfxb_texture_upload(GfxTexture *tex) {
-    static int count;
+    static int count, sMismatches;
     const char *dir = getenv("DKR_DUMP_TEXTURES");
+    unsigned int i, n = tex->width * tex->height;
+    // The 3DS renderer stores the texture in tex->format: check that it holds every pixel exactly.
+    for (i = 0; i < n; i++) {
+        unsigned int c = tex->pixels[i];
+        if (gfx_texel_decode(gfx_texel_encode(c, tex->format), tex->format) != c) {
+            if (sMismatches++ < 20) {
+                fprintf(stderr, "texture %ux%u: pixel %u (%08X) doesn't fit texture format %d\n", tex->width,
+                        tex->height, i, c, tex->format);
+            }
+            break;
+        }
+    }
     if (dir != NULL && count < 2000) {
         char path[512];
         snprintf(path, sizeof(path), "%s/tex_%04d_%ux%u_f%d.png", dir, count++, tex->width, tex->height,
