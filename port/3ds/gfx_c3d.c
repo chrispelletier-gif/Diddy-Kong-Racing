@@ -24,17 +24,43 @@
 
 #define TOP_WIDTH 400
 #define TOP_HEIGHT 240
-/* Vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most about 3000
- * triangles, 9000 vertices, a frame. */
-#define VBO_VERTICES (48 * 1024)
+/* Bytes of vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most
+ * about 3000 triangles, 9000 vertices, a frame, which is 48K of the largest vertices. */
+#define VBO_BYTES (48 * 1024 * 48)
 
-/* What the vertex shader receives: positions already in the 3DS screen's clip space, colours from 0 to 1. */
-typedef struct C3DVertex {
+/*
+ * What the vertex shader receives (roadmap item P5): the position already in the 3DS screen's clip space, the first
+ * texture's coordinates, the colour as four bytes (the shader scales them to 0 to 1) and, only for draws that bind a
+ * second texture, its coordinates; without them the shader gets (0, 0) from a fixed attribute. That makes most
+ * vertices 28 bytes instead of 48. The formats can change from one draw to the next, see use_vertex_format.
+ * DKR_VERTEX_FORMAT=48 writes every vertex with float colours and both coordinates, as before P5 (except that the
+ * colours now run from 0 to 255, for the shader).
+ */
+typedef struct C3DVertex { // VFMT_SHORT
+    float pos[4];
+    float tc0[2];
+    u8 color[4];
+} C3DVertex;
+typedef struct C3DVertex2 { // VFMT_LONG
+    float pos[4];
+    float tc0[2];
+    u8 color[4];
+    float tc1[2];
+} C3DVertex2;
+typedef struct C3DVertexOld { // VFMT_OLD
     float pos[4];
     float tc0[2];
     float tc1[2];
     float color[4];
-} C3DVertex;
+} C3DVertexOld;
+enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_COUNT };
+static const int sVfmtStride[VFMT_COUNT] = { sizeof(C3DVertex), sizeof(C3DVertex2), sizeof(C3DVertexOld) };
+static C3D_AttrInfo sVfmtAttr[VFMT_COUNT];
+static int sVfmtOld;       // DKR_VERTEX_FORMAT=48
+static int sVfmtAttrSet;   // The format of citro3d's attribute setting
+static int sVfmtBound = -1; // The format the vertex buffer setting reads, -1 for none yet this frame
+static int sVfmtBase;      // Where in sVbo (bytes) the vertex buffer setting starts
+static int sVfmtSwitches;   // Format changes in the frame
 
 typedef struct C3DTexture {
     C3D_Tex tex;
@@ -53,8 +79,8 @@ static int sDefaultScale = 2;          // The setting (settings.txt, else DKR_AA
 static volatile int sWantedScale = 2;  // plat_set_antialias, applied by the renderer between frames.
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
-static C3DVertex *sVbo; // The vertex buffer of the frame being built
-static int sVboUsed;
+static u8 *sVbo; // The vertex buffer of the frame being built
+static int sVboUsed; // Bytes
 /* Vertices before this one have been flushed from the CPU cache this frame (see flush_new_vertices). */
 static int sVboFlushed;
 static C3D_Tex sWhiteTex;
@@ -100,7 +126,7 @@ static void flush_new_vertices(void) {
         sVboFlushed = 0; // The buffer was started again.
     }
     if (sVboUsed > sVboFlushed) {
-        GSPGPU_FlushDataCache(&sVbo[sVboFlushed], (sVboUsed - sVboFlushed) * sizeof(C3DVertex));
+        GSPGPU_FlushDataCache(sVbo + sVboFlushed, sVboUsed - sVboFlushed);
     }
     sVboFlushed = sVboUsed;
 }
@@ -142,12 +168,68 @@ static void forget_gpu_state(void) {
  *    plane, so anything beyond it is pinned to the farthest depth instead of being clipped,
  *  - then everything is rotated a quarter turn for the 3DS screen: x' = y, y' = -x.
  */
-static void to_screen(const GfxVertex *v, C3DVertex *out) {
+static inline void to_screen(const GfxVertex *v, float *pos) {
     float z = 0.5f * (v->z - v->w);
-    out->pos[0] = v->y;
-    out->pos[1] = -v->x * sScreenScaleX;
-    out->pos[2] = z < 0.0f ? z : 0.0f;
-    out->pos[3] = v->w;
+    pos[0] = v->y;
+    pos[1] = -v->x * sScreenScaleX;
+    pos[2] = z < 0.0f ? z : 0.0f;
+    pos[3] = v->w;
+}
+
+/* The attribute settings of the vertex formats. The shader's inputs are v0 position, v1 and v2 the texture
+ * coordinates, v3 colour; the new formats list them in the same order so that only the last one differs. */
+static void init_vertex_formats(void) {
+    C3D_AttrInfo *attr;
+    int i;
+    sVfmtOld = plat_getenv("DKR_VERTEX_FORMAT") != NULL && atoi(plat_getenv("DKR_VERTEX_FORMAT")) == 48;
+    for (i = 0; i < VFMT_COUNT; i++) {
+        attr = &sVfmtAttr[i];
+        AttrInfo_Init(attr);
+        AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
+        AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
+        if (i == VFMT_OLD) {
+            AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
+            AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 4);
+        } else {
+            AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4);
+            if (i == VFMT_LONG) {
+                AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
+            } else {
+                AttrInfo_AddFixed(attr, 2);
+            }
+        }
+    }
+    sVfmtAttrSet = sVfmtOld ? VFMT_OLD : VFMT_SHORT;
+    C3D_SetAttrInfo(&sVfmtAttr[sVfmtAttrSet]);
+    if (!sVfmtOld) {
+        C3D_FixedAttribSet(3, 0.0f, 0.0f, 0.0f, 0.0f); // Attribute 3 of the short format: v2
+    }
+    plat_log("vertex format: %s", sVfmtOld ? "48 bytes (DKR_VERTEX_FORMAT=48)" : "28 bytes, 36 with a second texture");
+}
+
+/*
+ * Makes the GPU read the vertices from sVboUsed on in format fmt, and returns the index of the first. A change of
+ * format starts the buffer setting at sVboUsed (rounded up to 16 bytes) with the new stride; the same format carries
+ * on from the last draw's vertices, so the settings stay as they are.
+ */
+static int use_vertex_format(int fmt) {
+    int stride = sVfmtStride[fmt];
+    if (fmt != sVfmtBound) {
+        C3D_BufInfo *buf = C3D_GetBufInfo();
+        sVboUsed = (sVboUsed + 15) & ~15;
+        sVfmtBase = sVboUsed;
+        if (fmt != sVfmtAttrSet) {
+            C3D_SetAttrInfo(&sVfmtAttr[fmt]);
+            sVfmtAttrSet = fmt;
+        }
+        BufInfo_Init(buf);
+        BufInfo_Add(buf, sVbo + sVfmtBase, stride, fmt == VFMT_SHORT ? 3 : 4, fmt == VFMT_SHORT ? 0x210 : 0x3210);
+        if (sVfmtBound >= 0) {
+            sVfmtSwitches++;
+        }
+        sVfmtBound = fmt;
+    }
+    return (sVboUsed - sVfmtBase) / stride;
 }
 
 /*
@@ -158,7 +240,7 @@ static void to_screen(const GfxVertex *v, C3DVertex *out) {
  */
 
 // Bump when the self test, the vertex format or the shader changes, so that the test runs again once.
-#define GPU_SELF_TEST_VERSION 1
+#define GPU_SELF_TEST_VERSION 2
 static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
 static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
@@ -180,22 +262,39 @@ static void gpu_test_wait(const char *what) {
     C3D_FrameEnd(0); // Nothing in it: only used to wait for the GPU.
 }
 
-static void gpu_test_triangle(C3DVertex *v) {
+/* Writes a white triangle at sVboUsed in format fmt (the game's short one if -1); returns its first vertex. */
+static int gpu_test_triangle(int fmt) {
     static const float xs[3] = { -0.5f, 0.5f, 0.0f }, ys[3] = { -0.5f, -0.5f, 0.5f };
-    int i;
-    for (i = 0; i < 3; i++) {
-        memset(&v[i], 0, sizeof(v[i]));
-        v[i].pos[0] = xs[i];
-        v[i].pos[1] = ys[i];
-        v[i].pos[3] = 1.0f;
-        v[i].color[0] = v[i].color[1] = v[i].color[2] = v[i].color[3] = 1.0f;
+    int i, first;
+    if (fmt < 0) {
+        fmt = sVfmtOld ? VFMT_OLD : VFMT_SHORT;
     }
+    first = use_vertex_format(fmt);
+    for (i = 0; i < 3; i++) {
+        u8 *v = sVbo + sVboUsed + i * sVfmtStride[fmt];
+        float *pos = (float *) v;
+        memset(v, 0, sVfmtStride[fmt]);
+        pos[0] = xs[i];
+        pos[1] = ys[i];
+        pos[3] = 1.0f;
+        if (fmt == VFMT_OLD) {
+            float *color = ((C3DVertexOld *) v)->color;
+            color[0] = color[1] = color[2] = color[3] = 255.0f;
+        } else {
+            memset(((C3DVertex *) v)->color, 255, 4);
+        }
+    }
+    sVboUsed += 3 * sVfmtStride[fmt];
+    flush_new_vertices();
+    return first;
 }
 
 static void gpu_test_step(const char *what) {
     sGpuTestStep++;
     plat_log("GPU test %d: %s", sGpuTestStep, what);
     gpu_test_wait(what);
+    sVboUsed = 0;
+    sVfmtBound = -1;
     C3D_FrameBegin(0);
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_FrameDrawOn(sTarget);
@@ -239,11 +338,13 @@ static void gpu_self_test(void) {
         "+ depth test",
         "+ game combiner",
         "+ fog table",
+        "+ second texture coordinates",
+        "+ vertex format changes",
         "game clear rectangles",
     };
     GfxDrawState state;
     C3D_TexEnv *env;
-    int i;
+    int i, first;
 
     if (plat_getenv("DKR_NO_GPU_TEST") != NULL) {
         return;
@@ -261,7 +362,7 @@ static void gpu_self_test(void) {
 
     // 2: one flat triangle with the simplest state.
     gpu_test_step(sNames[1]);
-    gpu_test_triangle(sVbo);
+    first = gpu_test_triangle(-1);
     C3D_TexBind(0, &sWhiteTex);
     env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
@@ -275,33 +376,33 @@ static void gpu_self_test(void) {
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
     C3D_CullFace(GPU_CULL_NONE);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 3);
     gpu_test_end(sNames[1]);
 
     // 3 to 8: add the renderer's features one at a time.
     gpu_test_step(sNames[2]);
-    gpu_test_triangle(sVbo);
+    first = gpu_test_triangle(-1);
     C3D_TexBind(1, &sWhiteTex);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 3);
     gpu_test_end(sNames[2]);
 
     gpu_test_step(sNames[3]);
-    gpu_test_triangle(sVbo);
+    first = gpu_test_triangle(-1);
     C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 3);
     gpu_test_end(sNames[3]);
 
     gpu_test_step(sNames[4]);
-    gpu_test_triangle(sVbo);
+    first = gpu_test_triangle(-1);
     C3D_SetScissor(GPU_SCISSOR_NORMAL, 40, 40, 200, 360);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 3);
     gpu_test_end(sNames[4]);
 
     gpu_test_step(sNames[5]);
-    gpu_test_triangle(sVbo);
+    first = gpu_test_triangle(-1);
     C3D_DepthTest(true, GPU_GEQUAL, GPU_WRITE_ALL);
     C3D_DepthMap(true, -1.0f, 0.0002f);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 3);
     gpu_test_end(sNames[5]);
 
     memset(&state, 0, sizeof(state));
@@ -314,23 +415,36 @@ static void gpu_self_test(void) {
     state.prim[0] = state.prim[1] = state.prim[2] = state.prim[3] = 255;
 
     gpu_test_step(sNames[6]);
-    gpu_test_triangle(sVbo);
+    first = gpu_test_triangle(-1);
     apply_combiner(&state);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 3);
     gpu_test_end(sNames[6]);
 
     gpu_test_step(sNames[7]);
-    gpu_test_triangle(sVbo);
+    first = gpu_test_triangle(-1);
     state.fogEnabled = 1;
     state.fogMul = 256;
     state.fogOffset = -100;
     apply_fog(&state);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 3);
     state.fogEnabled = 0;
     apply_fog(&state);
     gpu_test_end(sNames[7]);
 
+    // 9 and 10: the vertex format with both texture coordinates, then changes of format within a frame (P5).
     gpu_test_step(sNames[8]);
+    first = gpu_test_triangle(sVfmtOld ? VFMT_OLD : VFMT_LONG);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 3);
+    gpu_test_end(sNames[8]);
+
+    gpu_test_step(sNames[9]);
+    for (i = 0; i < 4; i++) {
+        first = gpu_test_triangle(sVfmtOld ? VFMT_OLD : (i & 1) ? VFMT_LONG : VFMT_SHORT);
+        C3D_DrawArrays(GPU_TRIANGLES, first, 3);
+    }
+    gpu_test_end(sNames[9]);
+
+    gpu_test_step(sNames[10]);
     {
         static const short sFull[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
         sVboUsed = 0;
@@ -339,7 +453,8 @@ static void gpu_self_test(void) {
         sVboUsed = 0;
         sFrameTriangles = 0;
     }
-    gpu_test_end(sNames[8]);
+    gpu_test_end(sNames[10]);
+    sVfmtBound = -1;
 
     plat_status("GPU test passed");
     gpu_test_mark_passed();
@@ -420,8 +535,6 @@ static void alloc_frame_slots(void);
 
 void gfxb_init(void) {
     static int sDone;
-    C3D_AttrInfo *attr;
-    C3D_BufInfo *buf;
     u32 white[64];
     int i;
 
@@ -456,17 +569,8 @@ void gfxb_init(void) {
     shaderProgramSetVsh(&sProgram, &sShaderDvlb->DVLE[0]);
     C3D_BindProgram(&sProgram);
 
-    attr = C3D_GetAttrInfo();
-    AttrInfo_Init(attr);
-    AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
-    AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 4);
-
+    init_vertex_formats();
     alloc_frame_slots();
-    buf = C3D_GetBufInfo();
-    BufInfo_Init(buf);
-    BufInfo_Add(buf, sVbo, sizeof(C3DVertex), 4, 0x3210);
 
     for (i = 0; i < 64; i++) {
         white[i] = 0xFFFFFFFF;
@@ -632,7 +736,7 @@ static void log_buffers(void) {
     top0 = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
     plat_log("buffers: command list %p (%lu bytes), vertices %p (%lu bytes), white texture %p, colour %p, depth %p",
              (void *) gpuCmdBuf, (unsigned long) gpuCmdBufSize * 4, (void *) sVbo,
-             (unsigned long) (sizeof(C3DVertex) * VBO_VERTICES), sWhiteTex.data, sTarget->frameBuf.colorBuf,
+             (unsigned long) VBO_BYTES, sWhiteTex.data, sTarget->frameBuf.colorBuf,
              sTarget->frameBuf.depthBuf);
     top1 = gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &w, &h);
     bottom = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
@@ -682,7 +786,7 @@ static int sHangSaved;
  */
 #define MAX_LIST_PARTS 26 // With the rest of the list, the display transfer and a clear, under citro3d's 32 entries
 typedef struct FrameSlot {
-    C3DVertex *vbo;      // VBO_VERTICES vertices
+    u8 *vbo;             // VBO_BYTES of vertices
     u32 *cmd;            // The command list, sCmdWords long
     u32 *partAddr[MAX_LIST_PARTS];
     u32 partWords[MAX_LIST_PARTS];
@@ -719,7 +823,7 @@ static void alloc_frame_slots(void) {
     int i;
     sCmdWords = __C3D_Context.cmdBufSize;
     for (i = 0; i < 2; i++) {
-        sSlots[i].vbo = linearAlloc(sizeof(C3DVertex) * VBO_VERTICES);
+        sSlots[i].vbo = linearAlloc(VBO_BYTES);
         sSlots[i].cmd = linearAlloc(sCmdWords * 4);
         if (sSlots[i].vbo == NULL || sSlots[i].cmd == NULL) {
             if (sSlots[i].vbo != NULL) {
@@ -735,7 +839,7 @@ static void alloc_frame_slots(void) {
     }
     sNumSlots = i > 0 ? i : 1; // None can't happen this early, and nothing could be drawn.
     plat_log("frame slots: %d, each %lu KB of vertices and %lu KB of commands in linear memory, %lu KB left",
-             sNumSlots, (unsigned long) (sizeof(C3DVertex) * VBO_VERTICES / 1024),
+             sNumSlots, (unsigned long) (VBO_BYTES / 1024),
              (unsigned long) (sCmdWords * 4 / 1024), (unsigned long) (linearSpaceFree() / 1024));
     sVbo = sSlots[0].vbo;
 }
@@ -997,11 +1101,8 @@ void gfxb_start_frame(void) {
     sVbo = slot->vbo;
     sVboUsed = 0;
     sVboFlushed = 0;
-    {
-        C3D_BufInfo *buf = C3D_GetBufInfo();
-        BufInfo_Init(buf);
-        BufInfo_Add(buf, sVbo, sizeof(C3DVertex), 4, 0x3210);
-    }
+    sVfmtBound = -1; // The first draw points the GPU at this slot's buffer.
+    sVfmtSwitches = 0;
     GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
     // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
     // draws nothing (while a level loads) must not show up as a black flash. So only the first frame uses a memory
@@ -1123,7 +1224,7 @@ void gfxb_end_frame(void) {
         int i;
 
         if (full_flush()) {
-            GSPGPU_FlushDataCache(sVbo, sVboUsed * sizeof(C3DVertex));
+            GSPGPU_FlushDataCache(sVbo, sVboUsed);
         } else {
             flush_new_vertices();
         }
@@ -1133,8 +1234,9 @@ void gfxb_end_frame(void) {
             sMaxUsage = usage;
         }
         if ((sFrameCount++ % 120) == 0) {
-            plat_log("frame %d: %d triangles at %llu ms, command buffer %.0f%% (max %.0f%%), %d splits", sFrameCount,
-                     sFrameTriangles, plat_time_ns() / 1000000ULL, usage * 100.0f, sMaxUsage * 100.0f, sDrainSplits);
+            plat_log("frame %d: %d triangles at %llu ms, command buffer %.0f%% (max %.0f%%), %d splits, %d KB of "
+                     "vertices, %d format changes", sFrameCount, sFrameTriangles, plat_time_ns() / 1000000ULL,
+                     usage * 100.0f, sMaxUsage * 100.0f, sDrainSplits, sVboUsed / 1024, sVfmtSwitches);
         }
         if (sOverlap) {
             // Built while the GPU drew the last frame: wait for it now, then hand this one over.
@@ -2277,18 +2379,19 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
 void C3Di_UpdateContext(void);
 
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
-    C3DVertex *out;
     HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
-    int i, first, count = numTriangles * 3;
+    int i, first, vertex, count = numTriangles * 3;
+    // Coordinates for a second texture only when the draw binds one (else it is the white texture).
+    int fmt = sVfmtOld ? VFMT_OLD : state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
 
-    if (sVboUsed + count > VBO_VERTICES || gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+    if (sVboUsed + 15 + count * sVfmtStride[fmt] > VBO_BYTES || gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         // Out of room in the frame's vertex buffer or command list (a full command list stops the program, and
         // nothing of the frame reaches the GPU before it ends, so splitting it would not make room): leave the rest
         // of the frame's triangles out. Races use under a fifth of either.
         if (sDrawsLeftOut++ < 5) {
-            plat_log("frame %d: %s full (%d vertices, %lu command words), triangles left out", sFrameCount,
-                     sVboUsed + count > VBO_VERTICES ? "vertex buffer" : "command list", sVboUsed,
+            plat_log("frame %d: %s full (%d bytes of vertices, %lu command words), triangles left out", sFrameCount,
+                     sVboUsed + 15 + count * sVfmtStride[fmt] > VBO_BYTES ? "vertex buffer" : "command list", sVboUsed,
                      (unsigned long) cmd_position());
         }
         return;
@@ -2331,25 +2434,48 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         set_all_state(state, &su0, &sv0, &su1, &sv1);
     }
 
-    out = &sVbo[sVboUsed];
-    for (i = 0; i < count; i++) {
-        const GfxVertex *v = &verts[i];
-        to_screen(v, &out[i]);
-        // Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
-        out[i].tc0[0] = v->u0 * su0;
-        out[i].tc0[1] = 1.0f - v->v0 * sv0;
-        out[i].tc1[0] = v->u1 * su1;
-        out[i].tc1[1] = 1.0f - v->v1 * sv1;
-        out[i].color[0] = v->r * (1.0f / 255.0f);
-        out[i].color[1] = v->g * (1.0f / 255.0f);
-        out[i].color[2] = v->b * (1.0f / 255.0f);
-        out[i].color[3] = v->a * (1.0f / 255.0f);
+    vertex = use_vertex_format(fmt);
+    // Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
+    if (fmt == VFMT_SHORT) {
+        C3DVertex *out = (C3DVertex *) (sVbo + sVboUsed);
+        for (i = 0; i < count; i++) {
+            const GfxVertex *v = &verts[i];
+            to_screen(v, out[i].pos);
+            out[i].tc0[0] = v->u0 * su0;
+            out[i].tc0[1] = 1.0f - v->v0 * sv0;
+            memcpy(out[i].color, &v->r, 4);
+        }
+    } else if (fmt == VFMT_LONG) {
+        C3DVertex2 *out = (C3DVertex2 *) (sVbo + sVboUsed);
+        for (i = 0; i < count; i++) {
+            const GfxVertex *v = &verts[i];
+            to_screen(v, out[i].pos);
+            out[i].tc0[0] = v->u0 * su0;
+            out[i].tc0[1] = 1.0f - v->v0 * sv0;
+            memcpy(out[i].color, &v->r, 4);
+            out[i].tc1[0] = v->u1 * su1;
+            out[i].tc1[1] = 1.0f - v->v1 * sv1;
+        }
+    } else {
+        C3DVertexOld *out = (C3DVertexOld *) (sVbo + sVboUsed);
+        for (i = 0; i < count; i++) {
+            const GfxVertex *v = &verts[i];
+            to_screen(v, out[i].pos);
+            out[i].tc0[0] = v->u0 * su0;
+            out[i].tc0[1] = 1.0f - v->v0 * sv0;
+            out[i].tc1[0] = v->u1 * su1;
+            out[i].tc1[1] = 1.0f - v->v1 * sv1;
+            out[i].color[0] = v->r;
+            out[i].color[1] = v->g;
+            out[i].color[2] = v->b;
+            out[i].color[3] = v->a;
+        }
     }
-    C3D_DrawArrays(GPU_TRIANGLES, sVboUsed, count);
+    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
     }
-    sVboUsed += count;
+    sVboUsed += count * sVfmtStride[fmt];
     sFrameTriangles += numTriangles;
 }
 
