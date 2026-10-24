@@ -108,5 +108,8 @@ void gfxb_clear_depth(const short rect[4]);
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
 void gfxb_texture_upload(GfxTexture *tex);
 void gfxb_texture_free(GfxTexture *tex);
+/* Makes dst (a copy of src with another filter) draw from src's GPU copy instead of uploading its own. Both are freed
+ * with gfxb_texture_free, together. */
+void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src);
 
 #endif

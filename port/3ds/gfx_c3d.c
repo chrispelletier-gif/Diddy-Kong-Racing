@@ -38,6 +38,7 @@ typedef struct C3DTexture {
     C3D_Tex tex;
     float scaleU, scaleV;
     int resample;
+    int shared; // tex's memory belongs to another texture (gfxb_texture_share)
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
@@ -799,7 +800,9 @@ void gfxb_3ds_shutdown(void) {
 static void process_pending_frees(void) {
     int i;
     for (i = 0; i < sNumPendingFrees; i++) {
-        C3D_TexDelete(&sPendingFrees[i]->tex);
+        if (!sPendingFrees[i]->shared) {
+            C3D_TexDelete(&sPendingFrees[i]->tex);
+        }
         free(sPendingFrees[i]);
     }
     sNumPendingFrees = 0;
@@ -1140,7 +1143,9 @@ void gfxb_texture_free(GfxTexture *tex) {
         int capacity = sPendingFreesCapacity ? sPendingFreesCapacity * 2 : 256;
         C3DTexture **list = realloc(sPendingFrees, capacity * sizeof(C3DTexture *));
         if (list == NULL) {
-            C3D_TexDelete(&t->tex); // Out of memory: delete now and risk a glitch.
+            if (!t->shared) {
+                C3D_TexDelete(&t->tex); // Out of memory: delete now and risk a glitch.
+            }
             free(t);
             return;
         }
@@ -1148,6 +1153,23 @@ void gfxb_texture_free(GfxTexture *tex) {
         sPendingFreesCapacity = capacity;
     }
     sPendingFrees[sNumPendingFrees++] = t;
+}
+
+void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
+    const C3DTexture *s = (const C3DTexture *) src->backendData;
+    C3DTexture *t;
+    if (s == NULL || (t = malloc(sizeof(C3DTexture))) == NULL) {
+        return; // Drawn white, like a texture that couldn't be uploaded.
+    }
+    // The same memory with another sampler setting: only the C3D_Tex's parameters differ.
+    *t = *s;
+    t->shared = 1;
+    if (dst->filter == GFX_FILTER_POINT) {
+        C3D_TexSetFilter(&t->tex, GPU_NEAREST, GPU_NEAREST);
+    } else {
+        C3D_TexSetFilter(&t->tex, GPU_LINEAR, GPU_LINEAR);
+    }
+    dst->backendData = t;
 }
 
 /******************************** Combiner ********************************/

@@ -99,6 +99,11 @@ void gfxb_texture_free(GfxTexture *tex) {
     (void) tex;
 }
 
+void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
+    (void) dst;
+    (void) src;
+}
+
 /******************************** Texturing ********************************/
 
 static inline int wrap_coord(int c, int size, int mode) {

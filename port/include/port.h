@@ -145,6 +145,9 @@ static inline s32 port_atoi(const char *s) {
 s32 port_warp_next(s32 levelId, s32 *cutsceneId, s16 *timer);
 s32 port_warp_active(void);
 s32 port_gfx_frame_count(void);
+/* Texture pre-decoding (gfx_rdp.c): the game hands over each texture it loads and the memory of each one it frees. */
+void port_gfx_texture_loaded(const void *cmd, s32 numCommands);
+void port_gfx_texture_freed(const void *start, const void *end);
 s32 port_apply_test_save(void *settings);
 
 /* Unattended test run (port/src/game/port_autorun.c). */

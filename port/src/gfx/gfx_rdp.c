@@ -145,7 +145,12 @@ static inline void unpack_rgba(u32 c, u8 *out) {
 
 /******************************** Textures ********************************/
 
-#define TEX_CACHE_SIZE 1024
+/*
+ * Big enough to hold every texture a level has loaded (DKR allows 700) plus the variants drawn with other wrap modes,
+ * so that entries are only replaced once the game has freed their textures.
+ */
+#define TEX_CACHE_SIZE 2048
+#define TEX_CACHE_PROBES 8
 
 typedef struct TexCacheEntry {
     const u8 *addr;
@@ -153,12 +158,18 @@ typedef struct TexCacheEntry {
     u32 hash;
     u16 width, height;
     u8 fmt, siz, lineSwapped, used;
-    u8 filter, wrapS, wrapT;
+    u8 wrapS, wrapT, tlutType;
     u32 lastFrame;
     GfxTexture tex;
+    GfxTexture otherFilter; // The same texture with the other filter, sharing its GPU copy (when hasOtherFilter)
+    u8 hasOtherFilter;
 } TexCacheEntry;
 
 static TexCacheEntry sTexCache[TEX_CACHE_SIZE];
+/* Each entry's texture address (NULL when unused), packed so that dropping freed textures doesn't read every entry. */
+static const u8 *sTexCacheAddr[TEX_CACHE_SIZE];
+static s32 sPrewarming;       // Decoding textures the game has just loaded, outside of any display list
+static u32 sRecentEvictions;  // Entries replaced although drawn in the last 60 frames (should stay 0)
 
 /* A cheap hash of the texture data, used to notice when memory has been reused for something else. */
 static u32 sample_hash(const u8 *data, u32 size) {
@@ -276,10 +287,44 @@ static u8 wrap_mode(u8 cm, u8 mask) {
  * ("pinned") already looked it up for its other tile. Replacing it would draw those triangles with another texture.
  */
 static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
-    if (&e->tex == pinned) {
+    const GfxTexture *other = e->hasOtherFilter ? &e->otherFilter : &e->tex;
+    if (&e->tex == pinned || other == pinned) {
         return TRUE;
     }
-    return sBatchCount > 0 && (&e->tex == sBatchState.textures[0] || &e->tex == sBatchState.textures[1]);
+    return sBatchCount > 0 && (&e->tex == sBatchState.textures[0] || &e->tex == sBatchState.textures[1] ||
+                               other == sBatchState.textures[0] || other == sBatchState.textures[1]);
+}
+
+/* Frees a cache entry's textures. */
+static void free_entry(TexCacheEntry *e) {
+    if (e->hasOtherFilter) {
+        gfxb_texture_free(&e->otherFilter);
+        e->hasOtherFilter = FALSE;
+    }
+    gfxb_texture_free(&e->tex);
+    plat_free((void *) e->tex.pixels);
+    e->used = FALSE;
+    sTexCacheAddr[e - sTexCache] = NULL;
+}
+
+/*
+ * The entry's texture for drawing with the given filter. Mostly DKR draws a texture with one filter, but HUD and
+ * menu textures are drawn both ways, and a texture decoded at load time doesn't know yet which it will be. The other
+ * filter is a second texture object sharing the decoded pixels and GPU copy, so it costs no decode or upload; it
+ * can't be the same object, since changing the filter in place would also change it for triangles already batched.
+ */
+static GfxTexture *texture_with_filter(TexCacheEntry *e, u8 filter) {
+    if (e->tex.filter == filter) {
+        return &e->tex;
+    }
+    if (!e->hasOtherFilter) {
+        e->otherFilter = e->tex;
+        e->otherFilter.filter = filter;
+        e->otherFilter.backendData = NULL;
+        gfxb_texture_share(&e->otherFilter, &e->tex);
+        e->hasOtherFilter = TRUE;
+    }
+    return &e->otherFilter;
 }
 
 /*
@@ -316,7 +361,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63];
     u32 width, height, size, hash, i, slot, oldest;
     const u8 *tlut = NULL;
-    u8 filter, wrapS, wrapT;
+    u8 filter, wrapS, wrapT, tlutType;
     TexCacheEntry *e;
     u32 *pixels;
     unsigned long long texStart;
@@ -365,20 +410,21 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     // Copy mode never filters.
     filter = ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT || cycle_type() == G_CYC_COPY) ? GFX_FILTER_POINT
                                                                                             : GFX_FILTER_BILINEAR;
+    tlutType = (tlut != NULL) ? (g.omH >> G_MDSFT_TEXTLUT) & 3 : 0;
     wrapS = wrap_mode(tile->cms, tile->masks);
     wrapT = wrap_mode(tile->cmt, tile->maskt);
 
     slot = ((uintptr_t) load->addr >> 3) % TEX_CACHE_SIZE;
     oldest = TEX_CACHE_SIZE;
-    for (i = 0; i < 8; i++) {
+    for (i = 0; i < TEX_CACHE_PROBES; i++) {
         e = &sTexCache[(slot + i) % TEX_CACHE_SIZE];
-        // The filter and wrap modes are part of the key, since changing them in place would also change them for
-        // triangles already batched with this texture.
+        // The wrap modes are part of the key, since changing them in place would also change them for triangles
+        // already batched with this texture. The filter isn't: see texture_with_filter.
         if (e->used && e->addr == load->addr && e->width == width && e->height == height && e->fmt == tile->fmt &&
             e->siz == tile->siz && e->tlut == tlut && e->hash == hash && e->lineSwapped == load->lineSwapped &&
-            e->filter == filter && e->wrapS == wrapS && e->wrapT == wrapT) {
+            e->wrapS == wrapS && e->wrapT == wrapT && e->tlutType == tlutType) {
             e->lastFrame = sFrameCount;
-            return &e->tex;
+            return texture_with_filter(e, filter);
         }
         if (!e->used) {
             oldest = (slot + i) % TEX_CACHE_SIZE;
@@ -395,8 +441,10 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     texStart = plat_time_ns();
     e = &sTexCache[oldest];
     if (e->used) {
-        gfxb_texture_free(&e->tex);
-        plat_free((void *) e->tex.pixels);
+        if (sFrameCount - (s32) e->lastFrame < 60) {
+            sRecentEvictions++;
+        }
+        free_entry(e);
     }
     pixels = plat_malloc(width * height * 4);
     if (pixels == NULL) {
@@ -408,6 +456,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     decode_texture(pixels, load, tile, width, height, tlut);
     e->used = TRUE;
     e->addr = load->addr;
+    sTexCacheAddr[e - sTexCache] = load->addr;
     e->tlut = tlut;
     e->hash = hash;
     e->width = width;
@@ -415,9 +464,9 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     e->fmt = tile->fmt;
     e->siz = tile->siz;
     e->lineSwapped = load->lineSwapped;
-    e->filter = filter;
     e->wrapS = wrapS;
     e->wrapT = wrapT;
+    e->tlutType = tlutType;
     e->lastFrame = sFrameCount;
     e->tex.width = width;
     e->tex.height = height;
@@ -428,7 +477,10 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     e->tex.backendData = NULL;
     gfxb_texture_upload(&e->tex);
     prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
-    prof_count(PROF_TEXTURE_UPLOADS, 1);
+    if (!sPrewarming) {
+        // Only the decodes that interrupt a frame: these are the hitches.
+        prof_count(PROF_TEXTURE_UPLOADS, 1);
+    }
     return &e->tex;
 }
 
@@ -1330,6 +1382,162 @@ static void run_dl(const Gfx *dl, s32 maxCommands) {
     run_command_list(dl, maxCommands, 0);
 }
 
+/******************************** Decoding textures at load time ********************************/
+
+/*
+ * Textures used to be decoded the first time a frame drew them, a hitch whenever the camera turned to something new.
+ * Now the game hands each texture it loads to the renderer (port_gfx_texture_loaded, from load_texture), and the
+ * renderer decodes it before its next frame, while the level is still loading. Textures the game frees
+ * (port_gfx_texture_freed) leave the cache at the same point, so it only ever holds what the level uses and has no
+ * reason to evict any of it. The game thread only writes the queue and the renderer only reads it.
+ * DKR_TEX_PREWARM=0 goes back to decoding on first use.
+ */
+#define TEX_QUEUE_SIZE 1024
+#define TEX_QUEUE_COMMANDS 20
+
+typedef struct TexQueueEntry {
+    const u8 *start, *end;      // A freed texture's memory
+    Gfx cmd[TEX_QUEUE_COMMANDS]; // A loaded texture's load commands (a copy: the texture may be freed before it runs)
+    s32 numCommands;            // 0 for a freed texture
+} TexQueueEntry;
+
+static TexQueueEntry sTexQueue[TEX_QUEUE_SIZE];
+static u32 sTexQueueHead; // Written by the game thread
+static u32 sTexQueueTail; // Written by the renderer
+static u32 sTexQueueDropped;
+static s32 sPrewarmOff = -1;
+
+static TexQueueEntry *tex_queue_slot(void) {
+    u32 head = sTexQueueHead;
+    if (head - __atomic_load_n(&sTexQueueTail, __ATOMIC_ACQUIRE) >= TEX_QUEUE_SIZE) {
+        sTexQueueDropped++; // The renderer catches up at its next frame; the texture is decoded when drawn instead.
+        return NULL;
+    }
+    return &sTexQueue[head % TEX_QUEUE_SIZE];
+}
+
+static void tex_queue_push(void) {
+    __atomic_store_n(&sTexQueueHead, sTexQueueHead + 1, __ATOMIC_RELEASE);
+}
+
+/* Game thread: a texture was loaded, and these commands (from material_init) load it for drawing. */
+void port_gfx_texture_loaded(const void *commands, s32 numCommands) {
+    const Gfx *cmd = (const Gfx *) commands;
+    TexQueueEntry *e;
+    s32 i;
+    if (numCommands <= 0 || numCommands > TEX_QUEUE_COMMANDS || (e = tex_queue_slot()) == NULL) {
+        return;
+    }
+    for (i = 0; i < numCommands; i++) {
+        e->cmd[i] = cmd[i];
+    }
+    e->numCommands = numCommands;
+    tex_queue_push();
+}
+
+/* Game thread: the texture data in [start, end) was freed. */
+void port_gfx_texture_freed(const void *start, const void *end) {
+    TexQueueEntry *e = tex_queue_slot();
+    if (e == NULL) {
+        return;
+    }
+    e->start = (const u8 *) start;
+    e->end = (const u8 *) end;
+    e->numCommands = 0;
+    tex_queue_push();
+}
+
+/* Drops the cache entries (and remembered hashes) of texture data in [start, end). */
+static void drop_textures(const u8 *start, const u8 *end) {
+    s32 i;
+    for (i = 0; i < TEX_CACHE_SIZE; i++) {
+        if (sTexCacheAddr[i] >= start && sTexCacheAddr[i] < end) {
+            free_entry(&sTexCache[i]);
+        }
+    }
+    for (i = 0; i < HASH_CACHE_SIZE; i++) {
+        if (sHashCache[i].data >= start && sHashCache[i].data < end) {
+            sHashCache[i].data = NULL;
+        }
+    }
+}
+
+/*
+ * Renderer, before a frame: decodes the textures loaded since the last one, and forgets the freed ones. The load
+ * commands run against a scratch copy of the tile and TMEM state, with RGBA16 palettes. The filter doesn't matter: a
+ * texture drawn with the other one shares the decoded copy (see texture_with_filter).
+ */
+static void prewarm_textures(void) {
+    static Tile savedTiles[ARRAY_COUNT(g.tiles)];
+    static TmemLoad savedTmem[ARRAY_COUNT(g.tmem)];
+    static const TmemLoad noLoad;
+    u32 head = __atomic_load_n(&sTexQueueHead, __ATOMIC_ACQUIRE);
+    u32 tail = sTexQueueTail;
+    u32 savedOmH;
+    const u8 *savedTlut;
+    u32 savedTlutCount;
+    s32 decoded = 0, freed = 0, i;
+    unsigned long long start, elapsed;
+
+    if (tail == head) {
+        return;
+    }
+    if (sPrewarmOff < 0) {
+        const char *env = plat_getenv("DKR_TEX_PREWARM");
+        sPrewarmOff = (env != NULL && env[0] == '0');
+    }
+    if (sPrewarmOff) {
+        __atomic_store_n(&sTexQueueTail, head, __ATOMIC_RELEASE);
+        return;
+    }
+    start = plat_time_ns();
+    for (i = 0; i < ARRAY_COUNT(g.tiles); i++) {
+        savedTiles[i] = g.tiles[i];
+    }
+    for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
+        savedTmem[i] = g.tmem[i];
+    }
+    savedOmH = g.omH;
+    savedTlut = g.tlutAddr;
+    savedTlutCount = g.tlutCount;
+    g.omH = (g.omH & ~((3 << G_MDSFT_TEXTFILT) | (3 << G_MDSFT_TEXTLUT))) | G_TF_BILERP | G_TT_RGBA16;
+    sPrewarming = TRUE;
+    for (; tail != head; tail++) {
+        TexQueueEntry *e = &sTexQueue[tail % TEX_QUEUE_SIZE];
+        if (e->numCommands == 0) {
+            drop_textures(e->start, e->end);
+            freed++;
+        } else {
+            for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
+                g.tmem[i] = noLoad;
+            }
+            run_command_list(e->cmd, e->numCommands, 0);
+            if (lookup_texture(G_TX_RENDERTILE, NULL) != NULL) {
+                decoded++;
+            }
+        }
+    }
+    sPrewarming = FALSE;
+    __atomic_store_n(&sTexQueueTail, tail, __ATOMIC_RELEASE);
+    for (i = 0; i < ARRAY_COUNT(g.tiles); i++) {
+        g.tiles[i] = savedTiles[i];
+    }
+    for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
+        g.tmem[i] = savedTmem[i];
+    }
+    g.omH = savedOmH;
+    g.tlutAddr = savedTlut;
+    g.tlutCount = savedTlutCount;
+    sTriStateValid = FALSE;
+    elapsed = plat_time_ns() - start;
+    // Level loads, not the odd object texture coming and going mid-race.
+    if (decoded + freed >= 16 || elapsed >= 1000000) {
+        plat_log("textures: %d decoded at load, %d freed, %.1f ms (frame %d, %u replaced while in use, %u not queued)",
+                 (int) decoded, (int) freed, elapsed / 1e6, (int) sFrameCount, (unsigned) sRecentEvictions,
+                 (unsigned) sTexQueueDropped);
+    }
+}
+
 /******************************** Entry points ********************************/
 
 static s32 sGfxInitialised;
@@ -1383,6 +1591,7 @@ void port_gfx_run_task(void *taskPtr) {
     }
 #endif
     REF_CALL(refb_start_frame());
+    prewarm_textures();
     g.vertexIndex = 0;
     g.billboard = 0;
     sTriStateValid = FALSE;
