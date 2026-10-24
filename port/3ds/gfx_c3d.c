@@ -437,12 +437,16 @@ void gfxb_init(void) {
         create_target(sDefaultScale);
         plat_status("Graphics started%s", sRenderScale == 2 ? " (anti-aliased)" : "");
     }
-    sMipmapSetting = sMipmapsUsed = settings_get("mipmaps", 1) != 0;
+    sMipmapSetting = settings_get("mipmaps", 1);
+    if (sMipmapSetting < 0 || sMipmapSetting > 2) {
+        sMipmapSetting = 1;
+    }
+    sMipmapsUsed = sMipmapSetting != 0;
     sColourSetting = sColourBoost = settings_get("colour", 0);
     if (sColourSetting < 0 || sColourSetting > 3) {
         sColourSetting = sColourBoost = 0;
     }
-    plat_log("mipmaps %s, colour boost %d", sMipmapSetting ? "on" : "off", sColourSetting);
+    plat_log("mipmaps %d, colour boost %d", sMipmapSetting, sColourSetting);
 
     sShaderDvlb = DVLB_ParseFile((u32 *) shader_shbin, shader_shbin_size);
     shaderProgramInit(&sProgram);
@@ -895,7 +899,7 @@ void gfxb_start_frame(void) {
     }
     C3D_FrameDrawOn(sTarget);
     forget_gpu_state();
-    sMipmapsUsed = sMipmapSetting;
+    sMipmapsUsed = sMipmapSetting != 0;
     sColourBoost = sColourSetting;
     sFrameFirstDraw = 1;
     sVboUsed = 0;
@@ -1156,9 +1160,10 @@ static GPU_TEXTURE_FILTER_PARAM mip_filter(void) {
     return (GPU_TEXTURE_FILTER_PARAM) sFilter;
 }
 
-void plat_3ds_set_mipmap_setting(int on) {
-    sMipmapSetting = on != 0;
-    settings_set("mipmaps", on != 0);
+/* 0 off, 1 on, 2 on with each level tinted (see tint_level), for seeing where the GPU uses which. */
+void plat_3ds_set_mipmap_setting(int mode) {
+    sMipmapSetting = mode < 0 ? 0 : mode > 2 ? 2 : mode;
+    settings_set("mipmaps", sMipmapSetting);
 }
 
 int plat_3ds_mipmap_setting(void) {
@@ -1202,6 +1207,23 @@ static void swizzle_level(u8 *data, const unsigned int *pixels, unsigned int w, 
     }
 }
 
+/*
+ * The "Show" mipmap setting: textures loaded while it is on get their levels tinted halfway towards red (level 1),
+ * green (2), blue (3), then yellow, so the picture shows where each level is used. Textures loaded before keep
+ * their colours until the next track loads them again.
+ */
+static void tint_level(unsigned int *pixels, unsigned int count, int level) {
+    static const unsigned int sTints[4] = { 0x0000FF, 0x00FF00, 0xFF0000, 0x00FFFF };
+    unsigned int tint = sTints[(level - 1) & 3], i, k;
+    for (i = 0; i < count; i++) {
+        unsigned int c = pixels[i], out = c & 0xFF000000u;
+        for (k = 0; k < 3; k++) {
+            out |= ((((c >> (8 * k)) & 0xFF) + ((tint >> (8 * k)) & 0xFF)) / 2) << (8 * k);
+        }
+        pixels[i] = out;
+    }
+}
+
 /* Builds and uploads the levels after the first, from the texture at GPU size. Returns 0 if out of memory. */
 static int upload_mip_levels(C3DTexture *t, const GfxTexture *tex, int format) {
     unsigned int pw = t->tex.width, ph = t->tex.height, x, y;
@@ -1219,6 +1241,10 @@ static int upload_mip_levels(C3DTexture *t, const GfxTexture *tex, int format) {
         gfx_mip_downsample(pixels, pw, ph, pixels);
         pw /= 2;
         ph /= 2;
+        if (sMipmapSetting == 2) {
+            // Tints the copy the next level is made from too, which only makes the tints of later levels stronger.
+            tint_level(pixels, pw * ph, level);
+        }
         swizzle_level(C3D_Tex2DGetImagePtr(&t->tex, level, NULL), pixels, pw, ph, format);
     }
     free(pixels);
@@ -1593,8 +1619,10 @@ static void apply_fog(const GfxDrawState *state) {
  *  - D = t c + (1 - t) f = t (c - L) + 1/2            (the buffer's c, then f)
  *  - out = c + D - 1/2                                (signed add)
  * dot3 computes 4 * sum((a - 1/2) (b - 1/2)), which is where the halves go. t is at most 1/2 so that A stays above
- * zero. The alpha is passed through untouched. A combiner of more than two stages (two cycles whose colour and alpha
- * need different constants) is drawn without it: the buffer can only be written by the first four stages.
+ * zero. The alpha is passed through untouched (or worked out by a stage the game's combiner needed for alpha only,
+ * see alpha_only_stage). A combiner that still needs more than two stages is drawn without it: the buffer can only
+ * be written by the first four stages. (The first version missed that DKR's track combiner takes three, so the boost
+ * left most of the picture as it was.)
  */
 static const float sBoostStrength[4] = { 0.0f, 0.15f, 0.3f, 0.5f };
 
@@ -1616,15 +1644,42 @@ static void boost_stage(TevStage *st, GPU_COMBINEFUNC func, GPU_TEVSRC a, int aO
     st->rawConst = konst;
 }
 
+/*
+ * Whether a stage only works on alpha and passes the colour through: the second half of a cycle whose colour and
+ * alpha equations needed different constants (compile_combiner). Its alpha half can ride along in a colour boost
+ * stage, whose alpha half is free.
+ */
+static int alpha_only_stage(const TevStage *st) {
+    int i;
+    if (st->rgbFunc != GPU_REPLACE || st->rgbSrc[0] != GPU_PREVIOUS || st->rgbOp[0] != GPU_TEVOP_RGB_SRC_COLOR ||
+        st->konst.rgb != -1) {
+        return 0;
+    }
+    for (i = 0; i < 3; i++) {
+        if (st->alphaSrc[i] == GPU_CONSTANT && st->konst.alpha == -1) {
+            return 0; // Reads the zero constant of a first cycle: keep it where it is.
+        }
+    }
+    return 1;
+}
+
 static void add_colour_boost(TevProgram *prog, int level) {
     float t = sBoostStrength[level];
     u8 k = unit_byte(t / (2.0f * (1.0f - t))), a = unit_byte(0.5f - 0.25f / (1.0f - t)), lerp = unit_byte(t);
     u32 weights = unit_byte(0.5f + 0.299f / 2) | (unit_byte(0.5f + 0.587f / 2) << 8) |
                   (unit_byte(0.5f + 0.114f / 2) << 16);
-    TevStage *st;
+    TevStage *st, alphaStage;
+    int moveAlpha;
 
     if (level <= 0 || prog->numStages < 1) {
         return;
+    }
+    // DKR's most common combiner (track geometry: texture times shade, then a blend towards the environment colour
+    // with the primitive alpha) takes three stages, the last for alpha only. Its alpha moves into the dot3 stage.
+    moveAlpha = prog->numStages == 3 && alpha_only_stage(&prog->stages[2]);
+    if (moveAlpha) {
+        alphaStage = prog->stages[2];
+        prog->numStages = 2;
     }
     if (prog->numStages > 2) {
         static int sLogged;
@@ -1641,6 +1696,12 @@ static void add_colour_boost(TevProgram *prog, int level) {
     st = &prog->stages[prog->numStages++];
     boost_stage(st, GPU_DOT3_RGB, GPU_PREVIOUS, GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR, GPU_CONSTANT,
                 GPU_TEVOP_RGB_SRC_COLOR, GPU_PREVIOUS, GPU_TEVOP_RGB_SRC_COLOR, weights);
+    if (moveAlpha) {
+        memcpy(st->alphaSrc, alphaStage.alphaSrc, sizeof(st->alphaSrc));
+        memcpy(st->alphaOp, alphaStage.alphaOp, sizeof(st->alphaOp));
+        st->alphaFunc = alphaStage.alphaFunc;
+        st->konst.alpha = alphaStage.konst.alpha;
+    }
     st = &prog->stages[prog->numStages++];
     boost_stage(st, GPU_INTERPOLATE, GPU_PREVIOUS_BUFFER, GPU_TEVOP_RGB_SRC_COLOR, GPU_PREVIOUS,
                 GPU_TEVOP_RGB_SRC_COLOR, GPU_CONSTANT, GPU_TEVOP_RGB_SRC_COLOR, lerp | (lerp << 8) | (lerp << 16));
@@ -1756,7 +1817,14 @@ static void apply_combiner(const GfxDrawState *state) {
             C3D_TexEnvFunc(env, C3D_RGB, st->rgbFunc);
             C3D_TexEnvFunc(env, C3D_Alpha, st->alphaFunc);
             if (st->konst.rgb == CONST_RAW) {
-                C3D_TexEnvColor(env, st->rawConst);
+                a = st->rawConst >> 24;
+                if (st->konst.alpha != -1) {
+                    a = const_value(state, st->konst.alpha, 3);
+                    if (st->konst.alpha == GFX_CC_ONE || st->konst.alpha == GFX_CC_PRIM_LOD_FRACTION) {
+                        a = const_value(state, st->konst.alpha, 0);
+                    }
+                }
+                C3D_TexEnvColor(env, (st->rawConst & 0xFFFFFF) | (a << 24));
             } else {
                 r = const_value(state, st->konst.rgb, 0);
                 g = const_value(state, st->konst.rgb, 1);

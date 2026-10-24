@@ -21,7 +21,7 @@
 void plat_3ds_menu_draw(const BsMenu *menu);
 void plat_3ds_set_antialias_setting(int on);
 int plat_3ds_antialias_setting(void);
-void plat_3ds_set_mipmap_setting(int on);
+void plat_3ds_set_mipmap_setting(int mode);
 int plat_3ds_mipmap_setting(void);
 void plat_3ds_set_colour_setting(int level);
 int plat_3ds_colour_setting(void);
@@ -67,6 +67,7 @@ static void open_page(const MenuPage *page) {
 enum { MAIN_AA, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_PROFILER, MAIN_PAGES };
 
 static const char *const sColourLevels[4] = { "Off", "Low", "Medium", "High" };
+static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
 
 static int main_count(void) {
     return MAIN_PAGES + sPageCount + 3;
@@ -92,7 +93,7 @@ static void main_value(int i, char *out, int size) {
     if (i == MAIN_AA) {
         snprintf(out, size, "%s", plat_3ds_antialias_setting() ? "On" : "Off");
     } else if (i == MAIN_MIPMAPS) {
-        snprintf(out, size, "%s", plat_3ds_mipmap_setting() ? "On" : "Off");
+        snprintf(out, size, "%s", sMipmapModes[plat_3ds_mipmap_setting()]);
     } else if (i == MAIN_COLOUR) {
         snprintf(out, size, "%s", sColourLevels[plat_3ds_colour_setting()]);
     } else if (i == MAIN_PROFILER) {
@@ -108,7 +109,7 @@ static const char *main_hint(int i) {
     if (i == MAIN_AA) {
         return "Smoother edges; the GPU draws 4x";
     } else if (i == MAIN_MIPMAPS) {
-        return "No shimmer on distant textures";
+        return plat_3ds_mipmap_setting() == 2 ? "Levels tinted from the next track" : "No shimmer on distant textures";
     } else if (i == MAIN_COLOUR) {
         return "Richer colours on the 3DS screen";
     } else if (i == MAIN_PROFILER) {
@@ -125,7 +126,7 @@ static void main_change(int i, int step) {
     if (i == MAIN_AA) {
         plat_3ds_set_antialias_setting(!plat_3ds_antialias_setting());
     } else if (i == MAIN_MIPMAPS) {
-        plat_3ds_set_mipmap_setting(!plat_3ds_mipmap_setting());
+        plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + 3) % 3);
     } else if (i == MAIN_COLOUR) {
         plat_3ds_set_colour_setting((plat_3ds_colour_setting() + step + 4) % 4);
     } else if (i == MAIN_PROFILER) {
