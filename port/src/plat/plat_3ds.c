@@ -20,6 +20,8 @@ extern void (*__system_retAddr)(void);
  */
 #define PRIO_HARDWARE 0x19
 #define PRIO_RCP 0x1A
+/* The sound on the system core: below the system's services there (see plat_init). */
+#define PRIO_SYSCORE_AUDIO 0x30
 #define PRIO_GAME_HIGHEST 0x1B
 #define PRIO_GAME_LOWEST 0x3F
 
@@ -72,13 +74,14 @@ void plat_init(void) {
     }
     sRcpCore = (isNew3DS && plat_getenv("DKR_SINGLE_CORE") == NULL) ? 2 : 0;
     plat_status("%s, renderer on core %d", isNew3DS ? "New 3DS" : "Old 3DS", sRcpCore);
-    // The scheduler cannot start the next frame while an audio task is running, so audio tasks must finish quickly.
-    // By default (roadmap P9) they run on the system core, which is otherwise idle for us but only gives an
-    // application a share of its time: at the default share they took several times longer, so the share is raised
-    // first (DKR_SYSCORE_LIMIT, percent). The Sound page's "Mixing core" setting can put them back next to the
-    // renderer, at a higher priority than it.
+    // The scheduler cannot start the next frame while an audio task is running, so audio tasks must finish quickly:
+    // they run next to the renderer, at a higher priority than it. The Sound page's "Mixing core" setting can move
+    // them to the system core instead (roadmap P9), which only gives an application a share of its time (at the
+    // default share they took several times longer), so the share is raised first (DKR_SYSCORE_LIMIT, percent).
+    // The system's own services, the GPU's among them, run there too: at the renderer's priority the sound held
+    // them up and frame times doubled (bug report #78), so there it runs below them (DKR_SYSCORE_PRIO).
     sAudioCore = sRcpCore;
-    if (settings_get("sound_core", 1) && plat_getenv("DKR_SINGLE_CORE") == NULL) {
+    if (settings_get("sound_core", 0) && plat_getenv("DKR_SINGLE_CORE") == NULL) {
         const char *env = plat_getenv("DKR_SYSCORE_LIMIT");
         int limit = env != NULL ? atoi(env) : 80;
         Result res = APT_SetAppCpuTimeLimit(limit);
@@ -250,6 +253,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             // run dry.
             prio = PRIO_HARDWARE;
             core = sAudioCore;
+            if (core == 1) {
+                const char *env = plat_getenv("DKR_SYSCORE_PRIO");
+                prio = env != NULL ? (int) strtol(env, NULL, 0) : PRIO_SYSCORE_AUDIO;
+            }
             stackSize = 64 * 1024;
             break;
         default:

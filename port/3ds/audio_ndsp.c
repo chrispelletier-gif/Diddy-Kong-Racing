@@ -214,7 +214,7 @@ void sound_option_value(int i, char *out, int size) {
     load_settings();
     switch (i) {
         case SOUND_CORE:
-            snprintf(out, size, "%s", settings_get("sound_core", 1) ? "System" : "Renderer");
+            snprintf(out, size, "%s", settings_get("sound_core", 0) ? "System" : "Renderer");
             break;
         case SOUND_RATE:
             snprintf(out, size, "%s", settings_get("sound_rate", 0) ? "32 kHz" : "22 kHz");
@@ -236,7 +236,7 @@ void sound_option_change(int i, int step) {
     load_settings();
     switch (i) {
         case SOUND_CORE:
-            settings_set("sound_core", !settings_get("sound_core", 1));
+            settings_set("sound_core", !settings_get("sound_core", 0));
             break;
         case SOUND_RATE:
             settings_set("sound_rate", !settings_get("sound_rate", 0));

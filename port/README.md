@@ -92,9 +92,10 @@ the game is shipped. Taps on the menu play the game's own menu sounds. Until the
 - **Test run**: start a full test, a quick test or the AA bench, or stop the one running.
 - **Controls**: button layout, remapping and circle pad deadzone, sensitivity and response (see Controls).
 - **Sound** (roadmap P9 and O5):
-  - *Mixing core*: System (default) mixes the sound on the 3DS's system core, which the game otherwise leaves idle,
-    with the application's share of it raised to 80%; Renderer mixes it next to the renderer as before. Applies
-    on the next start.
+  - *Mixing core*: Renderer (default) mixes the sound next to the renderer. System mixes it on the 3DS's system
+    core instead, with the application's share of it raised to 80% and below the system's own services there
+    (the first try, at the renderer's priority, held up the GPU's service and doubled frame times). Applies on the
+    next start.
   - *Mixer rate*: 22 kHz (the game's own) or 32 kHz, which keeps more of the high frequencies when sounds are
     pitched up, for about 45% more mixing work. Pitches and reverb lengths are scaled to sound the same. Applies on
     the next start.
@@ -205,6 +206,7 @@ controls) work there, as do these renderer switches:
 - `DKR_AUDIO_SIMD=0` (mixes the sound with the plain C loops instead of the ARM SIMD ones; the sound is the same)
 - `DKR_AUDIO_RATE=n` (runs the mixer at n Hz, whatever the Sound page says; also works on the host build)
 - `DKR_SYSCORE_LIMIT=n` (the share of the system core, in percent, asked for when the sound is mixed there; 80)
+- `DKR_SYSCORE_PRIO=n` (the sound thread's priority on the system core, 0x18 highest to 0x3F lowest; 0x30)
 
 ## Bug reports
 
