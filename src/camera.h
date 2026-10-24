@@ -17,9 +17,21 @@
 #define SCREEN_WIDTH_FLOAT_HALF ((float)SCREEN_WIDTH / 2)
 #define SCREEN_HEIGHT_FLOAT_HALF ((float)SCREEN_HEIGHT / 2)
 
+#ifdef TARGET_PORT
+// Widescreen: the port can widen the camera to the screen's shape (port/src/plat/plat.h).
+float plat_aspect_scale(void);
+float plat_camera_fov(float fovy);
+#define CAMERA_ASPECT (SCREEN_WIDTH_FLOAT / SCREEN_HEIGHT_FLOAT * plat_aspect_scale())
+#define CAMERA_FOV(fovy) plat_camera_fov(fovy)
+// The wider picture shows rock faces right beside the camera that 4:3 never reached, so widescreen cuts closer to it
+// (decals are pulled less to match, see port/3ds/gfx_c3d.c).
+#define CAMERA_NEAR (plat_aspect_scale() > 1.0f ? 2.5f : 10.0f)
+#else
 #define CAMERA_ASPECT (SCREEN_WIDTH_FLOAT / SCREEN_HEIGHT_FLOAT)
-#define CAMERA_FAR 15000.0f
+#define CAMERA_FOV(fovy) (fovy)
 #define CAMERA_NEAR 10.0f
+#endif
+#define CAMERA_FAR 15000.0f
 #define CAMERA_DEFAULT_FOV 60.0f
 #define CAMERA_MIN_FOV 0.0f
 #define CAMERA_MAX_FOV 90.0f

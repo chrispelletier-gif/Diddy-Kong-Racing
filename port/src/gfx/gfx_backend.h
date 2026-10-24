@@ -108,9 +108,29 @@ typedef struct GfxDrawState {
     unsigned char fogEnabled;       /* Blend towards fog colour using vertex alpha */
     short fogMul, fogOffset;        /* Fog factor = clamp(z / w * fogMul + fogOffset, 0, 255), for per pixel fog */
     unsigned char cullMode;         /* 0 none, 1 back faces, 2 front faces (in screen space, CCW front) */
+    unsigned char flat;             /* Drawn flat on the screen: rectangles and orthographic triangles (see gfx_flat_x) */
     GfxTexture *textures[2];
     short scissor[4];       /* x0, y0, x1, y1 (exclusive) */
 } GfxDrawState;
+
+/*
+ * Widescreen (roadmap item G3). The game's camera is widened to the shape of the screen (plat_aspect_scale), so 3D
+ * draws fill it. What is drawn flat on the screen (the HUD, text, menus: GfxDrawState.flat) keeps its 4:3 shape in
+ * the middle, except where it reaches an edge of the N64 screen: fades, backgrounds and full screen fills are
+ * stretched out to the edges of the wide one. gfx_flat_x takes a flat vertex's clip x (or a rectangle edge's, with
+ * w = 1) to clip x on the wide screen, the 4:3 picture being `narrow` of its width (0.8 for 400 pixels).
+ */
+static inline float gfx_flat_x(float x, float w, float narrow) {
+    // Within a pixel and a half of the edge: the game's scissor often ends at x = 319, and a full screen draw
+    // clipped to it must still reach the edge (the race finish backgrounds left the old picture at the right).
+    float edge = 0.99f * (w < 0.0f ? -w : w);
+    return (x >= edge || x <= -edge) ? x : x * narrow;
+}
+
+/* The same for an x in N64 screen pixels, returned in pixels of a screen `width` wide. */
+static inline float gfx_flat_px(float x, float narrow, float width) {
+    return (gfx_flat_x(x / (GFX_SCREEN_WIDTH / 2.0f) - 1.0f, 1.0f, narrow) + 1.0f) * (width / 2.0f);
+}
 
 /* Backend entry points. */
 void gfxb_init(void);
