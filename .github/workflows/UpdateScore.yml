@@ -1,8 +1,8 @@
 name: Update score
 
+# Only started by hand (Actions tab, Run workflow): the 3DS port doesn't need it on every merge.
 on:
-  push:
-    branches: [master]
+  workflow_dispatch:
 
 permissions:
   contents: write
