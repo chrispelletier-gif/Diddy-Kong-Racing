@@ -162,6 +162,23 @@ High is c + 0.5 (c - grey), Medium 0.3 and Low 0.15.
 The host build can preview both: `DKR_MIPMAP=1` and `DKR_COLOUR=1` to `3` (both off by default there, so frames stay
 comparable between commits).
 
+The Settings menu's Screen page has the top screen's modes, all on by default:
+- Widescreen fills the 400 pixel wide screen instead of a 4:3 picture in the middle. The game's camera sees more at
+  the sides; the HUD, text and menus keep their 4:3 shape and place in the middle, except what reaches the edge of the
+  N64 screen (fades, backgrounds, full screen fills), which is stretched to the edge.
+- 800 pixels shows the screen's 800x240 mode while 3D is off (not on an original 2DS). The picture is drawn 800
+  pixels wide, so it costs the GPU what anti-aliasing does; with anti-aliasing on it is the same 800x480 picture as
+  before, only halved in height, so the extra detail across reaches the screen. Azahar doesn't show this mode (it
+  shows the left half of the picture), so turn it off there.
+- Stereo 3D follows the 3D slider. Each frame's GPU commands run twice, once for each eye with the picture moved
+  across by an amount that grows with distance (the vertex shader's one addition), and the HUD sits at the depth of
+  the screen. Anti-aliasing and the 800 pixel mode are off while the slider is up. `DKR_STEREO_SEP` (how far apart
+  the eyes' pictures are for the farthest things, in thousandths of the half screen width, default 25) and
+  `DKR_STEREO_CONV` (the distance in front of the camera that stays at the screen's depth, default 130, about where
+  the kart is) in `env.txt` tune it.
+
+The host build previews widescreen with `DKR_WIDESCREEN=1` (frames are then 400 pixels wide).
+
 In Azahar you can also raise the internal resolution in the graphics settings; the port renders on the 3DS GPU, so
 that applies to it as well.
 

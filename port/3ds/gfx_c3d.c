@@ -6,6 +6,7 @@
  */
 #include <3ds.h>
 #include <citro3d.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,16 @@
 
 #define TOP_WIDTH 400
 #define TOP_HEIGHT 240
+/* The GPU queue is made longer than citro3d's 32 entries, for a 3D frame: two targets to clear and copy. */
+#define GX_QUEUE_ENTRIES 64
+
+/* The start of citro3d's context, which is not in its public header: the GPU command queue comes first. */
+typedef struct C3DContextStart {
+    gxCmdQueue_s gxQueue;
+    u32 *cmdBuf;
+    size_t cmdBufSize;
+} C3DContextStart;
+extern C3DContextStart __C3D_Context;
 /* Bytes of vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most
  * about 3000 triangles, 9000 vertices, a frame, which is 48K of the largest vertices. */
 #define VBO_BYTES (48 * 1024 * 48)
@@ -73,8 +84,11 @@ typedef struct C3DTexture {
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
-/* Render target size relative to the screen: 2 draws at twice the resolution and downsamples (anti-aliasing). */
-static int sRenderScale = 1;
+static C3D_RenderTarget *sTargetRight; // The right eye's, while the screen is in 3D (see the stereo section)
+/* Render target size relative to the screen: 2 draws at twice the resolution and downsamples (anti-aliasing).
+ * sRenderScale is the vertical one (anti-aliasing), sScaleX the horizontal one, which the 800 pixel mode also sets to
+ * 2 (see apply_screen_mode). */
+static int sRenderScale = 1, sScaleX = 1;
 static int sDefaultScale = 2;          // The setting (settings.txt, else DKR_AA).
 static volatile int sWantedScale = 2;  // plat_set_antialias, applied by the renderer between frames.
 static DVLB_s *sShaderDvlb;
@@ -102,8 +116,28 @@ static int sDrainSplits, sLastDrainSplits;
 static volatile int sMipmapSetting = 1, sColourSetting;
 static int sMipmapsUsed = 1, sMipmapsShown, sColourBoost;
 
-/* The N64 picture is 320 pixels wide; by default it is shown centred on the 400 pixel wide top screen. */
-static float sScreenScaleX = 320.0f / 400.0f;
+/*
+ * The top screen (roadmap phase 6). The N64 picture is 320 pixels wide and was shown in the middle of the 400 pixel
+ * wide screen.
+ *  - Widescreen (G3): the game's camera is widened to 5:3 (plat_aspect_scale), so 3D draws fill the screen; flat ones
+ *    (HUD, text, menus) keep their shape in the middle, see gfx_flat_x.
+ *  - 800 pixel mode (G4): the screen can show 800x240 when it isn't in 3D (except on the original 2DS). The render
+ *    target is twice as wide, which costs the GPU what anti-aliasing costs it; with anti-aliasing on the target is the
+ *    same 800x480 as before and only its height is halved, so the extra detail across reaches the screen.
+ *  - Stereo 3D (G5): see the stereo section further down.
+ * The Settings menu changes them from its thread; the renderer applies them between frames (apply_screen_mode).
+ */
+#define NARROW (320.0f / 400.0f) // The width of the 4:3 picture on the 400 pixel screen
+static volatile int sWideSetting = 1, s800Setting = 1, sStereoSetting = 1;
+static int sWide;               // This frame is drawn wide
+static float sScale3D = NARROW; // Clip x of 3D draws: NARROW, or 1 for widescreen
+static int sStereo;             // This frame is drawn twice, once for each eye
+static int s800;                // The screen shows 800 pixels across
+static int sWideUnsupported;    // An original 2DS, which can't show 800 pixels
+/* Stereo: the shader moves each vertex across by sEyeSep * (w - sEyeConv) in clip space, in opposite directions for
+ * the two eyes, so what is sEyeConv away from the camera stays at the depth of the screen. */
+static float sEyeSep, sEyeConv = 130.0f;
+static int sEyeUniform = -1; // The shader's eye uniform register, if found
 
 /*
  * The GPU reads vertices and textures from memory, not from the CPU's cache, so whatever the CPU wrote has to be
@@ -153,6 +187,7 @@ static struct {
     u8 decal;
     u8 cull;
     short scissor[4];
+    u8 scissorFlat;
 } sGpu;
 
 static void forget_gpu_state(void) {
@@ -163,7 +198,7 @@ static void forget_gpu_state(void) {
 
 /*
  * Vertices arrive in clip space for the N64 screen. To fit them to the 3DS top screen (in gfxb_draw_triangles):
- *  - x is scaled into the middle of the screen,
+ *  - x is scaled into the middle of the screen, or to fill it in widescreen,
  *  - z is remapped from [-w, w] (near to far) to [-w, 0] with depth = -z / w, so nearer is larger; the N64 has no far
  *    plane, so anything beyond it is pinned to the farthest depth instead of being clipped,
  *  - then everything is rotated a quarter turn for the 3DS screen: x' = y, y' = -x.
@@ -171,9 +206,28 @@ static void forget_gpu_state(void) {
 static inline void to_screen(const GfxVertex *v, float *pos) {
     float z = 0.5f * (v->z - v->w);
     pos[0] = v->y;
-    pos[1] = -v->x * sScreenScaleX;
+    pos[1] = -v->x * sScale3D;
     pos[2] = z < 0.0f ? z : 0.0f;
     pos[3] = v->w;
+}
+
+/* The same for a flat draw: its 4:3 shape kept on a wide screen (gfx_flat_x), and in stereo its w made sEyeConv, so
+ * that it sits at the depth of the screen (scaling the whole position leaves where it lands unchanged). */
+static inline void to_screen_flat(const GfxVertex *v, float *pos) {
+    float z = 0.5f * (v->z - v->w);
+    float f = (sStereo && v->w > 0.0f) ? sEyeConv / v->w : 1.0f;
+    pos[0] = v->y * f;
+    pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW) : v->x * NARROW) * f;
+    pos[2] = (z < 0.0f ? z : 0.0f) * f;
+    pos[3] = v->w * f;
+}
+
+static inline void place(const GfxVertex *v, float *pos, int flat) {
+    if (flat) {
+        to_screen_flat(v, pos);
+    } else {
+        to_screen(v, pos);
+    }
 }
 
 /* The attribute settings of the vertex formats. The shader's inputs are v0 position, v1 and v2 the texture
@@ -240,10 +294,11 @@ static int use_vertex_format(int fmt) {
  */
 
 // Bump when the self test, the vertex format or the shader changes, so that the test runs again once.
-#define GPU_SELF_TEST_VERSION 2
+#define GPU_SELF_TEST_VERSION 3
 static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
 static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
+static void write_eye(float mul, float add);
 
 static int sGpuTestStep;
 
@@ -298,6 +353,7 @@ static void gpu_test_step(const char *what) {
     C3D_FrameBegin(0);
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_FrameDrawOn(sTarget);
+    write_eye(0.0f, 0.0f);
 }
 
 static void gpu_test_end(const char *what) {
@@ -341,6 +397,7 @@ static void gpu_self_test(void) {
         "+ second texture coordinates",
         "+ vertex format changes",
         "game clear rectangles",
+        "+ stereo eye offset",
     };
     GfxDrawState state;
     C3D_TexEnv *env;
@@ -454,25 +511,56 @@ static void gpu_self_test(void) {
         sFrameTriangles = 0;
     }
     gpu_test_end(sNames[10]);
+
+    // 12: the shader's stereo offset (G5) moving the triangle across.
+    gpu_test_step(sNames[11]);
+    first = gpu_test_triangle(-1);
+    write_eye(0.05f, -0.05f);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 3);
+    write_eye(0.0f, 0.0f);
+    gpu_test_end(sNames[11]);
     sVfmtBound = -1;
 
     plat_status("GPU test passed");
     gpu_test_mark_passed();
 }
 
-/* The render target for the top screen. The doubled one needs 3MB of VRAM, so fall back if it does not fit. */
-static void create_target(int scale) {
+/*
+ * The render target for the top screen: twice the screen's resolution down for anti-aliasing (scale), and across for
+ * anti-aliasing or the 800 pixel mode (across). The doubled one needs 3MB of VRAM, so fall back if it does not fit.
+ */
+static void create_target(int scale, int across) {
     sTarget = NULL;
-    if (scale == 2) {
-        sTarget = C3D_RenderTargetCreate(TOP_HEIGHT * 2, TOP_WIDTH * 2, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-        sRenderScale = 2;
+    if (scale == 2 || across == 2) {
+        sTarget = C3D_RenderTargetCreate(TOP_HEIGHT * scale, TOP_WIDTH * 2, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        sRenderScale = scale;
+        sScaleX = 2;
     }
     if (sTarget == NULL) {
         sTarget = C3D_RenderTargetCreate(TOP_HEIGHT, TOP_WIDTH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
         sRenderScale = 1;
+        sScaleX = 1;
     }
-    C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT,
-                              DISPLAY_TRANSFER_FLAGS(sRenderScale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO));
+}
+
+/*
+ * How the display transfer copies the target to the screen: anti-aliased targets are halved down, and across too
+ * unless the screen shows 800 pixels. In 3D, sTarget is the left eye's and sTargetRight the right eye's.
+ */
+static u32 sTransferFlags;
+
+static void link_target(void) {
+    u32 scaling = GX_TRANSFER_SCALE_NO;
+    if (sRenderScale == 2) {
+        scaling = sScaleX == 2 && s800 ? GX_TRANSFER_SCALE_X : GX_TRANSFER_SCALE_XY;
+    }
+    sTransferFlags = DISPLAY_TRANSFER_FLAGS(scaling);
+    C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sTransferFlags);
+    if (sStereo && sTargetRight != NULL) {
+        C3D_RenderTargetSetOutput(sTargetRight, GFX_TOP, GFX_RIGHT, sTransferFlags);
+    } else {
+        C3D_RenderTargetSetOutput(NULL, GFX_TOP, GFX_RIGHT, 0);
+    }
 }
 
 /* From any thread (the AA benchmark): anti-aliasing on (1), off (0) or back to the setting (-1), from the next
@@ -507,14 +595,89 @@ int plat_antialias(void) {
     return sRenderScale == 2;
 }
 
+/* The Settings menu's screen page (phase 6, see sWideSetting): each is saved and used from the next frame. */
+void plat_3ds_set_screen_setting(int which, int on) {
+    static const char *const sKeys[3] = { "widescreen", "wide800", "stereo3d" };
+    volatile int *settings[3] = { &sWideSetting, &s800Setting, &sStereoSetting };
+    if (which >= 0 && which < 3) {
+        // Widescreen is 0 off, or its style: 1 Wide, 2 Balanced, 3 Zoomed (plat_camera_fov). The others are on or off.
+        int value = which == 0 ? (on < 0 || on > 3 ? 0 : on) : on != 0;
+        *settings[which] = value;
+        settings_set(sKeys[which], value);
+    }
+}
+
+int plat_3ds_screen_setting(int which) {
+    return which == 0 ? sWideSetting : which == 1 ? s800Setting : which == 2 ? sStereoSetting : 0;
+}
+
+/* Whether the 800 pixel mode can be shown (not on an original 2DS). */
+int plat_3ds_wide800_supported(void) {
+    return !sWideUnsupported;
+}
+
+float plat_aspect_scale(void) {
+    return sWideSetting ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
+}
+
+float plat_fov_tan_scale(void) {
+    // Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
+    static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
+    int style = sWideSetting;
+    return style >= 0 && style <= 3 ? sTanScale[style] : 1.0f;
+}
+
+float plat_camera_fov(float fovy) {
+    float scale = plat_fov_tan_scale();
+    if (scale == 1.0f) {
+        return fovy;
+    }
+    // Half the angle in radians, and the whole angle back in degrees.
+    return 2.0f * atanf(tanf(fovy * (3.14159265f / 360.0f)) * scale) * (180.0f / 3.14159265f);
+}
+
 /*
- * Renderer thread, between frames: makes a new render target if the anti-aliasing setting changed. A target can only
- * be deleted outside a frame with the GPU idle, so this waits for the GPU (an empty frame) first. The new target is
- * cleared like the very first one.
+ * The stereo depth: how far apart the eyes' pictures are, as a fraction of the screen's half width, for the farthest
+ * things with the 3D slider all the way up (DKR_STEREO_SEP, in thousandths), and the distance from the camera that
+ * stays at the screen's depth (DKR_STEREO_CONV, in the game's units: the camera follows the kart about 130 behind).
  */
-static void apply_render_scale(void) {
-    int scale = sWantedScale;
-    if (scale == sRenderScale || sTarget == NULL) {
+static float stereo_max_sep(void) {
+    static float sSep = -1.0f;
+    if (sSep < 0.0f) {
+        const char *env = plat_getenv("DKR_STEREO_SEP");
+        const char *conv = plat_getenv("DKR_STEREO_CONV");
+        sSep = (env != NULL ? atoi(env) : 25) / 1000.0f;
+        if (conv != NULL && atoi(conv) > 0) {
+            sEyeConv = (float) atoi(conv);
+        }
+        plat_log("stereo: separation %.3f, screen depth at %.0f", sSep, sEyeConv);
+    }
+    return sSep;
+}
+
+/*
+ * Renderer thread, between frames: applies the anti-aliasing and screen settings, and the 3D slider. 3D is on while
+ * the setting is and the slider is up; it turns anti-aliasing and the 800 pixel mode off, which come back with the
+ * slider down. A new render target, or a new screen mode, needs the GPU idle, so this waits for it (an empty frame)
+ * first; a new target is cleared like the very first one.
+ */
+static void apply_screen_mode(void) {
+    float slider = osGet3DSliderState();
+    int stereo = sStereoSetting && slider > 0.0f && __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
+    int wide800 = s800Setting && !stereo && !sWideUnsupported;
+    int scale = stereo ? 1 : sWantedScale;
+    int across = (scale == 2 || wide800) ? 2 : 1;
+    int newTarget;
+
+    if ((sWideSetting != 0) != sWide && sTarget != NULL) {
+        // The game only clears its 4:3 part of the screen: clear the sides of the last wide picture.
+        sFrameStarted = 0;
+    }
+    sWide = sWideSetting != 0;
+    sScale3D = sWide ? 1.0f : NARROW;
+    sEyeSep = stereo ? slider * stereo_max_sep() : 0.0f;
+    if (sTarget == NULL ||
+        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX)) {
         return;
     }
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
@@ -522,16 +685,69 @@ static void apply_render_scale(void) {
         plat_sleep_ns(250000);
     }
     C3D_FrameEnd(0);
-    C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
-    create_target(scale);
-    sFrameStarted = 0;
-    plat_log("render target now %dx (anti-aliasing %s)", sRenderScale, sRenderScale == 2 ? "on" : "off");
-    if (sRenderScale != scale) {
+    newTarget = scale != sRenderScale || across != sScaleX;
+    if (newTarget) {
+        C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
+        create_target(scale, across);
+        sFrameStarted = 0;
+        if (wide800 && sScaleX != 2) {
+            sWideUnsupported = 1; // No VRAM for the wide target: don't try again every frame.
+            wide800 = 0;
+        }
+    }
+    if (stereo && sTargetRight == NULL) {
+        // The right eye's target, the same size as the left one's (3D has anti-aliasing off).
+        sTargetRight = C3D_RenderTargetCreate(TOP_HEIGHT, TOP_WIDTH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        if (sTargetRight == NULL) {
+            plat_log("top screen: no VRAM for the right eye's target, 3D off");
+            sStereoSetting = 0;
+            stereo = 0;
+        } else {
+            sFrameStarted = 0; // Cleared like a new target.
+        }
+    } else if (!stereo && sTargetRight != NULL) {
+        C3D_RenderTargetDelete(sTargetRight);
+        sTargetRight = NULL;
+    }
+    if (stereo != sStereo || wide800 != s800) {
+        // Takes effect when the next frame is shown. libctru keeps one mode for both: 3D, 800 pixels or neither.
+        if (stereo) {
+            gfxSet3D(true);
+        } else {
+            gfxSetWide(wide800);
+        }
+    }
+    sStereo = stereo;
+    s800 = wide800;
+    link_target();
+    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s)",
+             sStereo ? "3D" : s800 ? "800 pixels" : "400 pixels", sScaleX, sRenderScale,
+             sRenderScale == 2 ? "on" : "off");
+    if (newTarget && scale == 2 && sRenderScale != 2) {
         sWantedScale = sRenderScale; // Didn't fit: don't try again every frame.
     }
 }
 
 static void alloc_frame_slots(void);
+
+/* The screen settings (see sWideSetting), and whether the console can show 800 pixels across. */
+static void read_screen_settings(void) {
+    u8 model = 0;
+    sWideSetting = settings_get("widescreen", 2);
+    sWideSetting = sWideSetting < 0 || sWideSetting > 3 ? 2 : sWideSetting;
+    s800Setting = settings_get("wide800", 1) != 0;
+    sStereoSetting = settings_get("stereo3d", 1) != 0;
+    if (R_SUCCEEDED(cfguInit())) {
+        if (R_SUCCEEDED(CFGU_GetSystemModel(&model))) {
+            sWideUnsupported = model == CFG_MODEL_2DS;
+        }
+        cfguExit();
+    }
+    sWide = sWideSetting != 0;
+    sScale3D = sWide ? 1.0f : NARROW;
+    plat_log("screen: widescreen %d, 800 pixels %d%s, 3D %d", sWideSetting, s800Setting,
+             sWideUnsupported ? " (not on a 2DS)" : "", sStereoSetting);
+}
 
 void gfxb_init(void) {
     static int sDone;
@@ -549,8 +765,18 @@ void gfxb_init(void) {
         const char *aa = plat_getenv("DKR_AA");
         sDefaultScale = settings_get("aa", aa == NULL || atoi(aa) != 0) ? 2 : 1;
         sWantedScale = sDefaultScale;
-        create_target(sDefaultScale);
-        plat_status("Graphics started%s", sRenderScale == 2 ? " (anti-aliased)" : "");
+        read_screen_settings();
+        s800 = s800Setting && !sWideUnsupported;
+        create_target(sDefaultScale, (sDefaultScale == 2 || s800) ? 2 : 1);
+        if (s800 && sScaleX != 2) {
+            sWideUnsupported = 1; // No VRAM for the wide target.
+            s800 = 0;
+        }
+        if (s800) {
+            gfxSetWide(true);
+        }
+        link_target();
+        plat_status("Graphics started%s%s", sRenderScale == 2 ? " (anti-aliased)" : "", s800 ? " (800 pixels)" : "");
     }
     sMipmapSetting = settings_get("mipmaps", 1);
     if (sMipmapSetting < 0 || sMipmapSetting > 2) {
@@ -568,6 +794,7 @@ void gfxb_init(void) {
     shaderProgramInit(&sProgram);
     shaderProgramSetVsh(&sProgram, &sShaderDvlb->DVLE[0]);
     C3D_BindProgram(&sProgram);
+    sEyeUniform = shaderInstanceGetUniformLocation(sProgram.vertexShader, "eye");
 
     init_vertex_formats();
     alloc_frame_slots();
@@ -599,7 +826,7 @@ void gfxb_capture_frame(const char *path) {
 static void capture_pending_frame(void) {
     // The framebuffer is rotated (240 wide, 400 tall, times the render scale). It is copied at full resolution; the
     // comparison tool downsamples anti-aliased captures itself.
-    const u32 w = TOP_HEIGHT * sRenderScale, h = TOP_WIDTH * sRenderScale;
+    const u32 w = TOP_HEIGHT * sRenderScale, h = TOP_WIDTH * sScaleX;
     u32 *pixels;
     FILE *file;
 
@@ -805,13 +1032,6 @@ static int sOnGpu = -1;   // The slot last handed to the GPU
 static u32 sCmdWords;
 static int sOverlap;      // This frame is built while the GPU draws the last one
 
-/* The start of citro3d's context, which is not in its public header: the GPU command queue comes first. */
-typedef struct C3DContextStart {
-    gxCmdQueue_s gxQueue;
-    u32 *cmdBuf;
-    size_t cmdBufSize;
-} C3DContextStart;
-extern C3DContextStart __C3D_Context;
 bool C3Di_SplitFrame(u32 **pBuf, u32 *pSize);
 
 static u32 cmd_position(void) {
@@ -820,6 +1040,8 @@ static u32 cmd_position(void) {
 
 /* Two frame slots, each with a vertex buffer and a command list as large as citro3d's own. */
 static void alloc_frame_slots(void) {
+    gxCmdQueue_s *queue = &__C3D_Context.gxQueue;
+    gxCmdEntry_s *entries;
     int i;
     sCmdWords = __C3D_Context.cmdBufSize;
     for (i = 0; i < 2; i++) {
@@ -837,6 +1059,13 @@ static void alloc_frame_slots(void) {
             break;
         }
     }
+    // The queue is empty and stopped this early. Without the longer one, 3D stays off (apply_screen_mode).
+    entries = malloc(GX_QUEUE_ENTRIES * sizeof(gxCmdEntry_s));
+    if (entries != NULL) {
+        free(queue->entries);
+        queue->entries = entries;
+        queue->maxEntries = GX_QUEUE_ENTRIES;
+    }
     sNumSlots = i > 0 ? i : 1; // None can't happen this early, and nothing could be drawn.
     plat_log("frame slots: %d, each %lu KB of vertices and %lu KB of commands in linear memory, %lu KB left",
              sNumSlots, (unsigned long) (VBO_BYTES / 1024),
@@ -853,6 +1082,64 @@ static void split_command_list(void) {
         slot->partWords[slot->numParts] = words;
         slot->numParts++;
     }
+}
+
+/******************************** Stereo ********************************/
+
+/*
+ * Stereo 3D (roadmap item G5), the way the SM64 3DS port does it: each eye has its own render target (sTarget for the
+ * left, sTargetRight for the right), and every draw is sent twice, once to each, with the shader's eye offset
+ * (shader.v.pica) set for that eye in between. citro3d copies both targets to their framebuffers at the end of the
+ * frame. Everything is transformed on the CPU, so both draws read the same vertices. The GPU draws everything twice:
+ * anti-aliasing and the 800 pixel mode are off while 3D is on. Flat draws (HUD, text, menus) sit at the depth of the
+ * screen (to_screen_flat).
+ */
+
+/* Writes the shader's eye offset to the command list: the vertex moves across by mul * w + add (in clip space). */
+static void write_eye(float mul, float add) {
+    C3D_FVec v;
+    if (sEyeUniform < 0) {
+        return;
+    }
+    v.x = mul;
+    v.y = add;
+    v.z = 0.0f;
+    v.w = 0.0f;
+    GPUCMD_AddWrite(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000u | (u32) sEyeUniform);
+    GPUCMD_AddWrites(GPUREG_VSH_FLOATUNIFORM_DATA, (u32 *) v.c, 4);
+}
+
+/*
+ * Points the GPU at a render target, written straight to the command list as citro3d's C3D_FrameBufBind does (both
+ * targets have the same size and formats). citro3d's C3D_SetFrameBuf only works inside one of its frames, and a frame
+ * is mostly built before citro3d's begins (while the GPU draws the last one, see wait_for_gpu), so it can't be used
+ * here: it left every draw on the left eye's target.
+ */
+static void bind_target(C3D_RenderTarget *target) {
+    const C3D_FrameBuf *fb = &target->frameBuf;
+    u32 param[3];
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    param[0] = osConvertVirtToPhys(fb->depthBuf) >> 3;
+    param[1] = osConvertVirtToPhys(fb->colorBuf) >> 3;
+    param[2] = 0x01000000 | (((u32) (fb->height - 1) & 0xFFF) << 12) | (fb->width & 0xFFF);
+    GPUCMD_AddIncrementalWrites(GPUREG_DEPTHBUFFER_LOC, param, 3);
+    GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
+}
+
+/* Draws the vertices once, or in 3D once for each eye. */
+static void draw_arrays(int vertex, int count) {
+    if (!sStereo) {
+        C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+        return;
+    }
+    // sEyeSep is positive for the left eye's offset; what is sEyeConv away stays at the depth of the screen.
+    bind_target(sTarget);
+    write_eye(sEyeSep, -sEyeSep * sEyeConv);
+    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    bind_target(sTargetRight);
+    write_eye(-sEyeSep, sEyeSep * sEyeConv);
+    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
 }
 
 static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
@@ -1083,7 +1370,7 @@ void gfxb_start_frame(void) {
     FrameSlot *slot;
     // No vblank throttling here: the emulated VI already paces the game.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
-    apply_render_scale();
+    apply_screen_mode();
     // The first frame of a render target clears it with the GPU idle, and a snapshot frame is checked once the GPU
     // has drawn it, before the next is built: those wait for the GPU first, as every frame used to.
     sOverlap = overlap_setting() && sFrameStarted < 0 && !sSnapshotPending;
@@ -1104,15 +1391,22 @@ void gfxb_start_frame(void) {
     sVfmtBound = -1; // The first draw points the GPU at this slot's buffer.
     sVfmtSwitches = 0;
     GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
+    if (!sStereo) {
+        write_eye(0.0f, 0.0f); // In 3D, each draw sets it (draw_arrays).
+    }
     // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
     // draws nothing (while a level loads) must not show up as a black flash. So only the first frame uses a memory
     // fill; after that the depth buffer is cleared by drawing. (A memory fill of the depth buffer alone never finished
     // on a real New 3DS, which hung the game after its first frame. Emulators complete it.)
     if (sFrameStarted >= 0) {
         C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+        if (sStereo) {
+            C3D_RenderTargetClear(sTargetRight, C3D_CLEAR_ALL, 0x000000FF, 0);
+        }
     }
     // What C3D_FrameDrawOn does, which needs a citro3d frame begun; the target is marked used when handed over.
     C3D_SetFrameBuf(&sTarget->frameBuf);
+    bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
     forget_gpu_state();
     sMipmapsUsed = sMipmapSetting != 0;
@@ -1186,6 +1480,7 @@ static void draw_test_pattern(void) {
         state.blend = GFX_BLEND_ALPHA;
     }
     state.textures[0] = &sTex;
+    state.flat = 1;
     state.scissor[2] = GFX_SCREEN_WIDTH;
     state.scissor[3] = GFX_SCREEN_HEIGHT;
     for (i = 0; i < 6; i++) {
@@ -1248,6 +1543,9 @@ void gfxb_end_frame(void) {
             GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
         }
         sTarget->used = true;
+        if (sStereo) {
+            sTargetRight->used = true;
+        }
         sLastFrameTriangles = sFrameTriangles;
         sLastFrameUsage = usage;
         sFrameTriangles = 0;
@@ -1809,10 +2107,11 @@ static int fog_mode(void) {
     return sMode;
 }
 
+static int sLutMul = 0x7FFFFFFF, sLutOffset; // What the fog table was made for
+static int sFogOn = -1;
+
 static void apply_fog(const GfxDrawState *state) {
     static C3D_FogLut sLut;
-    static int sLutMul = 0x7FFFFFFF, sLutOffset;
-    static int sFogOn = -1;
     int on = state->fogEnabled && fog_mode() == FOG_PIXEL;
 
     if (on && (state->fogMul != sLutMul || state->fogOffset != sLutOffset)) {
@@ -2125,11 +2424,21 @@ static int bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV)
     return changed;
 }
 
-/* Converts a scissor rectangle on the N64 screen to the rotated framebuffer. */
-static void set_scissor(const short rect[4]) {
-    float x0 = TOP_WIDTH / 2 + (rect[0] - GFX_SCREEN_WIDTH / 2) * sScreenScaleX * (400.0f / 320.0f);
-    float x1 = TOP_WIDTH / 2 + (rect[2] - GFX_SCREEN_WIDTH / 2) * sScreenScaleX * (400.0f / 320.0f);
+/* Converts a scissor rectangle on the N64 screen to the rotated framebuffer, for a flat draw or a 3D one. */
+static void set_scissor(const short rect[4], int flat) {
+    float x0, x1;
     int left, right, top, bottom;
+    if (flat && sWide) {
+        x0 = gfx_flat_px(rect[0], NARROW, TOP_WIDTH);
+        x1 = gfx_flat_px(rect[2], NARROW, TOP_WIDTH);
+    } else {
+        float scale = (flat ? NARROW : sScale3D) * ((float) TOP_WIDTH / GFX_SCREEN_WIDTH);
+        x0 = TOP_WIDTH / 2 + (rect[0] - GFX_SCREEN_WIDTH / 2) * scale;
+        x1 = TOP_WIDTH / 2 + (rect[2] - GFX_SCREEN_WIDTH / 2) * scale;
+        if (sWide && !flat && rect[2] >= GFX_SCREEN_WIDTH - 1) {
+            x1 = TOP_WIDTH; // A scissor ending at x = 319 would leave the last columns of the wide screen undrawn.
+        }
+    }
     // Framebuffer x runs along the screen's y axis (bottom to top), framebuffer y along the screen's x axis.
     left = TOP_HEIGHT - rect[3];
     right = TOP_HEIGHT - rect[1];
@@ -2149,8 +2458,7 @@ static void set_scissor(const short rect[4]) {
             return;
         }
     }
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, left * sRenderScale, top * sRenderScale, right * sRenderScale,
-                   bottom * sRenderScale);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, left * sRenderScale, top * sScaleX, right * sRenderScale, bottom * sScaleX);
 }
 
 /*
@@ -2320,7 +2628,9 @@ static void set_draw_state(const GfxDrawState *state) {
         sGpu.depthMask = depthMask;
     }
     if (!sGpu.known || state->decal != sGpu.decal) {
-        C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f : 0.0f);
+        // Widescreen's camera cuts 4 times closer (CAMERA_NEAR), which spreads depth 4 times as far: decals are pulled
+        // a quarter as much to stay as close to their surfaces.
+        C3D_DepthMap(true, -1.0f, state->decal ? (sWide ? 0.00005f : 0.0002f) : 0.0f);
         sGpu.decal = state->decal;
     }
     if (sNoCull < 0) {
@@ -2333,9 +2643,11 @@ static void set_draw_state(const GfxDrawState *state) {
         C3D_CullFace(cull);
         sGpu.cull = cull;
     }
-    if (!sGpu.known || memcmp(state->scissor, sGpu.scissor, sizeof(sGpu.scissor)) != 0) {
-        set_scissor(state->scissor);
+    if (!sGpu.known || memcmp(state->scissor, sGpu.scissor, sizeof(sGpu.scissor)) != 0 ||
+        state->flat != sGpu.scissorFlat) {
+        set_scissor(state->scissor, state->flat);
         memcpy(sGpu.scissor, state->scissor, sizeof(sGpu.scissor));
+        sGpu.scissorFlat = state->flat;
     }
 }
 
@@ -2378,12 +2690,125 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
 void C3Di_UpdateContext(void);
 
+/* Triangles reaching far off the screen, such as the "LAP 2" letters flying in from well past the right edge at each
+ * lap, are cut down to a band twice the screen's size before they reach the GPU, as the N64 does (its guard band).
+ * The 3DS's GPU can draw such triangles with stray lines of pixels, here a white line down the middle of the screen.
+ * Flat draws are cut before gfx_flat_x widens them, which moves the texture a little only on what crosses the band.
+ * DKR_GUARD_BAND=0 = old. */
+#define GUARD_BAND 2.0f
+
+static int sGuardBand = -1;
+static GfxVertex *sClipVerts;
+static int sClipCapacity;
+
+static inline int outside_band(const GfxVertex *v) {
+    float g = GUARD_BAND * v->w;
+    return v->w <= 0.0f || v->x > g || -v->x > g || v->y > g || -v->y > g;
+}
+
+static float clip_distance(const GfxVertex *v, int plane) {
+    float g = GUARD_BAND * v->w;
+    switch (plane) {
+        case 0: return g - v->x;
+        case 1: return g + v->x;
+        case 2: return g - v->y;
+        default: return g + v->y;
+    }
+}
+
+static void lerp_vertex(GfxVertex *out, const GfxVertex *a, const GfxVertex *b, float t) {
+    out->x = a->x + (b->x - a->x) * t;
+    out->y = a->y + (b->y - a->y) * t;
+    out->z = a->z + (b->z - a->z) * t;
+    out->w = a->w + (b->w - a->w) * t;
+    out->u0 = a->u0 + (b->u0 - a->u0) * t;
+    out->v0 = a->v0 + (b->v0 - a->v0) * t;
+    out->u1 = a->u1 + (b->u1 - a->u1) * t;
+    out->v1 = a->v1 + (b->v1 - a->v1) * t;
+    out->r = (unsigned char) (a->r + (b->r - a->r) * t + 0.5f);
+    out->g = (unsigned char) (a->g + (b->g - a->g) * t + 0.5f);
+    out->b = (unsigned char) (a->b + (b->b - a->b) * t + 0.5f);
+    out->a = (unsigned char) (a->a + (b->a - a->a) * t + 0.5f);
+}
+
+/* Returns the triangles with any that leave the guard band clipped to it, in a buffer of its own, or verts itself
+ * when none do. */
+static const GfxVertex *clip_to_guard_band(const GfxVertex *verts, int *numTriangles) {
+    GfxVertex poly[2][16];
+    int i, j, k, n, plane, count = *numTriangles * 3, used = 0;
+
+    if (sGuardBand < 0) {
+        const char *env = plat_getenv("DKR_GUARD_BAND");
+        sGuardBand = env == NULL || atoi(env) != 0;
+    }
+    if (!sGuardBand) {
+        return verts;
+    }
+    for (i = 0; i < count && !outside_band(&verts[i]); i++) {
+    }
+    if (i == count) {
+        return verts;
+    }
+    for (i = 0; i < count; i += 3) {
+        // A triangle clipped by four planes has at most 7 corners, so 15 vertices once split up.
+        if (used + 15 > sClipCapacity) {
+            int capacity = sClipCapacity * 2 > used + 15 + count * 3 ? sClipCapacity * 2 : used + 15 + count * 3;
+            GfxVertex *grown = (GfxVertex *) realloc(sClipVerts, capacity * sizeof(GfxVertex));
+            if (grown == NULL) {
+                break;
+            }
+            sClipVerts = grown;
+            sClipCapacity = capacity;
+        }
+        if (!outside_band(&verts[i]) && !outside_band(&verts[i + 1]) && !outside_band(&verts[i + 2])) {
+            memcpy(&sClipVerts[used], &verts[i], 3 * sizeof(GfxVertex));
+            used += 3;
+            continue;
+        }
+        memcpy(poly[0], &verts[i], 3 * sizeof(GfxVertex));
+        n = 3;
+        for (plane = 0; plane < 4 && n >= 3; plane++) {
+            const GfxVertex *in = poly[plane & 1];
+            GfxVertex *out = poly[(plane & 1) ^ 1];
+            int m = 0;
+            for (j = 0; j < n; j++) {
+                const GfxVertex *a = &in[j], *b = &in[(j + 1) % n];
+                float da = clip_distance(a, plane), db = clip_distance(b, plane);
+                if (da >= 0.0f) {
+                    out[m++] = *a;
+                }
+                if ((da >= 0.0f) != (db >= 0.0f)) {
+                    lerp_vertex(&out[m++], a, b, da / (da - db));
+                }
+            }
+            n = m;
+        }
+        // After four planes the polygon is back in poly[0]. Anything left with w <= 0 is behind the camera.
+        for (k = 1; k + 1 < n; k++) {
+            if (poly[0][0].w <= 0.0f || poly[0][k].w <= 0.0f || poly[0][k + 1].w <= 0.0f) {
+                continue;
+            }
+            sClipVerts[used++] = poly[0][0];
+            sClipVerts[used++] = poly[0][k];
+            sClipVerts[used++] = poly[0][k + 1];
+        }
+    }
+    *numTriangles = used / 3;
+    return sClipVerts;
+}
+
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
     HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
-    int i, first, vertex, count = numTriangles * 3;
+    int i, first, vertex, count, fmt, flat = state->flat;
+
+    verts = clip_to_guard_band(verts, &numTriangles);
+    if (numTriangles == 0) {
+        return;
+    }
+    count = numTriangles * 3;
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
-    int fmt = sVfmtOld ? VFMT_OLD : state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
+    fmt = sVfmtOld ? VFMT_OLD : state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
 
     if (sVboUsed + 15 + count * sVfmtStride[fmt] > VBO_BYTES || gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         // Out of room in the frame's vertex buffer or command list (a full command list stops the program, and
@@ -2440,7 +2865,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         C3DVertex *out = (C3DVertex *) (sVbo + sVboUsed);
         for (i = 0; i < count; i++) {
             const GfxVertex *v = &verts[i];
-            to_screen(v, out[i].pos);
+            place(v, out[i].pos, flat);
             out[i].tc0[0] = v->u0 * su0;
             out[i].tc0[1] = 1.0f - v->v0 * sv0;
             memcpy(out[i].color, &v->r, 4);
@@ -2449,7 +2874,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         C3DVertex2 *out = (C3DVertex2 *) (sVbo + sVboUsed);
         for (i = 0; i < count; i++) {
             const GfxVertex *v = &verts[i];
-            to_screen(v, out[i].pos);
+            place(v, out[i].pos, flat);
             out[i].tc0[0] = v->u0 * su0;
             out[i].tc0[1] = 1.0f - v->v0 * sv0;
             memcpy(out[i].color, &v->r, 4);
@@ -2460,7 +2885,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         C3DVertexOld *out = (C3DVertexOld *) (sVbo + sVboUsed);
         for (i = 0; i < count; i++) {
             const GfxVertex *v = &verts[i];
-            to_screen(v, out[i].pos);
+            place(v, out[i].pos, flat);
             out[i].tc0[0] = v->u0 * su0;
             out[i].tc0[1] = 1.0f - v->v0 * sv0;
             out[i].tc1[0] = v->u1 * su1;
@@ -2471,7 +2896,7 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
             out[i].color[3] = v->a;
         }
     }
-    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    draw_arrays(vertex, count);
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
     }
@@ -2498,6 +2923,7 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
     state.scissor[1] = rect[1];
     state.scissor[2] = rect[2];
     state.scissor[3] = rect[3];
+    state.flat = 1;
     for (i = 0; i < 6; i++) {
         memset(&v[i], 0, sizeof(v[i]));
         v[i].x = xs[i];

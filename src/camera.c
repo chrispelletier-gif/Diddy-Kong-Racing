@@ -154,7 +154,7 @@ void cam_init(void) {
     }
 #endif
 
-    guPerspectiveF(gPerspectiveMatrixF, &perspNorm, CAMERA_DEFAULT_FOV, CAMERA_ASPECT, CAMERA_NEAR, CAMERA_FAR,
+    guPerspectiveF(gPerspectiveMatrixF, &perspNorm, CAMERA_FOV(CAMERA_DEFAULT_FOV), CAMERA_ASPECT, CAMERA_NEAR, CAMERA_FAR,
                    CAMERA_SCALE);
     mtxf_to_mtx(&gPerspectiveMatrixF, &gPerspectiveMatrix);
     gCurCamFOV = CAMERA_DEFAULT_FOV;
@@ -206,7 +206,7 @@ UNUSED f32 cam_get_fov(void) {
 void cam_set_fov(f32 camFieldOfView) {
     if (CAMERA_MIN_FOV < camFieldOfView && camFieldOfView < CAMERA_MAX_FOV && camFieldOfView != gCurCamFOV) {
         gCurCamFOV = camFieldOfView;
-        guPerspectiveF(gPerspectiveMatrixF, &perspNorm, camFieldOfView, CAMERA_ASPECT, CAMERA_NEAR, CAMERA_FAR,
+        guPerspectiveF(gPerspectiveMatrixF, &perspNorm, CAMERA_FOV(camFieldOfView), CAMERA_ASPECT, CAMERA_NEAR, CAMERA_FAR,
                        CAMERA_SCALE);
         mtxf_to_mtx(&gPerspectiveMatrixF, &gPerspectiveMatrix);
     }
@@ -216,7 +216,7 @@ void cam_set_fov(f32 camFieldOfView) {
  * Unused function that recalculates the perspective matrix.
  */
 UNUSED void cam_reset_fov(void) {
-    guPerspectiveF(gPerspectiveMatrixF, &perspNorm, CAMERA_DEFAULT_FOV, CAMERA_ASPECT, CAMERA_NEAR, CAMERA_FAR,
+    guPerspectiveF(gPerspectiveMatrixF, &perspNorm, CAMERA_FOV(CAMERA_DEFAULT_FOV), CAMERA_ASPECT, CAMERA_NEAR, CAMERA_FAR,
                    CAMERA_SCALE);
     mtxf_to_mtx(&gPerspectiveMatrixF, &gPerspectiveMatrix);
 }
@@ -873,9 +873,32 @@ void viewport_scissor(Gfx **dList) {
     }
 }
 
+#ifdef TARGET_PORT
+/**
+ * Widescreen in the port: rebuilds the perspective matrix when the camera's aspect ratio or field of view setting
+ * changes.
+ */
+static void cam_port_update_aspect(void) {
+    static f32 sAspect = 1.0f, sFov = -1.0f;
+    f32 aspect = plat_aspect_scale();
+    f32 fov = CAMERA_FOV(gCurCamFOV);
+    if (aspect != sAspect || fov != sFov) {
+        sAspect = aspect;
+        sFov = fov;
+        guPerspectiveF(gPerspectiveMatrixF, &perspNorm, fov, CAMERA_ASPECT, CAMERA_NEAR, CAMERA_FAR,
+                       CAMERA_SCALE);
+        mtxf_to_mtx(&gPerspectiveMatrixF, &gPerspectiveMatrix);
+    }
+}
+#endif
+
 // Official Name: camGetPlayerProjMtx / camSetProjMtx - ??
 void func_80067D3C(Gfx **dList, UNUSED Mtx **mtx) {
     s32 originalCamID;
+
+#ifdef TARGET_PORT
+    cam_port_update_aspect();
+#endif
 
     gSPPerspNormalize((*dList)++, perspNorm);
 

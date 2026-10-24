@@ -33,8 +33,12 @@
 // DKR_AUTORUN: while the AI drives the player's kart, it handles like a kart that has crossed the finish line (which
 // the AI also drives), since the AI's steering is tuned for that handling.
 #define AI_DRIVEN(racer) ((racer)->raceFinished || port_autorun_drives())
+// A zipper boosts a computer kart at once whatever its heading; the AI-driven player's kart too (it stalled on Whale
+// Bay's water zippers in quick tests).
+#define ZIPPER_BOOSTS_AT_ONCE(racer) ((racer)->playerIndex == PLAYER_COMPUTER || port_autorun_drives())
 #else
 #define AI_DRIVEN(racer) ((racer)->raceFinished)
+#define ZIPPER_BOOSTS_AT_ONCE(racer) ((racer)->playerIndex == PLAYER_COMPUTER)
 #endif
 #include "textures_sprites.h"
 #include "thread3_main.h"
@@ -1705,7 +1709,7 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
             var_v1 += 0xFFFF;
         }
         racer->steerVisualRotation += (var_v1 * updateRate) >> 3;
-        if ((var_v1 < 0x400 && var_v1 > -0x400) || (racer->playerIndex == PLAYER_COMPUTER)) {
+        if ((var_v1 < 0x400 && var_v1 > -0x400) || ZIPPER_BOOSTS_AT_ONCE(racer)) {
             if (racer->playerIndex != PLAYER_COMPUTER) {
                 sound_play_spatial(SOUND_ZIP_PAD_BOOST, obj->trans.x_position, obj->trans.y_position,
                                    obj->trans.z_position, NULL);
@@ -2886,7 +2890,7 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         }
         racer->steerVisualRotation += (steerVisualRotationOffset * updateRate) >> 3;
         if (((steerVisualRotationOffset < 0x400) && (steerVisualRotationOffset > -0x400)) ||
-            (racer->playerIndex == PLAYER_COMPUTER)) {
+            ZIPPER_BOOSTS_AT_ONCE(racer)) {
             if (racer->playerIndex != PLAYER_COMPUTER) {
                 sound_play_spatial(SOUND_ZIP_PAD_BOOST, obj->trans.x_position, obj->trans.y_position,
                                    obj->trans.z_position, NULL);
