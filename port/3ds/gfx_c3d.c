@@ -2688,12 +2688,125 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
 void C3Di_UpdateContext(void);
 
+/* Triangles reaching far off the screen, such as the finish line arch passing over the camera, are cut down to a band
+ * twice the screen's size before they reach the GPU, as the N64 does (its guard band). The 3DS's GPU draws such
+ * triangles with stray lines of pixels, here a white line down the middle of the screen. DKR_GUARD_BAND=0 = old. */
+#define GUARD_BAND 2.0f
+
+static int sGuardBand = -1;
+static GfxVertex *sClipVerts;
+static int sClipCapacity;
+
+static inline int outside_band(const GfxVertex *v) {
+    float g = GUARD_BAND * v->w;
+    return v->w <= 0.0f || v->x > g || -v->x > g || v->y > g || -v->y > g;
+}
+
+static float clip_distance(const GfxVertex *v, int plane) {
+    float g = GUARD_BAND * v->w;
+    switch (plane) {
+        case 0: return g - v->x;
+        case 1: return g + v->x;
+        case 2: return g - v->y;
+        default: return g + v->y;
+    }
+}
+
+static void lerp_vertex(GfxVertex *out, const GfxVertex *a, const GfxVertex *b, float t) {
+    out->x = a->x + (b->x - a->x) * t;
+    out->y = a->y + (b->y - a->y) * t;
+    out->z = a->z + (b->z - a->z) * t;
+    out->w = a->w + (b->w - a->w) * t;
+    out->u0 = a->u0 + (b->u0 - a->u0) * t;
+    out->v0 = a->v0 + (b->v0 - a->v0) * t;
+    out->u1 = a->u1 + (b->u1 - a->u1) * t;
+    out->v1 = a->v1 + (b->v1 - a->v1) * t;
+    out->r = (unsigned char) (a->r + (b->r - a->r) * t + 0.5f);
+    out->g = (unsigned char) (a->g + (b->g - a->g) * t + 0.5f);
+    out->b = (unsigned char) (a->b + (b->b - a->b) * t + 0.5f);
+    out->a = (unsigned char) (a->a + (b->a - a->a) * t + 0.5f);
+}
+
+/* Returns the triangles with any that leave the guard band clipped to it, in a buffer of its own, or verts itself
+ * when none do. */
+static const GfxVertex *clip_to_guard_band(const GfxVertex *verts, int *numTriangles) {
+    GfxVertex poly[2][16];
+    int i, j, k, n, plane, count = *numTriangles * 3, used = 0;
+
+    if (sGuardBand < 0) {
+        const char *env = plat_getenv("DKR_GUARD_BAND");
+        sGuardBand = env == NULL || atoi(env) != 0;
+    }
+    if (!sGuardBand) {
+        return verts;
+    }
+    for (i = 0; i < count && !outside_band(&verts[i]); i++) {
+    }
+    if (i == count) {
+        return verts;
+    }
+    for (i = 0; i < count; i += 3) {
+        // A triangle clipped by four planes has at most 7 corners, so 15 vertices once split up.
+        if (used + 15 > sClipCapacity) {
+            int capacity = sClipCapacity * 2 > used + 15 + count * 3 ? sClipCapacity * 2 : used + 15 + count * 3;
+            GfxVertex *grown = (GfxVertex *) realloc(sClipVerts, capacity * sizeof(GfxVertex));
+            if (grown == NULL) {
+                break;
+            }
+            sClipVerts = grown;
+            sClipCapacity = capacity;
+        }
+        if (!outside_band(&verts[i]) && !outside_band(&verts[i + 1]) && !outside_band(&verts[i + 2])) {
+            memcpy(&sClipVerts[used], &verts[i], 3 * sizeof(GfxVertex));
+            used += 3;
+            continue;
+        }
+        memcpy(poly[0], &verts[i], 3 * sizeof(GfxVertex));
+        n = 3;
+        for (plane = 0; plane < 4 && n >= 3; plane++) {
+            const GfxVertex *in = poly[plane & 1];
+            GfxVertex *out = poly[(plane & 1) ^ 1];
+            int m = 0;
+            for (j = 0; j < n; j++) {
+                const GfxVertex *a = &in[j], *b = &in[(j + 1) % n];
+                float da = clip_distance(a, plane), db = clip_distance(b, plane);
+                if (da >= 0.0f) {
+                    out[m++] = *a;
+                }
+                if ((da >= 0.0f) != (db >= 0.0f)) {
+                    lerp_vertex(&out[m++], a, b, da / (da - db));
+                }
+            }
+            n = m;
+        }
+        // After four planes the polygon is back in poly[0]. Anything left with w <= 0 is behind the camera.
+        for (k = 1; k + 1 < n; k++) {
+            if (poly[0][0].w <= 0.0f || poly[0][k].w <= 0.0f || poly[0][k + 1].w <= 0.0f) {
+                continue;
+            }
+            sClipVerts[used++] = poly[0][0];
+            sClipVerts[used++] = poly[0][k];
+            sClipVerts[used++] = poly[0][k + 1];
+        }
+    }
+    *numTriangles = used / 3;
+    return sClipVerts;
+}
+
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
     HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
-    int i, first, vertex, count = numTriangles * 3, flat = state->flat;
+    int i, first, vertex, count, fmt, flat = state->flat;
+
+    if (!flat) {
+        verts = clip_to_guard_band(verts, &numTriangles);
+        if (numTriangles == 0) {
+            return;
+        }
+    }
+    count = numTriangles * 3;
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
-    int fmt = sVfmtOld ? VFMT_OLD : state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
+    fmt = sVfmtOld ? VFMT_OLD : state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
 
     if (sVboUsed + 15 + count * sVfmtStride[fmt] > VBO_BYTES || gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         // Out of room in the frame's vertex buffer or command list (a full command list stops the program, and
