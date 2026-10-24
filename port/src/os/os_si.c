@@ -108,8 +108,10 @@ s32 osContStartReadData(OSMesgQueue *mq) {
 
 void osContGetReadData(OSContPad *data) {
     s32 i;
+    // The look-back button isn't an N64 button: the camera reads it (port_camera.c), the game never sees it.
+    port_set_look_back_held((sControllers[0].buttons & PORT_BUTTON_LOOK_BACK) != 0);
     for (i = 0; i < MAXCONTROLLERS; i++) {
-        data[i].button = sControllers[i].buttons;
+        data[i].button = sControllers[i].buttons & ~PORT_BUTTON_LOOK_BACK;
         data[i].stick_x = sControllers[i].stickX;
         data[i].stick_y = sControllers[i].stickY;
         data[i].errno = sControllers[i].connected ? 0 : CONT_NO_RESPONSE_ERROR;

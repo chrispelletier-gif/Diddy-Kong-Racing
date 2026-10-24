@@ -18,6 +18,12 @@ void plat_3ds_console_line(const char *text);
 void plat_3ds_console_clear(void);
 void update_3ds_start(const char *selfPath);
 int port_autorun_enabled(void);
+/* The Camera page (port_camera.c). */
+int camera_option_count(void);
+const char *camera_option_label(int i);
+void camera_option_value(int i, char *out, int size);
+void camera_option_change(int i, int step);
+int port_modern_camera(void);
 
 static volatile int sQuitRequested;
 
@@ -119,6 +125,8 @@ int main(int argc, char **argv) {
     controls_init();
     menu_3ds_add_page("Controls", controls_option_count, controls_option_label, controls_option_value,
                       controls_option_change);
+    port_modern_camera();
+    menu_3ds_add_page("Camera", camera_option_count, camera_option_label, camera_option_value, camera_option_change);
     bugreport_start();
     // The Homebrew Launcher passes the path of the .3dsx as argv[0].
     update_3ds_start(argc > 0 ? argv[0] : NULL);

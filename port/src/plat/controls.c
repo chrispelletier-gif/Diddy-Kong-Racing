@@ -1,7 +1,7 @@
 /*
  * Player controls: button mapping and stick response (see controls.h).
  *
- * controls.txt holds one "name=value" line per setting, for example "deadzone=6" or "map.ZL=Z"; unknown lines and
+ * controls.txt holds one "name=value" line per setting, for example "deadzone=6" or "map.ZL=LOOK"; unknown lines and
  * values are ignored, so an old or hand-edited file still loads.
  */
 #include <math.h>
@@ -13,6 +13,8 @@
 #include "plat/plat.h"
 
 #define CONTROLS_FILE "controls.txt"
+/* 2: ZL looks back in the standard layouts (it was Z, as L). A file from before has no version line. */
+#define CONTROLS_VERSION 2
 
 /* An N64 stick reaches about +-80; with the full range at 100% the raw stick's edge gives this much, as before. */
 #define STICK_MAX 80
@@ -37,10 +39,18 @@ typedef struct Action {
 } Action;
 
 static const Action sActions[] = {
-    { CTRL_N64_A, "A", "Accelerate" },    { CTRL_N64_B, "B", "Brake" },    { CTRL_N64_Z, "Z", "Use item" },
-    { CTRL_N64_R, "R", "Hop, drift" },    { CTRL_N64_L, "L", "N64 L" },    { CTRL_N64_CU, "CU", "C-Up" },
-    { CTRL_N64_CD, "CD", "C-Down" },      { CTRL_N64_CL, "CL", "C-Left" }, { CTRL_N64_CR, "CR", "C-Right" },
-    { CTRL_N64_START, "START", "Start" }, { 0, "NONE", "Nothing" },
+    { CTRL_N64_A, "A", "Accelerate" },
+    { CTRL_N64_B, "B", "Brake" },
+    { CTRL_N64_Z, "Z", "Use item" },
+    { CTRL_N64_R, "R", "Hop, drift" },
+    { CTRL_N64_L, "L", "N64 L" },
+    { CTRL_N64_CU, "CU", "C-Up" },
+    { CTRL_N64_CD, "CD", "C-Down" },
+    { CTRL_N64_CL, "CL", "C-Left" },
+    { CTRL_N64_CR, "CR", "C-Right" },
+    { CTRL_N64_START, "START", "Start" },
+    { CTRL_N64_LOOK_BACK, "LOOK", "Look back" },
+    { 0, "NONE", "Nothing" },
 };
 #define ACTION_COUNT ((int) (sizeof(sActions) / sizeof(sActions[0])))
 
@@ -54,13 +64,13 @@ typedef struct Layout {
 
 static const Layout sLayouts[] = {
     { "Standard",
-      { CTRL_N64_A, CTRL_N64_B, CTRL_N64_CU, CTRL_N64_CL, CTRL_N64_Z, CTRL_N64_R, CTRL_N64_Z, CTRL_N64_R,
+      { CTRL_N64_A, CTRL_N64_B, CTRL_N64_CU, CTRL_N64_CL, CTRL_N64_Z, CTRL_N64_R, CTRL_N64_LOOK_BACK, CTRL_N64_R,
         CTRL_N64_L } },
     { "A/B swapped",
-      { CTRL_N64_B, CTRL_N64_A, CTRL_N64_CU, CTRL_N64_CL, CTRL_N64_Z, CTRL_N64_R, CTRL_N64_Z, CTRL_N64_R,
+      { CTRL_N64_B, CTRL_N64_A, CTRL_N64_CU, CTRL_N64_CL, CTRL_N64_Z, CTRL_N64_R, CTRL_N64_LOOK_BACK, CTRL_N64_R,
         CTRL_N64_L } },
     { "L/R swapped",
-      { CTRL_N64_A, CTRL_N64_B, CTRL_N64_CU, CTRL_N64_CL, CTRL_N64_R, CTRL_N64_Z, CTRL_N64_R, CTRL_N64_Z,
+      { CTRL_N64_A, CTRL_N64_B, CTRL_N64_CU, CTRL_N64_CL, CTRL_N64_R, CTRL_N64_Z, CTRL_N64_LOOK_BACK, CTRL_N64_Z,
         CTRL_N64_L } },
 };
 #define LAYOUT_COUNT ((int) (sizeof(sLayouts) / sizeof(sLayouts[0])))
@@ -73,6 +83,7 @@ static struct {
 } sSettings;
 
 static int sLoaded;
+static int sFileVersion; // Of the controls.txt loaded; 0 for one from before versions.
 static int sLastRaw[2];
 static int sLastOut[2];
 
@@ -138,7 +149,9 @@ static void parse_line(const char *line) {
     if (sscanf(line, " %23[^= ] = %23s", name, value) != 2) {
         return;
     }
-    if (strcmp(name, "deadzone") == 0) {
+    if (strcmp(name, "version") == 0) {
+        sFileVersion = atoi(value);
+    } else if (strcmp(name, "deadzone") == 0) {
         sSettings.deadzone = clamp(atoi(value), 0, DEADZONE_MAX);
     } else if (strcmp(name, "sensitivity") == 0) {
         sSettings.sensitivity = clamp(atoi(value), SENSITIVITY_MIN, SENSITIVITY_MAX);
@@ -163,8 +176,8 @@ static void save(void) {
     char text[512];
     int length, i;
 
-    length = plat_snprintf(text, sizeof(text), "deadzone=%d\nsensitivity=%d\ncurve=%d\n", sSettings.deadzone,
-                           sSettings.sensitivity, sSettings.curve);
+    length = plat_snprintf(text, sizeof(text), "version=%d\ndeadzone=%d\nsensitivity=%d\ncurve=%d\n", CONTROLS_VERSION,
+                           sSettings.deadzone, sSettings.sensitivity, sSettings.curve);
     for (i = 0; i < CTRL_KEY_COUNT && length < (int) sizeof(text); i++) {
         length += plat_snprintf(text + length, sizeof(text) - length, "map.%s=%s\n", sKeyNames[i],
                                 sActions[action_index(sSettings.map[i])].name);
@@ -199,6 +212,10 @@ void controls_init(void) {
         }
         parse_line(line);
         line = next;
+    }
+    if (sFileVersion < 2 && sSettings.map[CTRL_KEY_ZL] == CTRL_N64_Z) {
+        // Saved before ZL looked back, when it only did what L does: it looks back now, as in a new layout.
+        sSettings.map[CTRL_KEY_ZL] = CTRL_N64_LOOK_BACK;
     }
     sLoaded = 1;
     plat_log("controls: deadzone %d%%, sensitivity %d%%, %s, layout %s", sSettings.deadzone, sSettings.sensitivity,

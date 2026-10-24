@@ -33,6 +33,11 @@
 // DKR_AUTORUN: while the AI drives the player's kart, it handles like a kart that has crossed the finish line (which
 // the AI also drives), since the AI's steering is tuned for that handling.
 #define AI_DRIVEN(racer) ((racer)->raceFinished || port_autorun_drives())
+// The Modern chase camera (Settings > Camera, port_camera.c): how quickly the boom follows its target length. It
+// reaches out quicker than the N64's, but closes in slower, so a wall hit or a sudden stop doesn't yank it forward.
+#define MODERN_BOOM_RATE(target, current) ((target) > (current) ? 0.25f : 0.0625f)
+// Modern: a boost pulls the camera back a little, instead of swooping in close and then far out.
+#define MODERN_BOOST_DISTANCE 25.0f
 #else
 #define AI_DRIVEN(racer) ((racer)->raceFinished)
 #endif
@@ -2363,6 +2368,15 @@ void update_camera_hovercraft(f32 updateRate, Object *obj, Object_Racer *racer) 
     f32 brakeVar;
     f32 baseSpeed;
     s32 sp24 = 0x400;
+#ifdef TARGET_PORT
+    // The hovercraft's camera yaw is also part of its handling, so Modern only places the camera halfway between it
+    // and the craft's heading, and puts it back at the end.
+    s16 physicsYaw = racer->cameraYaw;
+    if (port_modern_camera() && gDialogueCameraAngle == 0) {
+        s16 lag = (s16) (0x8000 - racer->steerVisualRotation - racer->cameraYaw);
+        racer->cameraYaw += lag / 2;
+    }
+#endif
     s32 tempUpdateRate;
     s32 angle;
     s32 segmentIndex;
@@ -2430,6 +2444,13 @@ void update_camera_hovercraft(f32 updateRate, Object *obj, Object_Racer *racer) 
     }
     phi_f14 += baseSpeed * 30.0f;
     if (gRaceStartTimer == 0) {
+#ifdef TARGET_PORT
+        if (port_modern_camera()) {
+            if (racer->boostTimer > 0) {
+                phi_f14 += MODERN_BOOST_DISTANCE;
+            }
+        } else
+#endif
         if (normalise_time(36) < racer->boostTimer) {
             phi_f14 = -30.0f;
         } else if (racer->boostTimer > 0) {
@@ -2440,6 +2461,12 @@ void update_camera_hovercraft(f32 updateRate, Object *obj, Object_Racer *racer) 
         gCameraObject->boomLength = phi_f14;
         gCameraObject->cam_unk_20 = phi_f18;
     }
+#ifdef TARGET_PORT
+    if (port_modern_camera()) {
+        gCameraObject->boomLength +=
+            (phi_f14 - gCameraObject->boomLength) * MODERN_BOOM_RATE(phi_f14, gCameraObject->boomLength);
+    } else
+#endif
     gCameraObject->boomLength += (phi_f14 - gCameraObject->boomLength) * 0.125; //!@Delta
     gCameraObject->cam_unk_20 += (phi_f18 - gCameraObject->cam_unk_20) * 0.125; //!@Delta
     sp34 = sins_f(gCameraObject->trans.rotation.x_rotation - sp24);
@@ -2481,6 +2508,9 @@ void update_camera_hovercraft(f32 updateRate, Object *obj, Object_Racer *racer) 
     if (segmentIndex != SEGMENT_NONE) {
         gCameraObject->cameraSegmentID = segmentIndex;
     }
+#ifdef TARGET_PORT
+    racer->cameraYaw = physicsYaw;
+#endif
 }
 
 /**
@@ -3529,6 +3559,18 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
         if (angleVel < -0x200) {
             angleVel = -0x200;
         }
+#ifdef TARGET_PORT
+        if (port_modern_camera()) {
+            // Modern: turns with the plane about twice as quickly.
+            angleVel = angle * racer->camera_zoom * 1.75f;
+            if (angleVel > 0x400) {
+                angleVel = 0x400;
+            }
+            if (angleVel < -0x400) {
+                angleVel = -0x400;
+            }
+        }
+#endif
         angleVel *= delta;
         if (angle < 0 && angleVel < angle) {
             angleVel = angle;
@@ -3593,6 +3635,13 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
         baseFloat2 -= var_f16;
     }
     if (!gRaceStartTimer) {
+#ifdef TARGET_PORT
+        if (port_modern_camera()) {
+            if (racer->boostTimer > 0) {
+                baseFloat2 += MODERN_BOOST_DISTANCE;
+            }
+        } else
+#endif
         if (normalise_time(36) < racer->boostTimer) {
             baseFloat2 = -30.0f;
         } else if (racer->boostTimer > 0) {
@@ -3603,6 +3652,12 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
         gCameraObject->boomLength = baseFloat2;
         gCameraObject->cam_unk_20 = baseFloat1;
     }
+#ifdef TARGET_PORT
+    if (port_modern_camera()) {
+        gCameraObject->boomLength +=
+            (baseFloat2 - gCameraObject->boomLength) * MODERN_BOOM_RATE(baseFloat2, gCameraObject->boomLength);
+    } else
+#endif
     gCameraObject->boomLength += (baseFloat2 - gCameraObject->boomLength) * 0.125;
     gCameraObject->cam_unk_20 += (baseFloat1 - gCameraObject->cam_unk_20) * 0.125;
     var_f14 = sins_f(gCameraObject->trans.rotation.x_rotation - 0x400);
@@ -3637,7 +3692,12 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
     var_f16 = (-coss_f(racer->cameraYaw + 0x4000) * 3.0f * racer->lateral_velocity);
     gCameraObject->trans.z_position = zOffset + obj->trans.z_position + var_f16;
     gCameraObject->trans.rotation.y_rotation = racer->cameraYaw;
+#ifdef TARGET_PORT
+    // Modern: the camera levels out instead of rolling into turns.
+    if (racer->trickType || gDialogueCameraAngle || port_modern_camera()) {
+#else
     if (racer->trickType || gDialogueCameraAngle) {
+#endif
         angleVel = -(u16) gCameraObject->trans.rotation.z_rotation;
         if (angleVel > 0x8000) {
             angleVel -= 0xFFFF;
@@ -6730,6 +6790,12 @@ void update_racer_collision(Object *racerObj, Object_Racer *racer, s32 updateRat
                 racer->unk1F3 |= 8;
                 if (gCurrentPlayerIndex != PLAYER_COMPUTER) {
                     gCameraObject->shakeMagnitude = 3.0f;
+#ifdef TARGET_PORT
+                    if (port_modern_camera()) {
+                        // Modern: a calmer shake when hitting a wall.
+                        gCameraObject->shakeMagnitude = 1.5f;
+                    }
+#endif
                 }
                 racer->unk1D2 = 7;
                 if (racer->playerIndex != PLAYER_COMPUTER) {
@@ -7686,6 +7752,26 @@ void handle_base_steering(Object_Racer *racer, UNUSED s32 updateRate, f32 update
  * Decides which behaviour to use, then branches off to that function.
  * Afterwards, writes position data to the current camera object.
  */
+#ifdef TARGET_PORT
+/**
+ * The look-back button (port_camera.c): turns the chase camera round the kart, so it looks back from in front at the
+ * same distance, height and tilt. Each chase camera sets its position from the kart again every frame, and its
+ * height and tilt from what they were, which this keeps; the racer's own camera yaw, which the hovercraft's handling
+ * uses, isn't touched.
+ */
+static void look_back(Object *obj) {
+    s32 segmentIndex;
+    gCameraObject->trans.x_position = obj->trans.x_position * 2 - gCameraObject->trans.x_position;
+    gCameraObject->trans.z_position = obj->trans.z_position * 2 - gCameraObject->trans.z_position;
+    gCameraObject->trans.rotation.y_rotation += 0x8000;
+    segmentIndex = get_level_segment_index_from_position(
+        gCameraObject->trans.x_position, gCameraObject->trans.y_position, gCameraObject->trans.z_position);
+    if (segmentIndex != SEGMENT_NONE) {
+        gCameraObject->cameraSegmentID = segmentIndex;
+    }
+}
+#endif
+
 void update_player_camera(Object *obj, Object_Racer *racer, f32 updateRateF) {
     f32 dialogueAngle;
     s32 tempUpdateRateF;
@@ -7752,6 +7838,13 @@ void update_player_camera(Object *obj, Object_Racer *racer, f32 updateRateF) {
             update_camera_finish_race(updateRateF, obj, racer);
             break;
     }
+#ifdef TARGET_PORT
+    if (port_look_back_held() && racer->playerIndex == PLAYER_ONE && gDialogueCameraAngle == 0 &&
+        (gCameraObject->mode == CAMERA_CAR || gCameraObject->mode == CAMERA_HOVERCRAFT ||
+         gCameraObject->mode == CAMERA_PLANE)) {
+        look_back(obj);
+    }
+#endif
 
     dialogueAngle = gDialogueCameraAngle / 10240.0f; // Goes between 0-1
     gCameraObject->x_velocity =
@@ -7920,6 +8013,12 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
         if (angle < -0x8000) {
             angle += 0xFFFF;
         }
+#ifdef TARGET_PORT
+        if (port_modern_camera()) {
+            // Modern: tilts with slopes twice as quickly.
+            gCameraObject->trans.rotation.x_rotation += (angle * delta) >> 3;
+        } else
+#endif
         gCameraObject->trans.rotation.x_rotation += (angle * delta) >> 4;
     }
     if (racer->velocity < 0.0) {
@@ -7939,6 +8038,13 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
         baseDistance += lateralOffset * 30.0f;
     }
     if (gRaceStartTimer == 0) {
+#ifdef TARGET_PORT
+        if (port_modern_camera()) {
+            if (racer->boostTimer > 0) {
+                baseDistance += MODERN_BOOST_DISTANCE;
+            }
+        } else
+#endif
         if (normalise_time(36) < racer->boostTimer) {
             baseDistance = -30.0f;
         } else if (racer->boostTimer > 0) {
@@ -7949,6 +8055,12 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
         gCameraObject->boomLength = baseDistance;
         gCameraObject->cam_unk_20 = yVel;
     }
+#ifdef TARGET_PORT
+    if (port_modern_camera()) {
+        gCameraObject->boomLength +=
+            (baseDistance - gCameraObject->boomLength) * MODERN_BOOM_RATE(baseDistance, gCameraObject->boomLength);
+    } else
+#endif
     gCameraObject->boomLength += (baseDistance - gCameraObject->boomLength) * 0.125;
     brakeVar = gCameraObject->cam_unk_20;
     gCameraObject->cam_unk_20 += (yVel - brakeVar) * 0.125;
@@ -7976,6 +8088,12 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
     if (racer->drift_direction) {
         lateralOffset = -(f32) racer->drift_direction * 12.0f;
     }
+#ifdef TARGET_PORT
+    if (port_modern_camera()) {
+        // Modern: half the sideways swing when drifting or sliding.
+        lateralOffset *= 0.5f;
+    }
+#endif
     racer->unkC8 += (lateralOffset - racer->unkC8) * 0.125;
     if (racer->spinout_timer) {
         racer->camera_zoom -= racer->camera_zoom * 0.25;
@@ -7996,6 +8114,12 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
     if (sp38 > 0.0f || gRaceStartTimer) {
         gCameraObject->trans.y_position = lateralOffset;
     }
+#ifdef TARGET_PORT
+    if (port_modern_camera() && gCameraObject->trans.y_position < lateralOffset) {
+        // Modern: climbs after the kart in a few frames instead of trailing it up hills and jumps.
+        gCameraObject->trans.y_position += (lateralOffset - gCameraObject->trans.y_position) * 0.5f;
+    }
+#endif
     tempVel = (-coss_f(racer->cameraYaw + 0x4000) * racer->unkC8);
     gCameraObject->trans.z_position = tempVel + (zOffset + cosOffset);
     gCameraObject->trans.rotation.y_rotation = racer->cameraYaw;
@@ -8003,6 +8127,12 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
     if ((racer->drift_direction && racer->brake > 0.0) || gDialogueCameraAngle) {
         newAngle = 0;
     }
+#ifdef TARGET_PORT
+    if (port_modern_camera()) {
+        // Modern: the camera levels out instead of rolling with the kart.
+        newAngle = 0;
+    }
+#endif
     angle = gCameraObject->trans.rotation.z_rotation;
     gCameraObject->trans.rotation.z_rotation -= (angle + newAngle) >> 4;
     if (gCameraObject->trans.rotation.z_rotation > 0x2000) {

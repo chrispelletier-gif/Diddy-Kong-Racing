@@ -41,6 +41,8 @@ enum {
     CTRL_N64_CD = 0x0004,
     CTRL_N64_CL = 0x0002,
     CTRL_N64_CR = 0x0001,
+    /* Not an N64 button: the port's look-back camera (PORT_BUTTON_LOOK_BACK in port.h; os_si.c takes it out). */
+    CTRL_N64_LOOK_BACK = 0x0040,
 };
 
 /* Loads controls.txt (once; later calls do nothing). */
