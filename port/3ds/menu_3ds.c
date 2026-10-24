@@ -21,6 +21,10 @@
 void plat_3ds_menu_draw(const BsMenu *menu);
 void plat_3ds_set_antialias_setting(int on);
 int plat_3ds_antialias_setting(void);
+void plat_3ds_set_mipmap_setting(int mode);
+int plat_3ds_mipmap_setting(void);
+void plat_3ds_set_colour_setting(int level);
+int plat_3ds_colour_setting(void);
 long port_autorun_enabled(void);
 void port_autorun_request(long start);
 int prof_user_enabled(void);
@@ -58,8 +62,12 @@ static void open_page(const MenuPage *page) {
     draw();
 }
 
-/* The main page: anti-aliasing, the profiler, the added pages, then the test run, updates and bug report. */
-enum { MAIN_AA, MAIN_PROFILER, MAIN_PAGES };
+/* The main page: anti-aliasing, mipmaps, colour boost, the profiler, the added pages, then the test run, updates and
+ * bug report. */
+enum { MAIN_AA, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_PROFILER, MAIN_PAGES };
+
+static const char *const sColourLevels[4] = { "Off", "Low", "Medium", "High" };
+static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
 
 static int main_count(void) {
     return MAIN_PAGES + sPageCount + 3;
@@ -69,6 +77,10 @@ static const char *main_label(int i) {
     static const char *const sLast[3] = { "Test run", "Check for updates", "Send a bug report" };
     if (i == MAIN_AA) {
         return "Anti-aliasing";
+    } else if (i == MAIN_MIPMAPS) {
+        return "Mipmaps";
+    } else if (i == MAIN_COLOUR) {
+        return "Colour boost";
     } else if (i == MAIN_PROFILER) {
         return "Profiler";
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -80,6 +92,10 @@ static const char *main_label(int i) {
 static void main_value(int i, char *out, int size) {
     if (i == MAIN_AA) {
         snprintf(out, size, "%s", plat_3ds_antialias_setting() ? "On" : "Off");
+    } else if (i == MAIN_MIPMAPS) {
+        snprintf(out, size, "%s", sMipmapModes[plat_3ds_mipmap_setting()]);
+    } else if (i == MAIN_COLOUR) {
+        snprintf(out, size, "%s", sColourLevels[plat_3ds_colour_setting()]);
     } else if (i == MAIN_PROFILER) {
         snprintf(out, size, "%s", prof_user_enabled() ? "On" : "Off");
     } else {
@@ -92,6 +108,10 @@ static const char *main_hint(int i) {
                                           "Log and snapshot (also SELECT+touch)" };
     if (i == MAIN_AA) {
         return "Smoother edges; the GPU draws 4x";
+    } else if (i == MAIN_MIPMAPS) {
+        return plat_3ds_mipmap_setting() == 2 ? "Tints each level a colour" : "No shimmer on distant textures";
+    } else if (i == MAIN_COLOUR) {
+        return "Richer colours on the 3DS screen";
     } else if (i == MAIN_PROFILER) {
         return "Frame times on this screen";
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -103,9 +123,12 @@ static const char *main_hint(int i) {
 }
 
 static void main_change(int i, int step) {
-    (void) step;
     if (i == MAIN_AA) {
         plat_3ds_set_antialias_setting(!plat_3ds_antialias_setting());
+    } else if (i == MAIN_MIPMAPS) {
+        plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + 3) % 3);
+    } else if (i == MAIN_COLOUR) {
+        plat_3ds_set_colour_setting((plat_3ds_colour_setting() + step + 4) % 4);
     } else if (i == MAIN_PROFILER) {
         prof_set_user_enabled(!prof_user_enabled());
     } else if (i < MAIN_PAGES + sPageCount) {

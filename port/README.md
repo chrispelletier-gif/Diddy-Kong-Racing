@@ -85,6 +85,9 @@ font, colourful font, blue arrows and ON / OFF labels, all read from your ROM li
 the game is shipped. Taps on the menu play the game's own menu sounds. Until the ROM is loaded the screen uses a plain
 8x8 font.
 - **Anti-aliasing**: on or off, from the next frame (see Graphics).
+- **Mipmaps**: Off, On, or Show (on, with the levels tinted red, green, blue and yellow, to see where the GPU uses
+  them), from the next frame (see Graphics).
+- **Colour boost**: Off, Low, Medium or High, from the next frame (see Graphics).
 - **Profiler**: frame times on the bottom screen (see Profiler).
 - **Test run**: start a full test, a quick test or the AA bench, or stop the one running.
 - **Controls**: button layout, remapping and circle pad deadzone, sensitivity and response (see Controls).
@@ -136,6 +139,18 @@ The top screen is anti-aliased by default: frames are drawn at twice the resolut
 downsampled when they are sent to the screen. It only costs GPU time (the CPU work is unchanged). Turn it off in the
 Settings menu (until it has been set there, `DKR_AA=0` in `sdmc:/3ds/dkr/env.txt` also turns it off).
 
+Mipmaps (on by default) stop distant track textures from shimmering: every texture that is opaque or repeats both
+ways (ground, walls, cliffs, water) also gets smaller, pre-filtered copies when it is loaded, and the GPU reads the one that
+fits the distance. That takes a third more memory for those textures. Clamped textures with transparency (shadows,
+start lines, track borders) and point sampled ones (text) are left as they were.
+
+Colour boost (off by default) makes colours more saturated, as the 3DS screen looks washed out next to a CRT. It is
+done in the GPU's colour combiner for every draw, so it costs no time; greys, black and white stay as they were.
+High is c + 0.5 (c - grey), Medium 0.3 and Low 0.15.
+
+The host build can preview both: `DKR_MIPMAP=1` and `DKR_COLOUR=1` to `3` (both off by default there, so frames stay
+comparable between commits).
+
 In Azahar you can also raise the internal resolution in the graphics settings; the port renders on the 3DS GPU, so
 that applies to it as well.
 
@@ -154,6 +169,8 @@ controls) work there, as do these renderer switches:
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)
 - `DKR_TEX_NATIVE=0` (stores every texture on the GPU as 32 bit RGBA8 again, instead of the 16 and 8 bit formats that hold it exactly)
+- `DKR_MIPMAP=0` (never builds mipmaps, so they take no memory; the Settings switch then does nothing)
+- `DKR_MIP_FILTER=0` (reads the nearest mipmap instead of blending the two nearest)
 - `DKR_SINGLE_CORE=1` (on a New 3DS, keeps the renderer on the main core as on an Old 3DS)
 
 ## Bug reports

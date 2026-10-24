@@ -175,4 +175,58 @@ static inline unsigned int gfx_texel_bytes(int format) {
     return (format == GFX_TEXFMT_RGBA8) ? 4 : (format == GFX_TEXFMT_LA4) ? 1 : 2;
 }
 
+/*
+ * Whether a texture gets mipmaps (roadmap item G1): bilinear, at least 16x16, and either opaque or repeating on both
+ * axes. A texture with transparency that is clamped on an axis is drawn once along it, often on a polygon much bigger
+ * than its shape (kart shadows, the start line, track borders): its shape fades out before the edge texels that
+ * the clamp stretches over the rest of the polygon. Smaller levels average the shape into those edge texels, so the
+ * GPU spread it over the whole polygon: shadows became dark rectangles and start lines red and yellow stripes.
+ */
+static inline int gfx_wants_mipmaps(const GfxTexture *tex) {
+    unsigned int i, n = tex->width * tex->height;
+    if (tex->filter == GFX_FILTER_POINT || tex->width < 16 || tex->height < 16) {
+        return 0;
+    }
+    if (tex->wrapS != GFX_WRAP_CLAMP && tex->wrapT != GFX_WRAP_CLAMP) {
+        return 1;
+    }
+    for (i = 0; i < n; i++) {
+        if ((tex->pixels[i] >> 24) != 0xFF) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * The next smaller mipmap level (roadmap item G1): each 2x2 block of src (w x h, RGBA8888) averaged into one pixel of
+ * dst ((w / 2) x (h / 2), which may be src itself). Colours are weighted by alpha, so the colour hidden under
+ * transparent texels (often black) doesn't darken the edges of cutouts such as trees and fences.
+ */
+static inline void gfx_mip_downsample(const unsigned int *src, unsigned int w, unsigned int h, unsigned int *dst) {
+    unsigned int x, y, i;
+    for (y = 0; y < h / 2; y++) {
+        for (x = 0; x < w / 2; x++) {
+            unsigned int c[4], sum[3] = { 0, 0, 0 }, plain[3] = { 0, 0, 0 }, alpha = 0, k;
+            c[0] = src[(2 * y) * w + 2 * x];
+            c[1] = src[(2 * y) * w + 2 * x + 1];
+            c[2] = src[(2 * y + 1) * w + 2 * x];
+            c[3] = src[(2 * y + 1) * w + 2 * x + 1];
+            for (i = 0; i < 4; i++) {
+                unsigned int a = c[i] >> 24;
+                for (k = 0; k < 3; k++) {
+                    unsigned int v = (c[i] >> (8 * k)) & 0xFF;
+                    sum[k] += v * a;
+                    plain[k] += v;
+                }
+                alpha += a;
+            }
+            for (k = 0; k < 3; k++) {
+                sum[k] = alpha > 0 ? (sum[k] + alpha / 2) / alpha : (plain[k] + 2) / 4;
+            }
+            dst[y * (w / 2) + x] = sum[0] | (sum[1] << 8) | (sum[2] << 16) | (((alpha + 2) / 4) << 24);
+        }
+    }
+}
+
 #endif
