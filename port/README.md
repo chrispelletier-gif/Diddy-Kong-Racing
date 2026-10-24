@@ -168,6 +168,8 @@ controls) work there, as do these renderer switches:
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)
+- `DKR_VERTEX_FORMAT=48` (writes every vertex as 48 bytes of floats again, instead of 28 bytes with byte colours and
+  the second texture's coordinates only when a draw uses one)
 - `DKR_TEX_NATIVE=0` (stores every texture on the GPU as 32 bit RGBA8 again, instead of the 16 and 8 bit formats that hold it exactly)
 - `DKR_MIPMAP=0` (never builds mipmaps, so they take no memory; the Settings switch then does nothing)
 - `DKR_MIP_FILTER=0` (reads the nearest mipmap instead of blending the two nearest)
