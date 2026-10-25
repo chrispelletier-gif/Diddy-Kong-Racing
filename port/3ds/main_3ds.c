@@ -129,8 +129,9 @@ static void add_game_menu_options(void) {
 int main(int argc, char **argv) {
 
     {
-        /* DKR_VRAM_SCREEN=1 puts the screens' buffers in VRAM instead of FCRAM (a test for the white line). Off by
-         * default: on a New 3DS the CPU may not write there, and something does at start-up (a data abort). */
+        /* DKR_VRAM_SCREEN=1 puts the screens' buffers in VRAM instead of FCRAM, a test for the white line. Off by
+         * default: on a New 3DS the CPU may not write there (a data abort drawing the bottom screen), so with it the
+         * bottom screen stays blank. */
         const char *env = plat_getenv("DKR_VRAM_SCREEN");
         gfxInit(GSP_BGR8_OES, GSP_BGR8_OES, env != NULL && atoi(env) != 0);
     }

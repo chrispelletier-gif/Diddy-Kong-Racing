@@ -544,6 +544,9 @@ static void screen_copy(int first, int end) {
     u16 width, height;
     u16 *fb = (u16 *) gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &width, &height);
     int x, y;
+    if ((u32) fb >= OS_VRAM_VADDR && (u32) fb < OS_VRAM_VADDR + OS_VRAM_SIZE) {
+        return; // DKR_VRAM_SCREEN=1 (a test): the CPU may not write VRAM, so the bottom screen stays blank.
+    }
     for (x = 0; x < BS_WIDTH; x++) {
         u16 *column = fb + x * 240 + 239;
         for (y = first; y < end; y++) {
