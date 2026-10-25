@@ -10,7 +10,11 @@
 
 #define MAX_UPDATES             32
 #define MAX_EVENTS              32
+#ifdef TARGET_PORT
+#define AUDIO_HEAP_SIZE         (0x29D88 + 0x20000) /* room for the larger sound event queues (src/audio.c) */
+#else
 #define AUDIO_HEAP_SIZE         0x29D88
+#endif
 #define AUDBUF_SIZE             0xA000  /* Audio command buffer size */
 
 #define MAX_VOICES              22

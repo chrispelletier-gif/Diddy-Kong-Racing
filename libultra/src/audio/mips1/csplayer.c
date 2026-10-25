@@ -41,6 +41,7 @@
 #include <ultraerror.h>
 #ifdef TARGET_PORT
 extern const char *volatile gPortAudioStage;
+extern volatile u32 gPortAudioQueueEmpty;
 #endif
 #include <assert.h>
 #include "seqp.h"
@@ -344,6 +345,15 @@ static ALMicroTime __CSPVoiceHandler(void *node)
 	    break;
         }
         seqp->nextDelta = alEvtqNextEvent(&seqp->evtq, &seqp->nextEvent); 
+#ifdef TARGET_PORT
+        /* An empty queue returns type -1 with no delay, and this loop would then spin forever with interrupts off.
+           It empties when the API event couldn't be reposted on a full queue; start it again a frame from now. */
+        if (seqp->nextEvent.type == (s16) -1) {
+            gPortAudioQueueEmpty++;
+            seqp->nextEvent.type = AL_SEQP_API_EVT;
+            seqp->nextDelta = seqp->frameTime;
+        }
+#endif
         
     } while (seqp->nextDelta == 0);
 #ifdef TARGET_PORT

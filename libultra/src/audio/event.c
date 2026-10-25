@@ -22,6 +22,12 @@
 #include <os_internal.h>
 #include <ultraerror.h>
 
+#ifdef TARGET_PORT
+/* Events thrown away because a player's queue was full, and handler runs that found their queue empty (the
+   self-perpetuating API event was one of the thrown away ones); shown in the watchdog's stall report. */
+volatile u32 gPortAudioEventsDropped;
+volatile u32 gPortAudioQueueEmpty;
+#endif
 
 void alEvtqNew(ALEventQueue *evtq, ALEventListItem *items, s32 itemCount)
 {
@@ -83,6 +89,9 @@ void alEvtqPostEvent(ALEventQueue *evtq, ALEvent *evt, ALMicroTime delta)
 
     item = (ALEventListItem *)evtq->freeList.next;
     if (!item) {
+#ifdef TARGET_PORT
+        gPortAudioEventsDropped++;
+#endif
         osSetIntMask(mask);
 #ifdef _DEBUG
         __osError(ERR_ALEVENTNOFREE, 0);
