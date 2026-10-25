@@ -3147,7 +3147,8 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
     if (!any) {
         return;
     }
-    if (!grow((void **) &sClipVerts, &sClipCapacity, *numVerts + *numTriangles * 7, sizeof(GfxVertex)) ||
+    // A triangle cut by all four planes has up to 7 corners: a fan of 5 triangles, each with its own 3 copies.
+    if (!grow((void **) &sClipVerts, &sClipCapacity, *numVerts + *numTriangles * 15, sizeof(GfxVertex)) ||
         !grow((void **) &sClipIndices, &sClipIndexCapacity, *numTriangles * 15, sizeof(u16))) {
         return;
     }

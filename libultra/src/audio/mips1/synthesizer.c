@@ -18,6 +18,9 @@
 #include "synthInternals.h"
 #include <assert.h>
 #include <PR/os_version.h>
+#ifdef TARGET_PORT
+#include <os_internal.h>
+#endif
 // TODO: this comes from a header
 #ident "$Revision: 1.17 $"
 
@@ -195,7 +198,23 @@ Acmd *alAudioFrame(Acmd *cmdList, s32 *cmdLen, s16 *outBuf, s32 outLen)
 	 drvr->paramSamples = __nextSampleTime(drvr, &client))
     {
 	drvr->paramSamples &= ~0xf;
+#ifdef TARGET_PORT
+	/*
+	 * The player handlers edit the sound state and event lists that the game edits with interrupts disabled. On
+	 * the N64 the audio thread outranks the game thread, so a handler runs to its end without the game getting a
+	 * turn. Here the handler may block for the interrupt lock while a retrace or task-done message is posted, and
+	 * the game thread then runs in the middle of it and edits the same lists, which ties them into a loop the
+	 * handler spins in forever (issue #107, the sound thread "handling sound effect events" with the game waiting).
+	 * Running the handler with interrupts disabled keeps the game out of it, as on the N64.
+	 */
+	{
+	    OSIntMask mask = osSetIntMask(OS_IM_NONE);
+	    client->samplesLeft += _timeToSamplesNoRound(drvr, (*client->handler)(client));
+	    osSetIntMask(mask);
+	}
+#else
 	client->samplesLeft += _timeToSamplesNoRound(drvr, (*client->handler)(client));
+#endif
     }
 
     /* for safety's sake, always store paramSamples aligned to 16 sample boundary.
