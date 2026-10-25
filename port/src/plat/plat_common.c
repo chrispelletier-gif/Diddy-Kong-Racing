@@ -12,8 +12,58 @@ volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
 const char *volatile gPlatGfxStage = "not started";
 volatile int gPlatSnapshotRequested;
 volatile int gPlatSnapshotSaved;
-volatile char gPlatGameNote[64];
 static volatile int sGamePauseRequested;
+
+/* The game note, with a sequence number that is odd while it is being set: a reader that sees the same even number
+ * before and after copying it has a whole note. */
+static struct {
+    volatile unsigned int seq;
+    volatile short fields[sizeof(PlatGameNote) / sizeof(short)];
+} sGameNote;
+
+void plat_set_game_note(const PlatGameNote *note) {
+    const short *in = (const short *) note;
+    unsigned int i;
+    sGameNote.seq++;
+    __sync_synchronize();
+    for (i = 0; i < sizeof(PlatGameNote) / sizeof(short); i++) {
+        sGameNote.fields[i] = in[i];
+    }
+    __sync_synchronize();
+    sGameNote.seq++;
+}
+
+int plat_get_game_note(PlatGameNote *out) {
+    PlatGameNote copy;
+    short *to = (short *) &copy;
+    int tries;
+    // Only a few tries: the game thread may be stopped halfway (on the same core, below the reader's priority).
+    for (tries = 0; tries < 4; tries++) {
+        unsigned int seq = sGameNote.seq, i;
+        if (seq & 1) {
+            continue;
+        }
+        __sync_synchronize();
+        for (i = 0; i < sizeof(PlatGameNote) / sizeof(short); i++) {
+            to[i] = sGameNote.fields[i];
+        }
+        __sync_synchronize();
+        if (sGameNote.seq == seq) {
+            *out = copy;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void plat_format_game_note(const PlatGameNote *note, char *out, int size) {
+    if (!note->racing) {
+        plat_snprintf(out, size, "not racing");
+        return;
+    }
+    plat_snprintf(out, size, "lap %d cp %d boost %d item %d/%d shield %d magnet %d hit %d", note->lap, note->checkpoint,
+                  note->boost, note->itemType, note->itemCount, note->shield, note->magnet, note->hit);
+}
 
 void plat_request_game_pause(void) {
     sGamePauseRequested = 1;
