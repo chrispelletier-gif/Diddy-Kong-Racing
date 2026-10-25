@@ -273,34 +273,43 @@ static const MenuPage sTestRunPage = {
 
 /*
  * The game's VIDEO OPTIONS (plat/options.h): the main page's anti-aliasing to colour boost rows, then the Screen
- * page's. Every one can change mid-race, as here.
+ * page's, then Render ahead. Every one can change mid-race, as here.
  */
 static int video_count(void) {
-    return MAIN_SCREEN + screen_count();
+    return MAIN_SCREEN + screen_count() + 1;
+}
+
+/* The main page row a Video Options row stands for, or -1 for a Screen page row. */
+static int video_main_row(int i) {
+    return i < MAIN_SCREEN ? i : i == MAIN_SCREEN + screen_count() ? MAIN_AHEAD : -1;
 }
 
 static const char *video_label(int i) {
-    return i < MAIN_SCREEN ? main_label(i) : screen_label(i - MAIN_SCREEN);
+    int row = video_main_row(i);
+    return row >= 0 ? main_label(row) : screen_label(i - MAIN_SCREEN);
 }
 
 static void video_value(int i, char *out, int size) {
-    if (i < MAIN_SCREEN) {
-        main_value(i, out, size);
+    int row = video_main_row(i);
+    if (row >= 0) {
+        main_value(row, out, size);
     } else {
         screen_value(i - MAIN_SCREEN, out, size);
     }
 }
 
 static void video_change(int i, int step) {
-    if (i < MAIN_SCREEN) {
-        main_change(i, step);
+    int row = video_main_row(i);
+    if (row >= 0) {
+        main_change(row, step);
     } else {
         screen_change(i - MAIN_SCREEN, step);
     }
 }
 
 static const char *video_hint(int i) {
-    return i < MAIN_SCREEN ? main_hint(i) : screen_hint(i - MAIN_SCREEN);
+    int row = video_main_row(i);
+    return row >= 0 ? main_hint(row) : screen_hint(i - MAIN_SCREEN);
 }
 
 void menu_3ds_add_options(void) {
