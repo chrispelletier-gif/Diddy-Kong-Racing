@@ -5,6 +5,7 @@
 
 #include "menu_3ds.h"
 #include "plat/controls.h"
+#include "plat/options.h"
 #include "plat/plat.h"
 
 void port_boot(void);
@@ -22,6 +23,7 @@ int sound_option_count(void);
 const char *sound_option_label(int i);
 void sound_option_value(int i, char *out, int size);
 void sound_option_change(int i, int step);
+int sound_option_in_race(int i);
 int port_autorun_enabled(void);
 /* The Camera page (port_camera.c). */
 int camera_option_count(void);
@@ -109,6 +111,20 @@ int plat_main_loop_iteration(void) {
     return 1;
 }
 
+/* The same settings in the game's own Options and pause menus (plat/options.h, src/menu.c). */
+static void add_game_menu_options(void) {
+    static const OptionsSection sCamera = { camera_option_count, camera_option_label, camera_option_value,
+                                            camera_option_change, NULL, NULL };
+    static const OptionsSection sSound = { sound_option_count, sound_option_label, sound_option_value,
+                                           sound_option_change, NULL, sound_option_in_race };
+    static const OptionsSection sControls = { controls_option_count, controls_option_label, controls_option_value,
+                                              controls_option_change, NULL, NULL };
+    menu_3ds_add_options();
+    options_add(OPTIONS_CAMERA, &sCamera);
+    options_add(OPTIONS_AUDIO, &sSound);
+    options_add(OPTIONS_CONTROLS, &sControls);
+}
+
 int main(int argc, char **argv) {
 
     gfxInitDefault();
@@ -133,6 +149,7 @@ int main(int argc, char **argv) {
     menu_3ds_add_page("Sound", sound_option_count, sound_option_label, sound_option_value, sound_option_change);
     port_modern_camera();
     menu_3ds_add_page("Camera", camera_option_count, camera_option_label, camera_option_value, camera_option_change);
+    add_game_menu_options();
     bugreport_start();
     // The Homebrew Launcher passes the path of the .3dsx as argv[0].
     update_3ds_start(argc > 0 ? argv[0] : NULL);

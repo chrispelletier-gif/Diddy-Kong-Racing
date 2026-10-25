@@ -12,11 +12,52 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include "plat/controls.h"
+#include "plat/options.h"
 #include "plat/plat.h"
 
 void port_boot(void);
 void port_si_flush(void);
 int host_frames_rendered(void);
+int plat_60fps_setting(void);
+void plat_set_60fps_setting(int on);
+int camera_option_count(void);
+const char *camera_option_label(int i);
+void camera_option_value(int i, char *out, int size);
+void camera_option_change(int i, int step);
+
+/* The game menus' VIDEO OPTIONS on PC: the frame rate (the 3DS has its GPU's settings too, port/3ds/menu_3ds.c). */
+static int video_count(void) {
+    return 1;
+}
+
+static const char *video_label(int i) {
+    (void) i;
+    return "Frame rate";
+}
+
+static void video_value(int i, char *out, int size) {
+    (void) i;
+    snprintf(out, size, "%s", plat_60fps_setting() ? "60 fps" : "30 fps");
+}
+
+static void video_change(int i, int step) {
+    (void) i;
+    (void) step;
+    plat_set_60fps_setting(!plat_60fps_setting());
+}
+
+/* The settings the game's Options and pause menus show (plat/options.h), so they can be tried on PC. */
+static void add_game_menu_options(void) {
+    static const OptionsSection sVideo = { video_count, video_label, video_value, video_change, NULL, NULL };
+    static const OptionsSection sCamera = { camera_option_count, camera_option_label, camera_option_value,
+                                            camera_option_change, NULL, NULL };
+    static const OptionsSection sControls = { controls_option_count, controls_option_label, controls_option_value,
+                                              controls_option_change, NULL, NULL };
+    options_add(OPTIONS_VIDEO, &sVideo);
+    options_add(OPTIONS_CAMERA, &sCamera);
+    options_add(OPTIONS_CONTROLS, &sControls);
+}
 
 int plat_main_loop_iteration(void) {
     static int maxFrames = -1;
@@ -34,6 +75,7 @@ int plat_main_loop_iteration(void) {
 int main(int argc, char **argv) {
     (void) argc;
     (void) argv;
+    add_game_menu_options();
     port_boot();
     while (plat_main_loop_iteration()) {
     }

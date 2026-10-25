@@ -15,6 +15,18 @@ typedef struct Setting {
 
 static Setting sSettings[MAX_SETTINGS];
 static int sCount = -1;
+// The game's menus (game thread) and the 3DS bottom screen's (its own thread) both change settings.
+static volatile int sBusy;
+
+static void lock(void) {
+    while (__atomic_exchange_n(&sBusy, 1, __ATOMIC_ACQUIRE)) {
+        plat_sleep_ns(1000 * 1000);
+    }
+}
+
+static void unlock(void) {
+    __atomic_store_n(&sBusy, 0, __ATOMIC_RELEASE);
+}
 
 static void file_path(char *path, size_t size) {
     snprintf(path, size, "%s/settings.txt", plat_data_dir());
@@ -64,24 +76,33 @@ static Setting *find(const char *key) {
 }
 
 int settings_get(const char *key, int fallback) {
-    Setting *setting = find(key);
-    return setting != NULL ? setting->value : fallback;
+    Setting *setting;
+    int value;
+    lock();
+    setting = find(key);
+    value = setting != NULL ? setting->value : fallback;
+    unlock();
+    return value;
 }
 
 void settings_set(const char *key, int value) {
-    Setting *setting = find(key);
-    char path[256], text[MAX_SETTINGS * 48];
+    Setting *setting;
+    static char text[MAX_SETTINGS * 48];
+    char path[256];
     int length, i;
 
+    lock();
+    setting = find(key);
     if (setting == NULL) {
         if (sCount >= MAX_SETTINGS || strlen(key) >= sizeof(sSettings[0].key)) {
+            unlock();
             return;
         }
         setting = &sSettings[sCount++];
         snprintf(setting->key, sizeof(setting->key), "%s", key);
     }
     setting->value = value;
-    length = snprintf(text, sizeof(text), "# Written by the Settings menu on the bottom screen.\n");
+    length = snprintf(text, sizeof(text), "# Written by the Settings menus (the game's Options and pause menus, the 3DS bottom screen).\n");
     for (i = 0; i < sCount; i++) {
         length += snprintf(text + length, sizeof(text) - length, "%s=%d\n", sSettings[i].key, sSettings[i].value);
     }
@@ -89,4 +110,5 @@ void settings_set(const char *key, int value) {
     if (!plat_save_file(path, text, length)) {
         plat_log("settings: could not write %s", path);
     }
+    unlock();
 }
