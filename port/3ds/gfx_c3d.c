@@ -1140,6 +1140,10 @@ static void watch_for_line(void) {
     if (!sLineWatch || sRecentScreenRows == 0 || sRecentFrozen) {
         return;
     }
+    if ((u32) sRecentScreen >= OS_VRAM_VADDR && (u32) sRecentScreen < OS_VRAM_VADDR + OS_VRAM_SIZE &&
+        sLineWatch != 2) {
+        return; // Reading VRAM from the CPU is too slow to do every frame.
+    }
     for (e = 0; e < 3; e++) {
         if (eyes[e] == NULL) {
             continue;
@@ -1419,9 +1423,11 @@ static void log_buffers(void) {
              sTarget->frameBuf.depthBuf);
     top1 = gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &w, &h);
     bottom = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
-    plat_log("buffers: top screen %p / %p (%ux%u), bottom screen %p, linear heap %p (%lu bytes), %lu free",
+    plat_log("buffers: top screen %p / %p (%ux%u), bottom screen %p, linear heap %p (%lu bytes), %lu free, %lu KB "
+             "of VRAM free",
              (void *) top0, (void *) top1, w, h, (void *) bottom, (void *) (uintptr_t) __ctru_linear_heap,
-             (unsigned long) __ctru_linear_heap_size, (unsigned long) linearSpaceFree());
+             (unsigned long) __ctru_linear_heap_size, (unsigned long) linearSpaceFree(),
+             (unsigned long) (vramSpaceFree() / 1024));
 }
 
 static void save_command_list(void) {
