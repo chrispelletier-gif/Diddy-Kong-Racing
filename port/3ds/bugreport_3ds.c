@@ -131,6 +131,8 @@ static void crash_write_file(const char *path, const char *text, u32 length) {
     FSFILE_Close(file);
 }
 
+void plat_audio_crash_silence(void);
+
 static void crash_handler(ERRF_ExceptionInfo *info, CpuRegisters *regs) {
     static const char *const sTypes[] = { "prefetch abort", "data abort", "undefined instruction", "VFP exception" };
     int length = 0, i;
@@ -161,7 +163,9 @@ static void crash_handler(ERRF_ExceptionInfo *info, CpuRegisters *regs) {
         length = sizeof(sCrashText) - 1;
     }
     crash_write_file("/3ds/dkr/crash.txt", sCrashText, length);
-    // Back to the Homebrew Launcher; the next start offers to send the report.
+    // Silence the DSP's voices (audio_ndsp.c), then back to the Homebrew Launcher; the next start offers to send
+    // the report.
+    plat_audio_crash_silence();
     svcExitProcess();
 }
 

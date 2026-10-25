@@ -411,7 +411,6 @@ static s32 sPeakPlaying;
 /* DKR_AUDIO_DEBUG=1 logs these now and then: how late events were applied (0 to one DSP frame is on time). */
 static s32 sDebug = -1;
 static double sLateSum, sLateMax;
-static u32 sLateCount, sEarly;
 static u32 sAuxFrames[2];
 static s32 sNoFx = -1;
 
@@ -427,11 +426,21 @@ static double played_samples(void) {
     return (double) (pv_backend_frames() - sFrame0) * PV_FRAME_SAMPLES * sSynthRate / PV_OUTPUT_RATE;
 }
 
+/*
+ * When the game stops queueing audio (it froze, crashed or is paused), the channels would go on looping their
+ * samples: with no new output a CPU mixer falls silent, so the voices are muted after this many frames without a
+ * buffer (about 0.3 s), and unmuted when the game queues again.
+ */
+#define PV_STALL_FRAMES 64
+static u32 sLastQueueFrame;
+static s32 sMuted;
+
 void pv_output_queue(unsigned numBytes) {
     if (!sClockStarted) {
         sFrame0 = pv_backend_frames();
         sClockStarted = TRUE;
     }
+    sLastQueueFrame = pv_backend_frames();
     sQueuedBytes += numBytes;
 }
 
@@ -573,6 +582,23 @@ void pv_frame_tick(void) {
     sEventCount = n;
     plat_sem_post(sLock);
 
+    if (sClockStarted) {
+        s32 stalled = (pv_backend_frames() - sLastQueueFrame) > PV_STALL_FRAMES;
+        if (stalled != sMuted) {
+            static const f32 sSilence[PV_MIX_COUNT];
+            sMuted = stalled;
+            for (i = 0; i < PV_CHANNELS; i++) {
+                if (sVoices[i].playing) {
+                    pv_backend_set_mix(i, stalled ? sSilence : sVoices[i].mix);
+                }
+            }
+            if (sDebug > 0) {
+                plat_log("voices: %s, the game %s queueing audio", stalled ? "muted" : "unmuted",
+                         stalled ? "stopped" : "resumed");
+            }
+        }
+    }
+
     for (i = 0; i < PV_CHANNELS; i++) {
         Voice *v = &sVoices[i];
         f32 mixBefore[PV_MIX_COUNT];
@@ -593,7 +619,7 @@ void pv_frame_tick(void) {
             }
         }
         voice_mix(v);
-        for (k = 0; k < PV_MIX_COUNT; k++) {
+        for (k = 0; k < PV_MIX_COUNT && !sMuted; k++) {
             if (mixBefore[k] != v->mix[k]) {
                 pv_backend_set_mix(i, v->mix);
                 break;

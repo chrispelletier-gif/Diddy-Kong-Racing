@@ -143,6 +143,16 @@ void port_audio_output_exit(void) {
     }
 }
 
+/*
+ * From the crash handler (bugreport_3ds.c): the DSP would go on playing the channels' looping samples after the
+ * program ends, so its program is unloaded. Only a service call, no locks: the handler cannot take any.
+ */
+void plat_audio_crash_silence(void) {
+    if (sDspAvailable) {
+        DSP_UnloadComponent();
+    }
+}
+
 static unsigned long long fake_played_bytes(void) {
     if (sFakeStart == 0) {
         return 0;
