@@ -7,6 +7,21 @@
 #define GLOBAL_ASM(...)
 #endif
 
+/*
+ * Geometry the game rebuilds every frame (shadows, waves, void, boost trails, menu panels, viewports) is kept once
+ * for each frame the RCP may still be reading: two on the N64. The port's "Render ahead" setting lets the game run
+ * a frame further ahead of the renderer, which needs a third copy; FRAME_FLIP moves on to the next copy, cycling
+ * through two or three of them depending on the setting (port_frame_flip).
+ */
+#ifdef TARGET_PORT
+#define FRAME_BUFFERS 3
+int port_frame_flip(int flip);
+#define FRAME_FLIP(flip) port_frame_flip(flip)
+#else
+#define FRAME_BUFFERS 2
+#define FRAME_FLIP(flip) (1 - (flip))
+#endif
+
 #if !defined(__sgi) && (!defined(NON_MATCHING) || !defined(AVOID_UB))
 // asm-process isn't supported outside of IDO, and undefined behavior causes
 // crashes.

@@ -87,8 +87,8 @@ s8 gLeadPlayerIndex = 0;
 s8 gTwoActivePlayersInAdventure = FALSE; // Has basically the same purpose as gTwoPlayerAdvRace
 s8 gSwapLeadPlayer = FALSE;
 s8 gIsP2LeadPlayer = FALSE;
-Vertex *gBoostVerts[2] = { 0, 0 };
-Triangle *gBoostTris[2] = { 0, 0 };
+Vertex *gBoostVerts[FRAME_BUFFERS];
+Triangle *gBoostTris[FRAME_BUFFERS];
 Object *gShieldEffectObject = NULL;
 s32 gBoostObjOverrideID = 9;
 Object *gMagnetEffectObject = NULL;
@@ -353,10 +353,15 @@ void racerfx_alloc(s32 numberOfVertices, s32 numberOfTriangles) {
     s32 i;
 
     gBoostTris[0] = (Triangle *) mempool_alloc_safe(
-        ((numberOfTriangles * sizeof(Triangle)) + (numberOfVertices * sizeof(Vertex))) * 2, COLOUR_TAG_BLUE);
-    gBoostTris[1] = (Triangle *) ((u32) gBoostTris[0] + numberOfTriangles * sizeof(Triangle));
-    gBoostVerts[0] = (Vertex *) ((u32) gBoostTris[1] + numberOfTriangles * sizeof(Triangle));
-    gBoostVerts[1] = (Vertex *) ((u32) gBoostVerts[0] + numberOfVertices * sizeof(Vertex));
+        ((numberOfTriangles * sizeof(Triangle)) + (numberOfVertices * sizeof(Vertex))) * FRAME_BUFFERS,
+        COLOUR_TAG_BLUE);
+    for (i = 1; i < FRAME_BUFFERS; i++) {
+        gBoostTris[i] = (Triangle *) ((u32) gBoostTris[0] + numberOfTriangles * sizeof(Triangle) * i);
+    }
+    gBoostVerts[0] = (Vertex *) ((u32) gBoostTris[0] + numberOfTriangles * sizeof(Triangle) * FRAME_BUFFERS);
+    for (i = 1; i < FRAME_BUFFERS; i++) {
+        gBoostVerts[i] = (Vertex *) ((u32) gBoostVerts[0] + numberOfVertices * sizeof(Vertex) * i);
+    }
     gBoostVertCount = numberOfVertices;
     gNumOfBoostVerts = 0;
     gBoostTriCount = numberOfTriangles;
@@ -605,7 +610,7 @@ void racerfx_update(s32 updateRate) {
     f32 updateRateF;
     Object_Racer *racer;
 
-    gBoostVertFlip = 1 - gBoostVertFlip;
+    gBoostVertFlip = FRAME_FLIP(gBoostVertFlip);
     gNumOfBoostVerts = 0;
     gNumOfBoostTris = 0;
     asset20 = (Object_Boost *) get_misc_asset(ASSET_MISC_20);

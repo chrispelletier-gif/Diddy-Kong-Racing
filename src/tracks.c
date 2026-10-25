@@ -139,13 +139,13 @@ s32 *gLevelModelTable;
 UNUSED f32 gPrevCameraX;          // Set but never read
 UNUSED f32 gPrevCameraY;          // Set but never read
 UNUSED f32 gPrevCameraZ;          // Set but never read
-Triangle *gShadowHeapTris[2 + 2]; // Triangle Data for shadows
+Triangle *gShadowHeapTris[FRAME_BUFFERS * 2]; // Triangle Data for shadows
 Triangle *gCurrShadowTris;
 UNUSED s32 D_8011D334;
-Vertex *gShadowHeapVerts[2 + 2]; // Vertex Data for shadows
+Vertex *gShadowHeapVerts[FRAME_BUFFERS * 2]; // Vertex Data for shadows
 Vertex *gCurrShadowVerts;
 UNUSED s32 D_8011D34C;
-ShadowHeapProperties *gShadowHeapData[2 + 2]; // General data for shadows. Texture and geometry size.
+ShadowHeapProperties *gShadowHeapData[FRAME_BUFFERS * 2]; // General data for shadows. Texture and geometry size.
 ShadowHeapProperties *gCurrShadowHeapData;
 s32 gShadowTail;           // Position in the heap the shadow data ends at.
 s32 gNewShadowTriCount;    // xOffset?
@@ -161,10 +161,10 @@ Vec3i gScenePerspectivePos;
 VoidMesh *gVoidMesh;     // 0x10 bytes struct?
 unk8011D478 *D_8011D478; // 0xC bytes struct?
 s8 *D_8011D47C;
-Vertex *gVoidVerts[2];
+Vertex *gVoidVerts[FRAME_BUFFERS];
 Vertex *gVoidCurrVerts;
 s32 D_8011D48C;
-Triangle *gVoidTris[2];
+Triangle *gVoidTris[FRAME_BUFFERS];
 Triangle *gVoidCurrTris;
 s16 D_8011D49C;
 s16 D_8011D49E;
@@ -263,12 +263,11 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
         gShadowHeapVerts[i] = (Vertex *) mempool_alloc_safe(sizeof(Vertex) * 2000, COLOUR_TAG_YELLOW);
     }
 
-    gShadowHeapFlip = 0;
-    shadow_update(SHADOW_SCENERY, SHADOW_SCENERY, LOGIC_NULL);
-    shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, LOGIC_NULL);
-    gShadowHeapFlip = 1;
-    shadow_update(SHADOW_SCENERY, SHADOW_SCENERY, LOGIC_NULL);
-    shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, LOGIC_NULL);
+    for (i = 0; i < FRAME_BUFFERS; i++) {
+        gShadowHeapFlip = i;
+        shadow_update(SHADOW_SCENERY, SHADOW_SCENERY, LOGIC_NULL);
+        shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, LOGIC_NULL);
+    }
     gShadowHeapFlip = 0;
     if (gCurrentLevelHeader2->useVoid) {
         gVoidColourR = gCurrentLevelHeader2->voidColour.red;
@@ -442,7 +441,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
     viewport_reset(&gTrackDL);
     gDPPipeSync(gTrackDL++);
     gDkrDisableBillboard(gTrackDL++);
-    gShadowHeapFlip = 1 - gShadowHeapFlip;
+    gShadowHeapFlip = FRAME_FLIP(gShadowHeapFlip);
     *dList = gTrackDL;
     *mtx = gTrackMtxPtr;
     *vtx = gTrackVtxPtr;
@@ -479,7 +478,7 @@ void void_init(s32 viewportCount) {
     triLimit = (gVoidPrimLimit + 5) * 2 * sizeof(Triangle);
 
     gVoidMesh = mempool_alloc_safe(viewportCount * sizeof(VoidMesh), COLOUR_TAG_CYAN);
-    gVoidData = mempool_alloc_safe(sp30 + sp2C + (vtxLimit + triLimit) * 2 * viewportCount, COLOUR_TAG_CYAN);
+    gVoidData = mempool_alloc_safe(sp30 + sp2C + (vtxLimit + triLimit) * FRAME_BUFFERS * viewportCount, COLOUR_TAG_CYAN);
 
     ptr = gVoidData;
 
@@ -492,17 +491,15 @@ void void_init(s32 viewportCount) {
         ptr = (u8 *) ((s32) (ptr + sp2C + 8) & ~7);
 
         for (i = 0; i < viewportCount; i++) {
-            gVoidMesh[i].tris[0] = (Triangle *) ptr;
-            ptr += triLimit;
-
-            gVoidMesh[i].tris[1] = (Triangle *) ptr;
-            ptr += triLimit;
-
-            gVoidMesh[i].verts[0] = (Vertex *) ptr;
-            ptr += vtxLimit;
-
-            gVoidMesh[i].verts[1] = (Vertex *) ptr;
-            ptr += vtxLimit;
+            s32 b;
+            for (b = 0; b < FRAME_BUFFERS; b++) {
+                gVoidMesh[i].tris[b] = (Triangle *) ptr;
+                ptr += triLimit;
+            }
+            for (b = 0; b < FRAME_BUFFERS; b++) {
+                gVoidMesh[i].verts[b] = (Vertex *) ptr;
+                ptr += vtxLimit;
+            }
         }
     }
     gVoidVertexFlip = 0;
@@ -538,10 +535,10 @@ void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
     s8 sp7C[24]; // possible UB here, real size is unknown
     s32 pad;
 
-    gVoidTris[0] = gVoidMesh[viewportIndex].tris[0];
-    gVoidTris[1] = gVoidMesh[viewportIndex].tris[1];
-    gVoidVerts[0] = gVoidMesh[viewportIndex].verts[0];
-    gVoidVerts[1] = gVoidMesh[viewportIndex].verts[1];
+    for (var_s0 = 0; var_s0 < FRAME_BUFFERS; var_s0++) {
+        gVoidTris[var_s0] = gVoidMesh[viewportIndex].tris[var_s0];
+        gVoidVerts[var_s0] = gVoidMesh[viewportIndex].verts[var_s0];
+    }
     material_set_no_tex_offset(&gTrackDL, NULL, RENDER_ANTI_ALIASING | RENDER_Z_COMPARE);
     D_8011D49C = 0;
     D_8011D49E = 0;
@@ -621,7 +618,7 @@ void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
     gTrackVtxPtr = gVoidVerts[gVoidVertexFlip];
     gTrackTriPtr = gVoidTris[gVoidVertexFlip];
 
-    gVoidVertexFlip = 1 - gVoidVertexFlip;
+    gVoidVertexFlip = FRAME_FLIP(gVoidVertexFlip);
     gVoidCurrVerts = gTrackVtxPtr;
     gVoidCurrTris = gTrackTriPtr;
     gVoidVertCount = 0;
@@ -3275,7 +3272,7 @@ void shadow_render(Object *obj, ShadowData *shadow) {
         if (shadow->meshStart != -1 && gDisableShadows == FALSE) {
             gShadowIndex = gShadowHeapFlip;
             if (obj->header->shadowGroup == SHADOW_SCENERY) {
-                gShadowIndex += 2;
+                gShadowIndex += FRAME_BUFFERS;
             }
             i = shadow->meshStart;
             gCurrShadowHeapData = gShadowHeapData[gShadowIndex];
@@ -3330,7 +3327,7 @@ void watereffect_render(Object *obj, WaterEffect *effect) {
             gWaterEffectIndex = gShadowHeapFlip;
             i = effect->meshStart;
             if (obj->header->waterEffectGroup == SHADOW_SCENERY) {
-                gWaterEffectIndex += 2;
+                gWaterEffectIndex += FRAME_BUFFERS;
                 if (get_distance_to_active_camera(obj->trans.x_position, obj->trans.y_position, obj->trans.z_position) >
                     768.0f) {
                     i = effect->meshEnd; // Just return.
@@ -3378,7 +3375,7 @@ void shadow_update(s32 group, s32 waterGroup, s32 updateRate) {
 
     gShadowIndex = gShadowHeapFlip;
     if (group == SHADOW_SCENERY) {
-        gShadowIndex += 2;
+        gShadowIndex += FRAME_BUFFERS;
     }
     gCurrShadowTris = (Triangle *) gShadowHeapTris[gShadowIndex];
     gCurrShadowVerts = (Vertex *) gShadowHeapVerts[gShadowIndex];

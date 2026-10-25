@@ -74,6 +74,11 @@ s32 port_render_ahead(void) {
     return plat_render_ahead();
 }
 
+/* The next of the game's per-frame geometry copies (FRAME_FLIP): two in turn as on the N64, three when two frames may be in flight. */
+int port_frame_flip(int flip) {
+    return (flip + 1) % (plat_render_ahead() + 1);
+}
+
 static void gfx_thread(void *arg) {
     OSTask *task;
 
