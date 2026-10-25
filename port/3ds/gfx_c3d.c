@@ -235,18 +235,18 @@ static inline void to_screen(const GfxVertex *v, float *pos) {
 
 /* The same for a flat draw: its 4:3 shape kept on a wide screen (gfx_flat_x), and in stereo its w made sEyeConv, so
  * that it sits at the depth of the screen (scaling the whole position leaves where it lands unchanged). */
-static inline void to_screen_flat(const GfxVertex *v, float *pos) {
+static inline void to_screen_flat(const GfxVertex *v, float *pos, int flat) {
     float z = 0.5f * (v->z - v->w);
     float f = (sStereo && v->w > 0.0f) ? sEyeConv / v->w : 1.0f;
     pos[0] = v->y * f;
-    pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW) : v->x * NARROW) * f;
+    pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW, flat == GFX_FLAT_STRETCH) : v->x * NARROW) * f;
     pos[2] = (z < 0.0f ? z : 0.0f) * f;
     pos[3] = v->w * f;
 }
 
 static inline void place(const GfxVertex *v, float *pos, int flat) {
     if (flat) {
-        to_screen_flat(v, pos);
+        to_screen_flat(v, pos, flat);
     } else {
         to_screen(v, pos);
     }
@@ -3352,7 +3352,7 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
                        int numTriangles) {
     HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
-    int first, vertex, count, fmt, flat = state->flat, indexed = indexed_enabled();
+    int first, vertex, count, fmt, flat = gfx_flat_mode(state), indexed = indexed_enabled();
     int vertBytes, written;
     u16 *ibo = NULL;
     // Timed in parts while the profiler is on (prof_part); a tick read costs a system call.

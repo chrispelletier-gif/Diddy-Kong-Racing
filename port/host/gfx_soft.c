@@ -334,7 +334,7 @@ typedef struct ClipVert {
 } ClipVert;
 
 static void to_clip(ClipVert *o, const GfxVertex *v, int flat) {
-    o->x = (sWide && flat) ? gfx_flat_x(v->x, v->w, NARROW) : v->x;
+    o->x = (sWide && flat) ? gfx_flat_x(v->x, v->w, NARROW, flat == GFX_FLAT_STRETCH) : v->x;
     o->y = v->y;
     o->z = v->z;
     o->w = v->w;
@@ -649,7 +649,7 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
         ClipVert in[3], clipped[8];
         ScreenVert s[8];
         for (i = 0; i < 3; i++) {
-            to_clip(&in[i], &verts[t * 3 + i], state->flat);
+            to_clip(&in[i], &verts[t * 3 + i], gfx_flat_mode(state));
         }
         n = clip_near(in, 3, clipped);
         if (n < 3) {

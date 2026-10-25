@@ -119,17 +119,27 @@ typedef struct GfxDrawState {
  * the middle, except where it reaches an edge of the N64 screen: fades, backgrounds and full screen fills are
  * stretched out to the edges of the wide one. gfx_flat_x takes a flat vertex's clip x (or a rectangle edge's, with
  * w = 1) to clip x on the wide screen, the 4:3 picture being `narrow` of its width (0.8 for 400 pixels).
+ * `stretchBeyond` (GFX_FLAT_STRETCH) also stretches what lies past an edge, as the shapes of screen wipes do; textured
+ * draws (GFX_FLAT_KEEP) keep their shape there instead, as the Save Options boxes sliding off the screen must (the
+ * wide screen shows a little more of them).
  */
-static inline float gfx_flat_x(float x, float w, float narrow) {
+#define GFX_FLAT_STRETCH 1
+#define GFX_FLAT_KEEP 2
+static inline float gfx_flat_x(float x, float w, float narrow, int stretchBeyond) {
     // Within a pixel and a half of the edge: the game's scissor often ends at x = 319, and a full screen draw
     // clipped to it must still reach the edge (the race finish backgrounds left the old picture at the right).
-    float edge = 0.99f * (w < 0.0f ? -w : w);
-    return (x >= edge || x <= -edge) ? x : x * narrow;
+    float aw = w < 0.0f ? -w : w, ax = x < 0.0f ? -x : x;
+    return (ax >= 0.99f * aw && (stretchBeyond || ax <= 1.01f * aw)) ? x : x * narrow;
+}
+
+/* The flat mode of a draw for gfx_flat_x: 0 when not flat. */
+static inline int gfx_flat_mode(const GfxDrawState *state) {
+    return !state->flat ? 0 : state->textures[0] != NULL ? GFX_FLAT_KEEP : GFX_FLAT_STRETCH;
 }
 
 /* The same for an x in N64 screen pixels, returned in pixels of a screen `width` wide. */
 static inline float gfx_flat_px(float x, float narrow, float width) {
-    return (gfx_flat_x(x / (GFX_SCREEN_WIDTH / 2.0f) - 1.0f, 1.0f, narrow) + 1.0f) * (width / 2.0f);
+    return (gfx_flat_x(x / (GFX_SCREEN_WIDTH / 2.0f) - 1.0f, 1.0f, narrow, 1) + 1.0f) * (width / 2.0f);
 }
 
 /* Backend entry points. */
