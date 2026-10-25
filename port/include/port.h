@@ -117,6 +117,10 @@ void port_audio_run_task(void *task);
 u32 port_audio_output_rate(u32 requested);
 extern float gPortAudioRateScale;
 void port_audio_output_init(u32 frequency);
+/* The DSP voice engine (port/src/audio/voices.c): the game sizes the synthesizer and decodes its banks with these. */
+s32 port_voices_max_pvoices(s32 requested);
+void port_voices_prewarm(void *bankFile);
+void port_voices_start(u32 synthRate);
 void port_audio_output_queue(const s16 *samples, u32 numBytes);
 u32 port_audio_output_remaining_bytes(void);
 

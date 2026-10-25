@@ -40,11 +40,13 @@
 #define ms *(((s32)((f32)44.1))&~0x7)
 
 #ifdef TARGET_PORT
-extern float gPortAudioRateScale;
+/* The rate the reverb runs at relative to the game's: the mixer rate setting, or the DSP's rate with DSP voices. */
+f32 port_fx_rate_scale(void);
 
-/* A delay of n samples at the game's output rate, in samples at the rate the mixer runs at (a multiple of 8). */
+/* A delay of n samples at the game's output rate, in samples at the rate the reverb runs at (a multiple of 8). */
 static s32 port_fx_samples(s32 n) {
-    return gPortAudioRateScale == 1.0f ? n : ((s32) (n / gPortAudioRateScale) + 4) & ~7;
+    f32 scale = port_fx_rate_scale();
+    return scale == 1.0f ? n : ((s32) (n / scale) + 4) & ~7;
 }
 #endif
  
