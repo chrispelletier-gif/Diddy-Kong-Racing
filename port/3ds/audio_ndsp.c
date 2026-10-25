@@ -237,8 +237,17 @@ const char *sound_option_label(int i) {
     return (i >= 0 && i < SOUND_ROWS) ? sLabels[i] : "";
 }
 
+/* The mixing core, rate and buffer rows are the CPU mixer's: with the DSP voices they say so and do nothing. */
+static int cpu_mixer_only(int i) {
+    return (i == SOUND_CORE || i == SOUND_RATE || i == SOUND_BUFFER) && settings_get("sound_dsp", 1);
+}
+
 void sound_option_value(int i, char *out, int size) {
     load_settings();
+    if (cpu_mixer_only(i)) {
+        snprintf(out, size, "CPU mixer only");
+        return;
+    }
     switch (i) {
         case SOUND_ENGINE:
             snprintf(out, size, "%s", settings_get("sound_dsp", 1) ? "DSP voices" : "CPU mixer");
@@ -264,6 +273,9 @@ void sound_option_value(int i, char *out, int size) {
 void sound_option_change(int i, int step) {
     (void) step; // Every row has two values.
     load_settings();
+    if (cpu_mixer_only(i)) {
+        return;
+    }
     switch (i) {
         case SOUND_ENGINE:
             settings_set("sound_dsp", !settings_get("sound_dsp", 1));

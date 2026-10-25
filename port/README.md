@@ -95,7 +95,8 @@ the game is shipped. Taps on the menu play the game's own menu sounds. Until the
   - *Sound engine*: DSP voices (default) plays every voice of the game's music and sound effects on one of the 3DS
     DSP's 24 channels, which decode, resample, envelope and mix it; the CPU only runs the game's sequencer and the
     N64 reverbs (see Sound below). CPU mixer runs the N64 audio microcode on the CPU instead, as before. Applies on
-    the next start. The three rows below only apply to the CPU mixer.
+    the next start. The mixing core, rate and buffer rows only apply to the CPU mixer; with the DSP voices they
+    read "CPU mixer only".
   - *Mixing core*: Renderer (default) mixes the sound next to the renderer. System mixes it on the 3DS's system
     core instead, with the application's share of it raised to 80% and below the system's own services there
     (the first try, at the renderer's priority, held up the GPU's service and doubled frame times). Applies on the
