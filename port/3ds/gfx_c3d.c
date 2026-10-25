@@ -235,18 +235,18 @@ static inline void to_screen(const GfxVertex *v, float *pos) {
 
 /* The same for a flat draw: its 4:3 shape kept on a wide screen (gfx_flat_x), and in stereo its w made sEyeConv, so
  * that it sits at the depth of the screen (scaling the whole position leaves where it lands unchanged). */
-static inline void to_screen_flat(const GfxVertex *v, float *pos) {
+static inline void to_screen_flat(const GfxVertex *v, float *pos, int flat) {
     float z = 0.5f * (v->z - v->w);
     float f = (sStereo && v->w > 0.0f) ? sEyeConv / v->w : 1.0f;
     pos[0] = v->y * f;
-    pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW) : v->x * NARROW) * f;
+    pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW, flat == GFX_FLAT_STRETCH) : v->x * NARROW) * f;
     pos[2] = (z < 0.0f ? z : 0.0f) * f;
     pos[3] = v->w * f;
 }
 
 static inline void place(const GfxVertex *v, float *pos, int flat) {
     if (flat) {
-        to_screen_flat(v, pos);
+        to_screen_flat(v, pos, flat);
     } else {
         to_screen(v, pos);
     }
@@ -984,6 +984,8 @@ static void wait_for_present(void) {
     }
 }
 
+static u8 *sScreenSeen[2], *sShownScreen;
+
 static void find_recent_screen(void) {
     u16 w = 0, h = 0;
     GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
@@ -991,6 +993,12 @@ static void find_recent_screen(void) {
     sRecentScreenBpp = format == GSP_BGR8_OES ? 3 : format == GSP_RGB565_OES ? 2 : 0;
     sRecentScreenRows = (w == TOP_HEIGHT && sRecentScreenBpp != 0) ? h : 0;
     sRecentRight = sStereo && h == TOP_WIDTH ? gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, NULL, NULL) : NULL;
+    // The other of the two screen buffers is the one on screen (once both have been seen).
+    if (sRecentScreen != sScreenSeen[0] && sRecentScreen != sScreenSeen[1]) {
+        sScreenSeen[1] = sScreenSeen[0];
+        sScreenSeen[0] = sRecentScreen;
+    }
+    sShownScreen = sRecentScreen == sScreenSeen[0] ? sScreenSeen[1] : sScreenSeen[0];
 }
 
 static void record_timing(void) {
@@ -1106,8 +1114,24 @@ static int line_score(const u8 *pixels, int rows, int bpp, int first, int step, 
     return best;
 }
 
+/* Logs where a line was found and the bytes under it, to tell a stray memory write (samples, a game structure) from
+ * something drawn. */
+static void log_line_bytes(const u8 *buffer, int row) {
+    const u8 *p = buffer + row * TOP_HEIGHT * sRecentScreenBpp;
+    char hex[3 * 48 + 1];
+    int i;
+    for (i = 0; i < 48; i++) {
+        snprintf(hex + i * 3, 4, "%02x ", p[i]);
+    }
+    plat_log("line watch: at %p (screen buffer %p + %d): %s", (const void *) p, (const void *) buffer,
+             row * TOP_HEIGHT * sRecentScreenBpp, hex);
+}
+
 static void watch_for_line(void) {
-    u8 *eyes[2] = { sRecentScreen, sRecentRight };
+    // The finished picture about to be replaced (each eye), and the one on screen: something written into that one
+    // after its picture was copied in is only ever seen there.
+    u8 *eyes[3] = { sRecentScreen, sRecentRight, sShownScreen };
+    static const char *const names[3] = { "left eye", "right eye", "shown picture" };
     int e, where, score;
     if (sLineWatch < 0) {
         const char *env = plat_getenv("DKR_LINE_WATCH");
@@ -1116,7 +1140,11 @@ static void watch_for_line(void) {
     if (!sLineWatch || sRecentScreenRows == 0 || sRecentFrozen) {
         return;
     }
-    for (e = 0; e < 2; e++) {
+    if ((u32) sRecentScreen >= OS_VRAM_VADDR && (u32) sRecentScreen < OS_VRAM_VADDR + OS_VRAM_SIZE &&
+        sLineWatch != 2) {
+        return; // Reading VRAM from the CPU is too slow to do every frame.
+    }
+    for (e = 0; e < 3; e++) {
         if (eyes[e] == NULL) {
             continue;
         }
@@ -1138,8 +1166,9 @@ static void watch_for_line(void) {
                 plat_format_game_note(&gameNote, note, sizeof(note));
             }
             sLineLogged++;
-            plat_log("line watch: frame %d %s eye has a line at column %d (%d of %d), %s", sFrameCount - 2,
-                     e ? "right" : "left", where * TOP_WIDTH / sRecentScreenRows, score, LINE_WATCH_SAMPLES, note);
+            plat_log("line watch: frame %d %s has a line at column %d (%d of %d), %s", sFrameCount - 2, names[e],
+                     where * TOP_WIDTH / sRecentScreenRows, score, LINE_WATCH_SAMPLES, note);
+            log_line_bytes(eyes[e], where);
             if (!sLineReported) {
                 sLineReported = 1;
                 bugreport_request();
@@ -1394,9 +1423,11 @@ static void log_buffers(void) {
              sTarget->frameBuf.depthBuf);
     top1 = gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &w, &h);
     bottom = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
-    plat_log("buffers: top screen %p / %p (%ux%u), bottom screen %p, linear heap %p (%lu bytes), %lu free",
+    plat_log("buffers: top screen %p / %p (%ux%u), bottom screen %p, linear heap %p (%lu bytes), %lu free, %lu KB "
+             "of VRAM free",
              (void *) top0, (void *) top1, w, h, (void *) bottom, (void *) (uintptr_t) __ctru_linear_heap,
-             (unsigned long) __ctru_linear_heap_size, (unsigned long) linearSpaceFree());
+             (unsigned long) __ctru_linear_heap_size, (unsigned long) linearSpaceFree(),
+             (unsigned long) (vramSpaceFree() / 1024));
 }
 
 static void save_command_list(void) {
@@ -3352,7 +3383,7 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
                        int numTriangles) {
     HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
-    int first, vertex, count, fmt, flat = state->flat, indexed = indexed_enabled();
+    int first, vertex, count, fmt, flat = gfx_flat_mode(state), indexed = indexed_enabled();
     int vertBytes, written;
     u16 *ibo = NULL;
     // Timed in parts while the profiler is on (prof_part); a tick read costs a system call.

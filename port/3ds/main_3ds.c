@@ -1,6 +1,7 @@
 /* Nintendo 3DS frontend: system setup and the main (APT) loop. */
 #include <3ds.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 
 #include "menu_3ds.h"
@@ -127,7 +128,13 @@ static void add_game_menu_options(void) {
 
 int main(int argc, char **argv) {
 
-    gfxInitDefault();
+    {
+        /* The screens' buffers in VRAM instead of the shared main memory (FCRAM): the screens read their picture
+         * from there 60 times a second, and when the CPU, GPU and DSP crowd FCRAM (as a sound effect starting does)
+         * a read that comes too late shows as a white line down the screen. DKR_VRAM_SCREEN=0 = old. */
+        const char *env = plat_getenv("DKR_VRAM_SCREEN");
+        gfxInit(GSP_BGR8_OES, GSP_BGR8_OES, env == NULL || atoi(env) != 0);
+    }
     gfxSet3D(false);
     hidInit();
     mkdir("sdmc:/3ds", 0777);
