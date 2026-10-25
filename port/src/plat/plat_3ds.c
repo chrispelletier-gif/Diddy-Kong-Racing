@@ -755,10 +755,8 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, u
         }
         return;
     }
-    if (++*stalledSeconds == 1) {
-        start_idle_meters(); // So the report at 3 seconds can say how busy the cores are.
-    }
-    if (*stalledSeconds == 3) {
+    // Idle meters are not started here: they spin at the idle thread's priority and would starve it during start-up.
+    if (++*stalledSeconds == 3) {
         log_stall_state(*stalledSeconds, idlePct, renderIdlePct);
     }
     if (*stalledSeconds == 20) {
@@ -806,7 +804,7 @@ static void watchdog(void *arg) {
                      now[PLAT_COUNTER_TEXTURE_FAILED], gpuFree / 10, gpuFree % 10, heapFree / 10, heapFree % 10);
         }
         {
-            // Idle time is only counted once the profiler or a stall has started the meters; 0 until then.
+            // Idle time is only counted while the profiler runs (a test run turns it on); 0 otherwise.
             unsigned long long idle = sIdleNs, renderIdle = sRcpCore != 0 ? sRenderIdleNs : sIdleNs;
             unsigned idlePct = lastIdle != 0 ? (unsigned) ((idle - lastIdle) / 10000000ULL) : 0;
             unsigned renderIdlePct = lastRenderIdle != 0 ? (unsigned) ((renderIdle - lastRenderIdle) / 10000000ULL) : 0;
