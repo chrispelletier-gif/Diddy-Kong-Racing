@@ -34,6 +34,12 @@ extern u32 client_num, client_cnt, client_max, client_min;
 static s32 __nextSampleTime(ALSynth *drvr, ALPlayer **client);
 static s32 _timeToSamplesNoRound(ALSynth *ALSynth, s32 micros);
 
+#ifdef TARGET_PORT
+/* The DSP voice engine (port/src/audio/voices.c). */
+void port_voices_synth_new(PVoice *pvoices, s32 count);
+s32 port_voices_frame(ALSynth *drvr, s32 outLen);
+#endif
+
 /***********************************************************************
  * Synthesis driver public interfaces
  ***********************************************************************/
@@ -100,6 +106,9 @@ void alSynNew(ALSynth *drvr, ALSynConfig *c)
     drvr->pAllocList.prev = 0;
 
     pvoices = alHeapAlloc(hp, c->maxPVoices, sizeof(PVoice));
+#ifdef TARGET_PORT
+    port_voices_synth_new(pvoices, c->maxPVoices);
+#endif
     for (i = 0; i < c->maxPVoices; i++) {
         pv = &pvoices[i];
         alLink((ALLink *)pv, &drvr->pFreeList);
@@ -199,6 +208,18 @@ Acmd *alAudioFrame(Acmd *cmdList, s32 *cmdLen, s16 *outBuf, s32 outLen)
 
 #ifdef AUD_PROFILE
     PROFILE_AUD(client_num, client_cnt, client_max, client_min);
+#endif
+
+#ifdef TARGET_PORT
+    /*
+     * With the DSP voices there is no command list: the voices' parameter changes go to the DSP channels instead.
+     */
+    if (port_voices_frame(drvr, outLen)) {
+        drvr->curSamples += outLen;
+        *cmdLen = 0;
+        _collectPVoices(drvr);
+        return cmdList;
+    }
 #endif
 
     /*

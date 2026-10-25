@@ -9,6 +9,9 @@
 #include "libultra/src/audio/seqchannel.h"
 #include "sched.h"
 #include "types.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 
 /************ .data ************/
 
@@ -135,7 +138,14 @@ void audio_init(OSSched *sc) {
     }
 
     synth_config.maxVVoices = 40;
+#ifdef TARGET_PORT
+    // One physical voice per DSP channel when the DSP voices play the sound (port/src/audio/voices.c).
+    synth_config.maxPVoices = port_voices_max_pvoices(40);
+    port_voices_prewarm(gSoundBank);
+    port_voices_prewarm(gSequenceBank);
+#else
     synth_config.maxPVoices = 40;
+#endif
     synth_config.maxUpdates = 96;
     synth_config.dmaproc = NULL;
     synth_config.fxType[0] = AL_FX_CUSTOM;

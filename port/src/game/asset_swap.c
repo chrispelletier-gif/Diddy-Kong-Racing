@@ -23,6 +23,7 @@
 
 #define SWAP16(field) port_swap16(&(field))
 #define SWAP32(field) port_swap32(&(field))
+#define MAX_BSP_STACK 128 // Levels have at most 128 segments (LEVEL_SEGMENT_MAX in tracks.c).
 
 /*
  * Some data structures are shared between several owners (for example audio envelopes), so they must only be
@@ -514,12 +515,28 @@ void port_swap_level_model(LevelModel *model) {
     numSegments = model->numberOfSegments;
     swap_texture_infos((TextureInfo *) (base + (s32) model->textures), model->numberOfTextures);
     port_swap16_array(base + (s32) model->segmentsBoundingBoxes, numSegments * 6);
-    // The BSP tree has one node per segment: { s16 left; s16 right; u8 type; u8 segment; s16 split; }
-    for (i = 0; i < numSegments; i++) {
-        BspTreeNode *node = (BspTreeNode *) (base + (s32) model->segmentsBspTree) + i;
-        SWAP16(node->leftNode);
-        SWAP16(node->rightNode);
-        SWAP16(node->splitValue);
+    // BSP tree nodes: { s16 left; s16 right; u8 type; u8 segment; s16 split; }. Each node splits the segments in two,
+    // so there is one fewer node than segments and the visibility bits follow straight after. Only the nodes the tree
+    // reaches from the root are swapped: swapping one per segment used to scramble the first visibility bytes, which
+    // left a section of EverFrost Peak (and others) drawing no track at all.
+    if (numSegments > 1) {
+        BspTreeNode *nodes = (BspTreeNode *) (base + (s32) model->segmentsBspTree);
+        s16 stack[MAX_BSP_STACK];
+        s32 depth = 0, swapped = 0;
+        stack[depth++] = 0;
+        while (depth > 0 && swapped < numSegments - 1) {
+            BspTreeNode *node = &nodes[stack[--depth]];
+            SWAP16(node->leftNode);
+            SWAP16(node->rightNode);
+            SWAP16(node->splitValue);
+            swapped++;
+            if (node->leftNode > 0 && node->leftNode < numSegments - 1 && depth < MAX_BSP_STACK) {
+                stack[depth++] = node->leftNode;
+            }
+            if (node->rightNode > 0 && node->rightNode < numSegments - 1 && depth < MAX_BSP_STACK) {
+                stack[depth++] = node->rightNode;
+            }
+        }
     }
 
     segments = (LevelModelSegment *) (base + (s32) model->segments);

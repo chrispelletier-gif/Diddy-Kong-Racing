@@ -4,7 +4,8 @@ with bugreport_fetch.py) as a Markdown report.
 
     python3 port/tools/autorun_report.py autorun_results.csv [--run N] [--out report.md]
 
-The anti-aliasing benchmark's aa_bench_results.csv (it has an "aa" column) also gets a table by track and AA setting.
+The GPU benchmark's gpu_bench_results.csv (it has a "config" column) also gets a table by track and render setting
+(the older anti-aliasing benchmark's aa_bench_results.csv, with an "aa" column, by track and AA).
 The quick test's quick_test_results.csv (it has a "build" column) also gets a table by track and build over every
 run in the file, to see whether a build made the slow tracks faster.
 
@@ -108,7 +109,15 @@ def main():
             "",
         ]
         lines += group_table(finished, "track", "track") + [""]
-        if any(r.get("aa") not in (None, "") for r in finished):
+        if any(r.get("config") not in (None, "") for r in finished):
+            # port_autorun.c's sBenchConfigs, in order.
+            configs = ["AA 4x", "AA 4x, 16-bit", "AA 2x", "AA 2x, 16-bit", "AA off", "AA off, 16-bit",
+                       "60 fps, AA off, 16-bit", "60 fps, AA 2x, 16-bit"]
+            for row in finished:
+                index = int(row["config"]) if row["config"].isdigit() else -1
+                row["track and settings"] = f"{row['track']}, {configs[index] if 0 <= index < len(configs) else '?'}"
+            lines += group_table(finished, "track and settings", "track and settings") + [""]
+        elif any(r.get("aa") not in (None, "") for r in finished):
             for row in finished:
                 row["track and AA"] = f"{row['track']}, AA {'on' if row.get('aa') == '1' else 'off'}"
             lines += group_table(finished, "track and AA", "track and AA") + [""]

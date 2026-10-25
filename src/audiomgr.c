@@ -8,6 +8,9 @@
 #include "rcp_dkr.h"
 #include "stacks.h"
 #include "video.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 
 /****  type define's for structures unique to audiomgr ****/
 typedef union {
@@ -314,7 +317,13 @@ static u32 __amHandleFrameMsg(AudioInfo *info, AudioInfo *lastInfo) {
         info->frameSamples = minFrameSize;
     }
 
+#ifdef TARGET_PORT
+    gPortAudioStage = "synthesizing a frame";
+#endif
     cmdp = alAudioFrame(__am.ACMDList[curAcmdList], &gAudioCmdLen, audioPtr, info->frameSamples);
+#ifdef TARGET_PORT
+    gPortAudioStage = "between frames";
+#endif
 
     t = &info->task;
 

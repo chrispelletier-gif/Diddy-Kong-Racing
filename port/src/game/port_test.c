@@ -12,6 +12,7 @@
 #include "structs.h"
 #include "asset_enums.h"
 #include "game.h"
+#include "thread3_main.h"
 #include "port.h"
 #include "plat/plat.h"
 
@@ -112,4 +113,20 @@ s32 port_apply_test_save(void *settingsPtr) {
     settings->newGame = FALSE;
     port_log("test save: applied (%d levels, %d worlds)", (int) numLevels, (int) numWorlds);
     return TRUE;
+}
+
+const char *volatile gPortGameStage = "starting";
+const char *volatile gPortAudioStage = "starting";
+extern f32 gObjectUpdateRateF; // objects.c
+
+/* port.h: for the watchdog's hang message. Read from another thread, so it may be a frame out of date. */
+void port_describe_game_state(char *buffer, s32 size) {
+    s32 mode = get_game_mode();
+    plat_snprintf(buffer, size, "game thread %s; sound thread %s; %s, level %d%s, logic rate %d", gPortGameStage,
+                  gPortAudioStage,
+                  mode == GAMEMODE_INTRO    ? "intro"
+                  : mode == GAMEMODE_INGAME ? "in game"
+                  : mode == GAMEMODE_MENU   ? "menu"
+                                            : "other mode",
+                  (int) level_id(), is_game_paused() ? ", paused" : "", (int) gObjectUpdateRateF);
 }
