@@ -51,6 +51,7 @@ typedef struct Window {
     u32 startGameFrames;
     unsigned long long startNs;
     unsigned long long startIdleNs;
+    unsigned long long startRenderIdleNs;
     // Game thread statistics, kept per window directly.
     u32 rateFrames[PROF_RATE_BUCKETS];
     u32 worstFrameUs;
@@ -175,6 +176,7 @@ void prof_window_start(int window) {
     w->startGameFrames = sGameFrames;
     w->startNs = plat_time_ns();
     w->startIdleNs = plat_idle_ns();
+    w->startRenderIdleNs = plat_render_idle_ns();
     w->worstFrameUs = 0;
     w->worstBuildUs = 0;
     w->hitches = 0;
@@ -197,6 +199,7 @@ void prof_window_read(int window, ProfStats *out) {
     out->renderedFrames = sRenderedFrames - w->startRenderedFrames;
     out->elapsedNs = plat_time_ns() - w->startNs;
     out->idleNs = plat_idle_ns() - w->startIdleNs;
+    out->renderIdleNs = plat_render_idle_ns() - w->startRenderIdleNs;
     out->worstFrameUs = w->worstFrameUs;
     out->worstBuildUs = w->worstBuildUs;
     out->hitches = w->hitches;
@@ -254,7 +257,8 @@ static void show_overlay(void) {
                   "worst frame %3u ms  hitches %u\n"
                   "game  logic %4.1f scene %4.1f wait %4.1f\n"
                   "rend  rdp %4.1f tex %4.1f gpuwait %4.1f\n"
-                  "gpu   draw %4.1f  audio %4.1f  idle %2d%%\n"
+                  "gpu   draw %4.1f  audio %4.1f\n"
+                  "idle  game core %2d%%  render core %2d%%\n"
                   "tris %5u draws %4u tex+ %u\n"
                   "%s",
                   fps, prof_limit(&s), percent(s.rateFrames[2] + s.rateFrames[1], s.gameFrames),
@@ -264,18 +268,20 @@ static void show_overlay(void) {
                   per_frame_ms(&s, PROF_TEXTURE, s.renderedFrames), per_frame_ms(&s, PROF_GPU_WAIT, s.renderedFrames),
                   per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames), per_frame_ms(&s, PROF_AUDIO, s.gameFrames),
                   percent((u32) (s.idleNs / 1000), (u32) (s.elapsedNs / 1000)),
+                  percent((u32) (s.renderIdleNs / 1000), (u32) (s.elapsedNs / 1000)),
                   s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                   s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0, s.counters[PROF_TEXTURE_UPLOADS],
                   sStatus);
     plat_overlay_show(text);
     if (++sLogCounter % 4 == 0) {
         port_log("profile: %.1f fps (30fps %d%%), worst %u ms, logic %.2f scene %.2f rdp %.2f tex %.2f gpu %.2f "
-                 "audio %.2f ms, limit %s",
+                 "audio %.2f ms, limit %s, idle game core %d%% render core %d%%",
                  fps, percent(s.rateFrames[2] + s.rateFrames[1], s.gameFrames), s.worstFrameUs / 1000,
                  per_frame_ms(&s, PROF_LOGIC, s.gameFrames), per_frame_ms(&s, PROF_SCENE, s.gameFrames),
                  per_frame_ms(&s, PROF_RDP, s.renderedFrames), per_frame_ms(&s, PROF_TEXTURE, s.renderedFrames),
                  per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames), per_frame_ms(&s, PROF_AUDIO, s.gameFrames),
-                 prof_limit(&s));
+                 prof_limit(&s), percent((u32) (s.idleNs / 1000), (u32) (s.elapsedNs / 1000)),
+                 percent((u32) (s.renderIdleNs / 1000), (u32) (s.elapsedNs / 1000)));
     }
     prof_window_start(PROF_WINDOW_OVERLAY);
 }

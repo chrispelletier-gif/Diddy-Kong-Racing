@@ -262,6 +262,7 @@ void main_game_loop(void) {
     osSetTime(0);
 #ifdef TARGET_PORT
     prof_game_mark(PROF_MARK_LOOP_START, 0);
+    gPortGameStage = "building a frame";
 #endif
 
     if (gScreenStatus == MESG_SKIP_BUFFER_SWAP) {
@@ -348,6 +349,7 @@ void main_game_loop(void) {
     copy_viewports_to_stack();
 #ifdef TARGET_PORT
     prof_game_mark(PROF_MARK_BUILT, 0);
+    gPortGameStage = "waiting for its last frame to be drawn";
 #endif
     if (gDrawFrameTimer != 1) {
         if (gSkipGfxTask == FALSE) {
@@ -358,6 +360,7 @@ void main_game_loop(void) {
     }
 #ifdef TARGET_PORT
     prof_game_mark(PROF_MARK_WAITED, 0);
+    gPortGameStage = "finishing a frame";
 #endif
     gSkipGfxTask = FALSE;
     mempool_free_queue_clear();

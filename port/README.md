@@ -89,7 +89,7 @@ the game is shipped. Taps on the menu play the game's own menu sounds. Until the
   them), from the next frame (see Graphics).
 - **Colour boost**: Off, Low, Medium or High, from the next frame (see Graphics).
 - **Profiler**: frame times on the bottom screen (see Profiler).
-- **Test run**: start a full test, a quick test or the AA bench, or stop the one running.
+- **Test run**: start a full test, a quick test, the boss fights or the GPU bench, or stop the one running.
 - **Controls**: button layout, remapping and circle pad deadzone, sensitivity and response (see Controls).
 - **Sound** (roadmap Phase 7):
   - *Sound engine*: DSP voices (default) plays every voice of the game's music and sound effects on one of the 3DS
@@ -368,17 +368,18 @@ through the ground shows up as unsticks or as a race that never finishes. The ra
 (the test run's columns plus `build`). `DKR_AUTORUN_BOSS=1` runs it at every start; `DKR_AUTORUN_BOSS_TRACKS`,
 `DKR_AUTORUN_BOSS_CHARACTER` and `DKR_AUTORUN_BOSS_PASSES` change the levels, the character and the races per boss.
 
-### Anti-aliasing benchmark
+### GPU benchmark
 
-Tap Settings, Test run, then AA bench. It is a short test run (about half an hour) that measures what anti-aliasing costs on
-the heaviest races: Whale Bay, Jungle Falls and Frosty Village, the slowest tracks of hardware test run #10, raced
-by Bumper four times each with anti-aliasing off, on, on, off (so neither setting gets the cooler console or the warm
-caches). The game switches anti-aliasing itself before each race and puts your own setting back at the end. The
-results issue ("[3DS test run] AA benchmark ...") has a table of the two settings side by side for each track and
-what AA costs in GPU time and frame rate; the races are in `aa_bench_results.csv` (the test run's columns plus
-`aa`), which `autorun_report.py` also splits by track and AA. It keeps its own progress file, so a full test run it
-interrupts carries on afterwards. `DKR_AUTORUN_BENCH=1` runs it at every start instead; `DKR_AUTORUN_BENCH_TRACKS`
-and `DKR_AUTORUN_BENCH_CHARACTER` change the tracks and the character.
+Tap Settings, Test run, then GPU bench. It is a short test run (about 50 minutes) that measures the render settings on
+the heaviest races: Jungle Falls, Crescent Island and Haunted Woods, the slowest tracks of the quick tests, raced by
+Bumper once with each of 8 settings: anti-aliasing 4x, 2x or off, 32 or 16-bit buffers, and 60 fps with AA off or 2x.
+The game switches the settings itself before each race and puts your own back at the end. The results issue
+("[3DS test run] GPU benchmark ...") has one line per track and setting, with the GPU time it saves against AA 4x and
+how many frames made 60 fps; the races are in `gpu_bench_results.csv` (the test run's columns plus `config` and
+`pct_60fps`), which `autorun_report.py` also splits by track and setting. It keeps its own progress file, so a full test
+run it interrupts carries on afterwards. `DKR_AUTORUN_BENCH=1` runs it at every start instead;
+`DKR_AUTORUN_BENCH_TRACKS`, `DKR_AUTORUN_BENCH_CHARACTER` and `DKR_AUTORUN_BENCH_CONFIGS` (indexes into the 8 settings)
+change the tracks, the character and the settings. It replaced the anti-aliasing benchmark of roadmap item G0.
 
 ## Automated testing
 

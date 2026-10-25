@@ -19,8 +19,10 @@
 #include "plat/plat.h"
 
 void plat_3ds_menu_draw(const BsMenu *menu);
-void plat_3ds_set_antialias_setting(int on);
+void plat_3ds_set_antialias_setting(int aa);
 int plat_3ds_antialias_setting(void);
+void plat_3ds_set_fb16_setting(int on);
+int plat_3ds_fb16_setting(void);
 void plat_3ds_set_mipmap_setting(int mode);
 int plat_3ds_mipmap_setting(void);
 void plat_3ds_set_colour_setting(int level);
@@ -65,9 +67,13 @@ static void open_page(const MenuPage *page) {
     draw();
 }
 
-/* The main page: anti-aliasing, mipmaps, colour boost, the screen page, the profiler, the added pages, then the test
- * run, updates and bug report. */
-enum { MAIN_AA, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_SCREEN, MAIN_PROFILER, MAIN_PAGES };
+/* The main page: anti-aliasing, frame rate, 16-bit buffers, mipmaps, colour boost, the screen page, the profiler, the
+ * added pages, then the test run, updates and bug report. */
+enum { MAIN_AA, MAIN_FPS, MAIN_FB16, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_SCREEN, MAIN_PROFILER, MAIN_PAGES };
+
+/* Anti-aliasing in the order the row steps through (PLAT_AA_* values). */
+static const int sAaOrder[3] = { PLAT_AA_OFF, PLAT_AA_2X, PLAT_AA_4X };
+static const char *const sAaNames[3] = { "Off", "4x", "2x" }; // By PLAT_AA_* value
 
 static const char *const sColourLevels[4] = { "Off", "Low", "Medium", "High" };
 static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
@@ -80,6 +86,10 @@ static const char *main_label(int i) {
     static const char *const sLast[3] = { "Test run", "Check for updates", "Send a bug report" };
     if (i == MAIN_AA) {
         return "Anti-aliasing";
+    } else if (i == MAIN_FPS) {
+        return "Frame rate";
+    } else if (i == MAIN_FB16) {
+        return "16-bit buffers";
     } else if (i == MAIN_MIPMAPS) {
         return "Mipmaps";
     } else if (i == MAIN_COLOUR) {
@@ -96,7 +106,11 @@ static const char *main_label(int i) {
 
 static void main_value(int i, char *out, int size) {
     if (i == MAIN_AA) {
-        snprintf(out, size, "%s", plat_3ds_antialias_setting() ? "On" : "Off");
+        snprintf(out, size, "%s", sAaNames[plat_3ds_antialias_setting()]);
+    } else if (i == MAIN_FPS) {
+        snprintf(out, size, "%s", plat_60fps_setting() ? "60 fps" : "30 fps");
+    } else if (i == MAIN_FB16) {
+        snprintf(out, size, "%s", plat_3ds_fb16_setting() ? "On" : "Off");
     } else if (i == MAIN_MIPMAPS) {
         snprintf(out, size, "%s", sMipmapModes[plat_3ds_mipmap_setting()]);
     } else if (i == MAIN_COLOUR) {
@@ -112,7 +126,12 @@ static const char *main_hint(int i) {
     static const char *const sLast[3] = { NULL, "Install a newer build from GitHub",
                                           "Log and snapshot (also SELECT+touch)" };
     if (i == MAIN_AA) {
-        return "Smoother edges; the GPU draws 4x";
+        return plat_3ds_antialias_setting() == PLAT_AA_2X ? "Smoother edges; the GPU draws 2x"
+                                                           : "Smoother edges; the GPU draws 4x";
+    } else if (i == MAIN_FPS) {
+        return "60 when a frame fits (try AA off)";
+    } else if (i == MAIN_FB16) {
+        return "Less GPU memory work, like the N64";
     } else if (i == MAIN_MIPMAPS) {
         return plat_3ds_mipmap_setting() == 2 ? "Tints each level a colour" : "No shimmer on distant textures";
     } else if (i == MAIN_COLOUR) {
@@ -131,7 +150,13 @@ static const char *main_hint(int i) {
 
 static void main_change(int i, int step) {
     if (i == MAIN_AA) {
-        plat_3ds_set_antialias_setting(!plat_3ds_antialias_setting());
+        int at;
+        for (at = 0; at < 3 && sAaOrder[at] != plat_3ds_antialias_setting(); at++) {}
+        plat_3ds_set_antialias_setting(sAaOrder[(at + step + 3) % 3]);
+    } else if (i == MAIN_FPS) {
+        plat_set_60fps_setting(!plat_60fps_setting());
+    } else if (i == MAIN_FB16) {
+        plat_3ds_set_fb16_setting(!plat_3ds_fb16_setting());
     } else if (i == MAIN_MIPMAPS) {
         plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + 3) % 3);
     } else if (i == MAIN_COLOUR) {
@@ -202,7 +227,7 @@ static int test_count(void) {
 }
 
 static const char *test_label(int i) {
-    static const char *const sStart[4] = { "Full test", "Quick test", "Boss fights", "AA bench" };
+    static const char *const sStart[4] = { "Full test", "Quick test", "Boss fights", "GPU bench" };
     return port_autorun_enabled() ? "Stop the test run" : sStart[i];
 }
 
@@ -214,7 +239,7 @@ static void test_value(int i, char *out, int size) {
 
 static const char *test_hint(int i) {
     static const char *const sStart[4] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
-                                           "All 10 boss races once, ~30 minutes", "Heavy races, AA off and on, ~30 min" };
+                                           "All 10 boss races once, ~30 minutes", "3 heavy tracks x 8 GPU settings, ~50 min" };
     return port_autorun_enabled() ? "The results so far go out as a report" : sStart[i];
 }
 
@@ -223,7 +248,7 @@ static void test_change(int i, int step) {
     if (port_autorun_enabled()) {
         port_autorun_request(0);
     } else {
-        // port_autorun_request: 1 the full run, 3 the quick test, 4 the boss fights, 2 the anti-aliasing benchmark.
+        // port_autorun_request: 1 the full run, 3 the quick test, 4 the boss fights, 2 the GPU benchmark.
         static const long sRequests[4] = { 1, 3, 4, 2 };
         port_autorun_request(sRequests[i]);
     }

@@ -1,0 +1,29 @@
+/*
+ * 60 fps physics (port.h): obj_update (src/objects.c) tells this file how many retraces each logic frame took, and
+ * the PORT_STEP / PORT_DECAY / PORT_LERP / PORT_TICK macros in src/racer.c read the two flags it sets.
+ */
+#include <stdlib.h>
+
+#include "plat/plat.h"
+#include "port.h"
+
+s32 gPortHalfStep;
+s32 gPortSkipTick;
+
+static s32 sRateFix = -1; // -1 until DKR_RATE_FIX is read.
+
+void port_set_logic_rate(s32 updateRate) {
+    if (sRateFix < 0) {
+        const char *env = plat_getenv("DKR_RATE_FIX");
+        sRateFix = env == NULL || atoi(env) != 0;
+        port_log("60 fps physics fix: %s\n", sRateFix ? "on" : "off");
+    }
+    // Only with the 60 fps cap: at 30 fps the odd 1-retrace frame (after a load, say) runs as it always did.
+    if (sRateFix && updateRate == 1 && plat_frame_retraces() == 1) {
+        gPortHalfStep = TRUE;
+        gPortSkipTick = !gPortSkipTick;
+    } else {
+        gPortHalfStep = FALSE;
+        gPortSkipTick = FALSE;
+    }
+}
