@@ -3593,7 +3593,12 @@ s32 menu_title_screen_loop(s32 updateRate) {
         } else if (gTitleAudioCounter < 5.0f) {
             music_volume_set((s32) ((f32) sMenuMusicVolume * (gTitleAudioCounter - 4.0f)));
         } else {
+#ifdef TARGET_PORT
+            // Byte 3 is the low byte only on the big endian N64; here it was the top byte (0), muting the music.
+            music_volume_set((s8) sMenuMusicVolume);
+#else
             music_volume_set(*((s8 *) &sMenuMusicVolume + 3));
+#endif
         }
     }
     if (gTitleRevealTimer == 0) {
