@@ -411,6 +411,7 @@ static s32 sPeakPlaying;
 /* DKR_AUDIO_DEBUG=1 logs these now and then: how late events were applied (0 to one DSP frame is on time). */
 static s32 sDebug = -1;
 static double sLateSum, sLateMax;
+static u32 sLateCount;
 static u32 sAuxFrames[2];
 static s32 sNoFx = -1;
 
