@@ -53,6 +53,9 @@ extern long long int	rspF3DDKRFifoStart[], rspF3DDKRFifoEnd[];
 extern long long int	rspF3DDKRDataFifoStart[], rspF3DDKRDataFifoEnd[];
 
 s32 gfxtask_wait(void);
+#ifdef TARGET_PORT
+s32 gfxtask_wait_ahead(void);
+#endif
 void bgdraw_primcolour(u8 red, u8 green, u8 blue);
 void bgdraw_fillcolour(s32 red, s32 green, s32 blue);
 void rdp_init(Gfx **dList);

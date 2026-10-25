@@ -122,6 +122,14 @@ void prof_count(int counter, unsigned int n) {
     }
 }
 
+static unsigned long long sPartNs[PROF_PART_COUNT];
+static unsigned long long sPartLoggedNs[PROF_PART_COUNT];
+static u32 sPartLoggedFrames;
+
+void prof_part(int part, unsigned long long ns) {
+    sPartNs[part] += ns;
+}
+
 void prof_render_task(unsigned long long totalNs) {
     unsigned long long busyNs;
     s32 w;
@@ -276,6 +284,23 @@ static void show_overlay(void) {
                  per_frame_ms(&s, PROF_RDP, s.renderedFrames), per_frame_ms(&s, PROF_TEXTURE, s.renderedFrames),
                  per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames), per_frame_ms(&s, PROF_AUDIO, s.gameFrames),
                  prof_limit(&s));
+        if (sPartNs[PROF_PART_BACKEND] != sPartLoggedNs[PROF_PART_BACKEND]) {
+            // The renderer's parts since the last log line (the counters are the renderer's, read without a lock:
+            // a part caught mid-update is off by one draw).
+            u32 frames = sRenderedFrames - sPartLoggedFrames;
+            double perFrame[PROF_PART_COUNT];
+            s32 p;
+            for (p = 0; p < PROF_PART_COUNT; p++) {
+                unsigned long long now = sPartNs[p];
+                perFrame[p] = frames ? (now - sPartLoggedNs[p]) / 1e6 / frames : 0.0;
+                sPartLoggedNs[p] = now;
+            }
+            sPartLoggedFrames = sRenderedFrames;
+            port_log("renderer parts: draws %.2f ms (clip %.2f, settings %.2f, vertices %.2f), %u tris %u draws a frame",
+                     perFrame[PROF_PART_BACKEND], perFrame[PROF_PART_CLIP], perFrame[PROF_PART_STATE],
+                     perFrame[PROF_PART_WRITE], s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
+                     s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
+        }
     }
     prof_window_start(PROF_WINDOW_OVERLAY);
 }

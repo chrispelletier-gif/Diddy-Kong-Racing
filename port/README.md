@@ -88,6 +88,10 @@ the game is shipped. Taps on the menu play the game's own menu sounds. Until the
 - **Mipmaps**: Off, On, or Show (on, with the levels tinted red, green, blue and yellow, to see where the GPU uses
   them), from the next frame (see Graphics).
 - **Colour boost**: Off, Low, Medium or High, from the next frame (see Graphics).
+- **Render ahead**: 1 frame (the N64's timing: the game builds a frame while the renderer draws the one before, and
+  waits for it) or 2 frames (the game runs one frame further ahead, so a slow frame in the renderer is absorbed
+  instead of dropped, at the cost of one frame more input lag; the game keeps a third display list heap for it).
+  `DKR_RENDER_AHEAD=2` in `env.txt` tries it without the menu; it also works on the host build.
 - **Profiler**: frame times on the bottom screen (see Profiler).
 - **Test run**: start a full test, a quick test or the AA bench, or stop the one running.
 - **Controls**: button layout, remapping and circle pad deadzone, sensitivity and response (see Controls).
@@ -199,6 +203,8 @@ controls) work there, as do these renderer switches:
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)
 - `DKR_VERTEX_FORMAT=48` (writes every vertex as 48 bytes of floats again, instead of 28 bytes with byte colours and
   the second texture's coordinates only when a draw uses one)
+- `DKR_INDEXED=0` (writes a vertex for every triangle corner again, instead of one for each vertex that the
+  triangles of a command share, drawn by index; about half the corners in the game's models are such repeats)
 - `DKR_TEX_NATIVE=0` (stores every texture on the GPU as 32 bit RGBA8 again, instead of the 16 and 8 bit formats that hold it exactly)
 - `DKR_MIPMAP=0` (never builds mipmaps, so they take no memory; the Settings switch then does nothing)
 - `DKR_MIP_FILTER=0` (reads the nearest mipmap instead of blending the two nearest)
@@ -278,7 +284,9 @@ below turn it on as well. While it is off it costs nothing measurable (each timi
 
 On a New 3DS the game thread, the renderer and the GPU work in parallel, so whichever of `logic + scene`,
 `rdp + tex` and `gpu draw` is largest sets the frame rate (33.3 ms per frame is 30 fps). Every few seconds a summary
-line also goes to the log.
+line also goes to the log, followed on the 3DS by a `renderer parts` line that splits `rdp` into the backend's draw
+calls (what is left is the display list walk) and, within them, the guard band clipping, the GPU settings and the
+vertex writes, in ms per frame.
 
 ## Unattended test run
 

@@ -61,6 +61,10 @@ int port_rcp_idle(void) {
     return sRcpTasksBusy == 0;
 }
 
+s32 port_render_ahead(void) {
+    return plat_render_ahead();
+}
+
 static void gfx_thread(void *arg) {
     OSTask *task;
 

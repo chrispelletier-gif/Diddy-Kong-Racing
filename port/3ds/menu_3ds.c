@@ -67,7 +67,7 @@ static void open_page(const MenuPage *page) {
 
 /* The main page: anti-aliasing, mipmaps, colour boost, the screen page, the profiler, the added pages, then the test
  * run, updates and bug report. */
-enum { MAIN_AA, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_SCREEN, MAIN_PROFILER, MAIN_PAGES };
+enum { MAIN_AA, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_SCREEN, MAIN_AHEAD, MAIN_PROFILER, MAIN_PAGES };
 
 static const char *const sColourLevels[4] = { "Off", "Low", "Medium", "High" };
 static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
@@ -86,6 +86,8 @@ static const char *main_label(int i) {
         return "Colour boost";
     } else if (i == MAIN_SCREEN) {
         return "Screen";
+    } else if (i == MAIN_AHEAD) {
+        return "Render ahead";
     } else if (i == MAIN_PROFILER) {
         return "Profiler";
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -101,6 +103,8 @@ static void main_value(int i, char *out, int size) {
         snprintf(out, size, "%s", sMipmapModes[plat_3ds_mipmap_setting()]);
     } else if (i == MAIN_COLOUR) {
         snprintf(out, size, "%s", sColourLevels[plat_3ds_colour_setting()]);
+    } else if (i == MAIN_AHEAD) {
+        snprintf(out, size, "%d frame%s", plat_render_ahead(), plat_render_ahead() == 1 ? "" : "s");
     } else if (i == MAIN_PROFILER) {
         snprintf(out, size, "%s", prof_user_enabled() ? "On" : "Off");
     } else {
@@ -119,6 +123,8 @@ static const char *main_hint(int i) {
         return "Richer colours on the 3DS screen";
     } else if (i == MAIN_SCREEN) {
         return "Widescreen, 800 pixels, 3D";
+    } else if (i == MAIN_AHEAD) {
+        return plat_render_ahead() == 2 ? "Fewer dropped frames, a frame more lag" : "The N64's timing";
     } else if (i == MAIN_PROFILER) {
         return "Frame times on this screen";
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -138,6 +144,8 @@ static void main_change(int i, int step) {
         plat_3ds_set_colour_setting((plat_3ds_colour_setting() + step + 4) % 4);
     } else if (i == MAIN_SCREEN) {
         open_page(&sScreenPage);
+    } else if (i == MAIN_AHEAD) {
+        plat_set_render_ahead(plat_render_ahead() == 1 ? 2 : 1);
     } else if (i == MAIN_PROFILER) {
         prof_set_user_enabled(!prof_user_enabled());
     } else if (i < MAIN_PAGES + sPageCount) {

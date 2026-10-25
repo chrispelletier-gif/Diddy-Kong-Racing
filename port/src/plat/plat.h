@@ -194,6 +194,14 @@ enum PlatCounter {
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
+
+/*
+ * Frames the game may run ahead of the renderer: 1 (the N64's: the game builds a frame while the renderer draws the
+ * one before, and waits for it) or 2 (one more, so a slow frame in the renderer is absorbed instead of missed, at the
+ * cost of one frame of input lag). Saved as renderahead= in settings.txt; DKR_RENDER_AHEAD in env.txt for a test.
+ */
+int plat_render_ahead(void);
+void plat_set_render_ahead(int frames);
 /* What the renderer thread is doing right now. */
 extern const char *volatile gPlatGfxStage;
 

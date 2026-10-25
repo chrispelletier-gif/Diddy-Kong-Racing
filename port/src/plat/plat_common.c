@@ -1,5 +1,6 @@
 /* Platform helpers shared by every target (plain C library). */
 #include "plat.h"
+#include "settings.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -188,4 +189,22 @@ const char *plat_build_version(void) {
 #else
     return "host";
 #endif
+}
+
+/* The render ahead setting (see plat.h): -1 until first read. */
+static volatile int sRenderAhead = -1;
+
+int plat_render_ahead(void) {
+    if (sRenderAhead < 0) {
+        const char *env = plat_getenv("DKR_RENDER_AHEAD");
+        int frames = settings_get("renderahead", env != NULL ? atoi(env) : 1);
+        sRenderAhead = frames == 2 ? 2 : 1;
+        plat_log("render ahead: %d frame%s", sRenderAhead, sRenderAhead == 1 ? "" : "s");
+    }
+    return sRenderAhead;
+}
+
+void plat_set_render_ahead(int frames) {
+    sRenderAhead = frames == 2 ? 2 : 1;
+    settings_set("renderahead", sRenderAhead);
 }

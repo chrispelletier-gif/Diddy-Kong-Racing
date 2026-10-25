@@ -236,8 +236,19 @@ void *mempool_alloc_fixed(s32 size, u8 *address, u32 colorTag) {
  * before clearing from memory.
  * Official Name: mmSetDelay
  */
+#ifdef TARGET_PORT
+static s32 sFreeingQueued = FALSE; // mempool_free_addr is freeing from the queue (see mempool_free_queue_clear)
+#endif
+
 void mempool_free_timer(s32 state) {
     u32 intFlags = interrupts_disable();
+#ifdef TARGET_PORT
+    // Memory freed in a frame may be read by the frame before it and, with the game two frames ahead of the renderer,
+    // the one before that, which is drawn a frame later than on the N64.
+    if (state >= 2) {
+        state += port_render_ahead() - 1;
+    }
+#endif
     gFreeQueueTimer = state;
     if (state == 0) { // flush free queue if state is 0.
         while (gFreeQueueCount > 0) {
@@ -275,6 +286,10 @@ void mempool_free_queue_clear(void) {
     for (i = 0; i < gFreeQueueCount;) {
         gFreeQueue[i].freeTimer--;
         if (gFreeQueue[i].freeTimer == 0) {
+#ifdef TARGET_PORT
+            // Queued long enough ago (mempool_free_timer) that no display list still drawn can use it.
+            sFreeingQueued = TRUE;
+#endif
             mempool_free_addr(gFreeQueue[i].dataAddress);
             gFreeQueue[i].dataAddress = gFreeQueue[gFreeQueueCount - 1].dataAddress;
             gFreeQueue[i].freeTimer = gFreeQueue[gFreeQueueCount - 1].freeTimer;
@@ -300,8 +315,11 @@ void mempool_free_addr(u8 *address) {
     MemoryPoolSlot *slot;
 
 #ifdef TARGET_PORT
-    // The display list being drawn may still use this memory.
-    port_rcp_wait_idle();
+    // The display list being drawn may still use this memory, unless it was freed through the queue.
+    if (!sFreeingQueued) {
+        port_rcp_wait_idle();
+    }
+    sFreeingQueued = FALSE;
 #endif
 
     poolIndex = mempool_get_pool(address);

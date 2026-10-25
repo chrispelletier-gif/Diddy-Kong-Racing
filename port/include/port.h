@@ -99,6 +99,13 @@ void port_vi_retrace(void);
 void port_vi_init(void);
 void port_rcp_init(void);
 void port_rcp_wait_idle(void);
+/*
+ * Frames the game may run ahead of the renderer, 1 or 2 (plat_render_ahead). The game keeps PORT_DL_BUFFERS display
+ * list heaps and task structures instead of the N64's two, so that with 2 the list being drawn, the one waiting and
+ * the one being built each have their own.
+ */
+s32 port_render_ahead(void);
+#define PORT_DL_BUFFERS 3
 void port_rcp_gfx_submitted(void);
 int port_rcp_idle(void);
 void port_si_init(void);

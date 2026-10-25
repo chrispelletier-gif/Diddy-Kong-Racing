@@ -109,14 +109,19 @@ FadeTransition D_800DD424 = FADE_TRANSITION(FADE_FULLSCREEN, FADE_FLAG_NONE, FAD
 
 /************ .bss ************/
 
-Gfx *gDisplayLists[2];
+#ifdef TARGET_PORT
+#define DL_BUFFERS PORT_DL_BUFFERS
+#else
+#define DL_BUFFERS 2
+#endif
+Gfx *gDisplayLists[DL_BUFFERS];
 Gfx *gCurrDisplayList;
 UNUSED s32 D_801211FC;
-Mtx *gMatrixHeap[2];
+Mtx *gMatrixHeap[DL_BUFFERS];
 Mtx *gGameCurrMatrix;
-Vertex *gVertexHeap[2];
+Vertex *gVertexHeap[DL_BUFFERS];
 Vertex *gGameCurrVertexList;
-Triangle *gTriangleHeap[2];
+Triangle *gTriangleHeap[DL_BUFFERS];
 Triangle *gGameCurrTriList;
 UNUSED s32 D_80121230[8];
 s8 gLevelSettings[16];
@@ -274,7 +279,13 @@ void main_game_loop(void) {
     if (gDrawFrameTimer == 0) {
         gfxtask_run_xbus(gDisplayLists[gSPTaskNum], gCurrDisplayList, 0);
         gSPTaskNum += 1;
+#ifdef TARGET_PORT
+        if (gSPTaskNum == DL_BUFFERS) {
+            gSPTaskNum = 0;
+        }
+#else
         gSPTaskNum &= 1;
+#endif
     }
     if (gDrawFrameTimer) {
         gDrawFrameTimer--;
@@ -351,7 +362,12 @@ void main_game_loop(void) {
 #endif
     if (gDrawFrameTimer != 1) {
         if (gSkipGfxTask == FALSE) {
+#ifdef TARGET_PORT
+            // Waits for the frame before last instead when the game runs two frames ahead.
+            gScreenStatus = gfxtask_wait_ahead();
+#else
             gScreenStatus = gfxtask_wait();
+#endif
         }
     } else {
         gDrawFrameTimer = 0;
@@ -1430,11 +1446,19 @@ void alloc_displaylist_heap(s32 numberOfPlayers) {
         mempool_free_timer(0);
         mempool_free(gDisplayLists[0]);
         mempool_free(gDisplayLists[1]);
+#ifdef TARGET_PORT
+        mempool_free(gDisplayLists[2]);
+#endif
         totalSize = ((gNumF3dCmdsPerPlayer[num] * sizeof(Gfx))) + ((gNumHudMatPerPlayer[num] * sizeof(Mtx))) +
                     ((gNumHudVertsPerPlayer[num] * sizeof(Vertex))) + ((gNumHudTrisPerPlayer[num] * sizeof(Triangle)));
         gDisplayLists[0] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[0], COLOUR_TAG_RED);
         gDisplayLists[1] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[1], COLOUR_TAG_YELLOW);
+#ifdef TARGET_PORT
+        gDisplayLists[2] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[2], COLOUR_TAG_YELLOW);
+        if (gDisplayLists[0] == NULL || gDisplayLists[1] == NULL || gDisplayLists[2] == NULL) {
+#else
         if ((gDisplayLists[0] == NULL) || gDisplayLists[1] == NULL) {
+#endif
             if (gDisplayLists[0] != NULL) {
                 mempool_free(gDisplayLists[0]);
                 gDisplayLists[0] = NULL;
@@ -1443,6 +1467,12 @@ void alloc_displaylist_heap(s32 numberOfPlayers) {
                 mempool_free(gDisplayLists[1]);
                 gDisplayLists[1] = NULL;
             }
+#ifdef TARGET_PORT
+            if (gDisplayLists[2] != NULL) {
+                mempool_free(gDisplayLists[2]);
+                gDisplayLists[2] = NULL;
+            }
+#endif
             default_alloc_displaylist_heap();
         }
         gMatrixHeap[0] = (Mtx *) ((u8 *) gDisplayLists[0] + ((gNumF3dCmdsPerPlayer[num] * sizeof(Gfx))));
@@ -1451,6 +1481,11 @@ void alloc_displaylist_heap(s32 numberOfPlayers) {
         gMatrixHeap[1] = (Mtx *) ((u8 *) gDisplayLists[1] + ((gNumF3dCmdsPerPlayer[num] * sizeof(Gfx))));
         gTriangleHeap[1] = (Triangle *) ((u8 *) gMatrixHeap[1] + ((gNumHudMatPerPlayer[num] * sizeof(Mtx))));
         gVertexHeap[1] = (Vertex *) ((u8 *) gTriangleHeap[1] + ((gNumHudTrisPerPlayer[num] * sizeof(Triangle))));
+#ifdef TARGET_PORT
+        gMatrixHeap[2] = (Mtx *) ((u8 *) gDisplayLists[2] + ((gNumF3dCmdsPerPlayer[num] * sizeof(Gfx))));
+        gTriangleHeap[2] = (Triangle *) ((u8 *) gMatrixHeap[2] + ((gNumHudMatPerPlayer[num] * sizeof(Mtx))));
+        gVertexHeap[2] = (Vertex *) ((u8 *) gTriangleHeap[2] + ((gNumHudTrisPerPlayer[num] * sizeof(Triangle))));
+#endif
         gCurrNumF3dCmdsPerPlayer = gNumF3dCmdsPerPlayer[num];
         gCurrNumHudMatPerPlayer = gNumHudMatPerPlayer[num];
         gCurrNumHudTrisPerPlayer = gNumHudTrisPerPlayer[num];
@@ -1501,6 +1536,13 @@ void default_alloc_displaylist_heap(void) {
     gMatrixHeap[1] = (Mtx *) ((u8 *) gDisplayLists[1] + (gNumF3dCmdsPerPlayer[numberOfPlayers] * sizeof(Gfx)));
     gVertexHeap[1] = (Vertex *) ((u8 *) gMatrixHeap[1] + (gNumHudMatPerPlayer[numberOfPlayers] * sizeof(Mtx)));
     gTriangleHeap[1] = (Triangle *) ((u8 *) gVertexHeap[1] + (gNumHudVertsPerPlayer[numberOfPlayers] * sizeof(Vertex)));
+#ifdef TARGET_PORT
+    // A third set, for running two frames ahead of the renderer (port_render_ahead).
+    gDisplayLists[2] = (Gfx *) mempool_alloc_safe(totalSize, COLOUR_TAG_YELLOW);
+    gMatrixHeap[2] = (Mtx *) ((u8 *) gDisplayLists[2] + (gNumF3dCmdsPerPlayer[numberOfPlayers] * sizeof(Gfx)));
+    gVertexHeap[2] = (Vertex *) ((u8 *) gMatrixHeap[2] + (gNumHudMatPerPlayer[numberOfPlayers] * sizeof(Mtx)));
+    gTriangleHeap[2] = (Triangle *) ((u8 *) gVertexHeap[2] + (gNumHudVertsPerPlayer[numberOfPlayers] * sizeof(Vertex)));
+#endif
 
     gCurrNumF3dCmdsPerPlayer = gNumF3dCmdsPerPlayer[numberOfPlayers];
     gCurrNumHudMatPerPlayer = gNumHudMatPerPlayer[numberOfPlayers];

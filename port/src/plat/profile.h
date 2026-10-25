@@ -56,6 +56,14 @@ void prof_logic_end(void);
 /* Renderer: called after each display list, with the whole time it took (PROF_RDP is what the other stages leave). */
 void prof_render_task(unsigned long long totalNs);
 
+/*
+ * Parts of the renderer's time (PROF_RDP) on the 3DS, for finding where it goes: the backend's draw calls as a whole
+ * (what is left of PROF_RDP is the display list walk), and within them the guard band clipping, the GPU settings and
+ * the vertex and index writes. Logged with the profile line as averages per rendered frame.
+ */
+enum ProfPart { PROF_PART_BACKEND, PROF_PART_CLIP, PROF_PART_STATE, PROF_PART_WRITE, PROF_PART_COUNT };
+void prof_part(int part, unsigned long long ns);
+
 /* Statistics over a span of frames (a race, or the last second for the overlay). */
 typedef struct ProfStats {
     unsigned int gameFrames;      /* Frames the game thread produced. */

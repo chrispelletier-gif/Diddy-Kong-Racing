@@ -526,6 +526,19 @@ s32 __scTaskComplete(OSSched *sc, OSScTask *t) {
     if ((t->state & OS_SC_RCP_MASK) == 0) {
         if (t->msgQ) {
             if (t->flags & OS_SC_LAST_TASK) {
+#ifdef TARGET_PORT
+                // A frame already waits for the retrace: the port can finish a second one before it (the game runs
+                // two frames ahead, port_render_ahead), and there is one slot, so send the first one's message now.
+                if (sc->unkTask) {
+                    OSScTask *held = sc->unkTask;
+                    sc->unkTask = 0;
+                    if (held->unk68 || held->msg) {
+                        osSendMesg(held->msgQ, held->msg, OS_MESG_BLOCK);
+                    } else {
+                        osSendMesg(held->msgQ, &D_800DE730, OS_MESG_BLOCK);
+                    }
+                }
+#endif
                 if (sc->frameCount <= 1) {
                     sc->unkTask = t;
                     return 1;

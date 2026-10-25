@@ -3120,9 +3120,22 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     int first, vertex, count, fmt, flat = state->flat, indexed = indexed_enabled();
     int vertBytes, written;
     u16 *ibo = NULL;
+    // Timed in parts while the profiler is on (prof_part); a tick read costs a system call.
+    int timed = prof_enabled();
+    unsigned long long t0 = 0, t1 = 0, t2 = 0, t3;
 
+    if (timed) {
+        t0 = plat_time_ns();
+    }
     clip_to_guard_band(&verts, &numVerts, &indices, &numTriangles);
+    if (timed) {
+        t1 = plat_time_ns();
+        prof_part(PROF_PART_CLIP, t1 - t0);
+    }
     if (numTriangles == 0) {
+        if (timed) {
+            prof_part(PROF_PART_BACKEND, t1 - t0);
+        }
         return;
     }
     count = numTriangles * 3;
@@ -3186,6 +3199,10 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         set_all_state(state, &su0, &sv0, &su1, &sv1);
     }
 
+    if (timed) {
+        t2 = plat_time_ns();
+        prof_part(PROF_PART_STATE, t2 - t1);
+    }
     vertex = use_vertex_format(fmt);
     if (indexed && vertex + numVerts > 0xFFFF) {
         // The indices are 16 bits from the start of the buffer setting: start a new one here.
@@ -3201,12 +3218,19 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         }
         sIboUsed += count;
     }
+    if (timed) {
+        t3 = plat_time_ns();
+        prof_part(PROF_PART_WRITE, t3 - t2);
+    }
     draw_prims(vertex, count, ibo);
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
     }
     sVboUsed += vertBytes;
     sFrameTriangles += numTriangles;
+    if (timed) {
+        prof_part(PROF_PART_BACKEND, plat_time_ns() - t0);
+    }
 }
 
 /* A triangle list: each corner its own vertex. */
