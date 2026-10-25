@@ -75,6 +75,16 @@ The menus are driven by the stick, as on the N64. At the bottom of the bottom sc
 test while a test run is on). The rest of the touch screen does nothing while the menu is closed, so a stray tap can't
 interrupt a race; holding SELECT while touching anywhere also sends a bug report.
 
+## Settings in the game's menus
+
+The same settings are also in the game's own menus, drawn in its fonts and dialogue boxes (`src/menu.c`, with the
+categories in `src/plat/options.c`). The Options menu gets VIDEO OPTIONS (anti-aliasing, frame rate, 16-bit buffers,
+mipmaps, colour boost, widescreen, 800 pixels, stereo 3D), CAMERA OPTIONS and CONTROL OPTIONS rows next to the game's
+own, and the Audio Options screen a MORE AUDIO OPTIONS row with the Sound settings. The pause menu gets an OPTIONS row
+that lists the same categories, without the settings that only apply after a restart. Up and down pick a row, left
+and right (or A) change it, B goes back. Both menus change the same saved values as the bottom screen's Settings menu,
+which redraws when the game's menus change something it shows.
+
 ## Settings menu (3DS)
 
 Settings opens a menu over the bottom screen; tap a row to change it (the left half of a value steps back), and Close,
