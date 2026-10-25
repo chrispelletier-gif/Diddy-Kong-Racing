@@ -116,12 +116,14 @@ s32 port_apply_test_save(void *settingsPtr) {
 }
 
 const char *volatile gPortGameStage = "starting";
+const char *volatile gPortAudioStage = "starting";
 extern f32 gObjectUpdateRateF; // objects.c
 
 /* port.h: for the watchdog's hang message. Read from another thread, so it may be a frame out of date. */
 void port_describe_game_state(char *buffer, s32 size) {
     s32 mode = get_game_mode();
-    plat_snprintf(buffer, size, "game thread %s; %s, level %d%s, logic rate %d", gPortGameStage,
+    plat_snprintf(buffer, size, "game thread %s; sound thread %s; %s, level %d%s, logic rate %d", gPortGameStage,
+                  gPortAudioStage,
                   mode == GAMEMODE_INTRO    ? "intro"
                   : mode == GAMEMODE_INGAME ? "in game"
                   : mode == GAMEMODE_MENU   ? "menu"

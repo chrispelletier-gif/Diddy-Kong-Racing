@@ -203,6 +203,8 @@ void port_set_logic_rate(s32 updateRate);
  * game's state (port_test.c), which the 3DS watchdog logs when no frame has been drawn for a while.
  */
 extern const char *volatile gPortGameStage;
+/* What the sound thread is doing (for the 3DS watchdog's stall report). */
+extern const char *volatile gPortAudioStage;
 void port_describe_game_state(char *buffer, s32 size);
 
 /* Logging. */

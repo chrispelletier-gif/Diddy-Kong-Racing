@@ -371,6 +371,21 @@ static volatile u8 sBlockedSending[MAX_THREADS];
 
 static void wait_on_queue_inner(OSMesgQueue *mq, int forSpace);
 
+/*
+ * On the N64 a thread with interrupts disabled cannot be switched away from until it blocks: nothing can wake a
+ * higher priority thread. Here the other threads still get their messages (the scheduler may already be running), so
+ * a woken thread first waits for any interrupt disabled section to end. Without this the sound thread could run in the
+ * middle of the game's (sound_play's sndp_allocate's) and edit the same lists, which tied them into a loop the sound
+ * thread then spun in forever (60 fps freezes, issues #91, #93, #97 and #102). Not needed in lockstep, where only one
+ * thread runs and the CPU only changes hands when a thread blocks.
+ */
+static void wait_for_int_enabled(void) {
+    if (!sIntDisabled && !port_lockstep_enabled()) {
+        plat_intlock_lock();
+        plat_intlock_unlock();
+    }
+}
+
 /* Blocks the calling thread until mq may have a message (or space, for a sender). Kernel lock held. */
 static void wait_on_queue(OSMesgQueue *mq, int forSpace) {
     s32 t = thread_index((OSThread *) plat_get_current_os_thread());
@@ -430,6 +445,7 @@ void osCreateMesgQueue(OSMesgQueue *mq, OSMesg *msg, s32 count) {
 
 s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     int hadInt = (flag == OS_MESG_BLOCK) ? port_int_release() : FALSE;
+    int waited = FALSE;
 
     plat_klock();
     while (mq->validCount >= mq->msgCount) {
@@ -439,17 +455,22 @@ s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
             return -1;
         }
         wait_on_queue(mq, TRUE);
+        waited = TRUE;
     }
     mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
     mq->validCount++;
     plat_kbroadcast();
     plat_kunlock();
     port_int_restore(hadInt);
+    if (waited) {
+        wait_for_int_enabled();
+    }
     return 0;
 }
 
 s32 osJamMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     int hadInt = (flag == OS_MESG_BLOCK) ? port_int_release() : FALSE;
+    int waited = FALSE;
 
     plat_klock();
     while (mq->validCount >= mq->msgCount) {
@@ -459,6 +480,7 @@ s32 osJamMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
             return -1;
         }
         wait_on_queue(mq, TRUE);
+        waited = TRUE;
     }
     mq->first = (mq->first + mq->msgCount - 1) % mq->msgCount;
     mq->msg[mq->first] = msg;
@@ -466,11 +488,15 @@ s32 osJamMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     plat_kbroadcast();
     plat_kunlock();
     port_int_restore(hadInt);
+    if (waited) {
+        wait_for_int_enabled();
+    }
     return 0;
 }
 
 s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag) {
     int hadInt = (flag == OS_MESG_BLOCK) ? port_int_release() : FALSE;
+    int waited = FALSE;
 
     plat_klock();
     while (mq->validCount == 0) {
@@ -480,6 +506,7 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag) {
             return -1;
         }
         wait_on_queue(mq, FALSE);
+        waited = TRUE;
     }
     if (msg != NULL) {
         *msg = mq->msg[mq->first];
@@ -489,6 +516,9 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag) {
     plat_kbroadcast();
     plat_kunlock();
     port_int_restore(hadInt);
+    if (waited) {
+        wait_for_int_enabled();
+    }
     return 0;
 }
 

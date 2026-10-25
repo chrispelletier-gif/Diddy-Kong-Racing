@@ -39,6 +39,9 @@
 #include <libaudio.h>
 #include <os_internal.h>
 #include <ultraerror.h>
+#ifdef TARGET_PORT
+extern const char *volatile gPortAudioStage;
+#endif
 #include <assert.h>
 #include "seqp.h"
 #include "cseqp.h"
@@ -142,6 +145,9 @@ static ALMicroTime __CSPVoiceHandler(void *node)
     f32             oscValue;
     u8              chan;
 
+#ifdef TARGET_PORT
+    gPortAudioStage = "handling music events";
+#endif
     do {
         switch (seqp->nextEvent.type)
         {
@@ -340,6 +346,9 @@ static ALMicroTime __CSPVoiceHandler(void *node)
         seqp->nextDelta = alEvtqNextEvent(&seqp->evtq, &seqp->nextEvent); 
         
     } while (seqp->nextDelta == 0);
+#ifdef TARGET_PORT
+    gPortAudioStage = "synthesizing a frame";
+#endif
 
     /*
      * assume that next callback won't be more than half an
