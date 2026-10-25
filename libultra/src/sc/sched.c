@@ -138,9 +138,38 @@ static u32      logArray[SC_LOG_LEN/sizeof(u32)];
 /***********************************************************************
  * Scheduler API
  **********************************************************************/
+#ifdef TARGET_PORT
+static OSSched *sPortSched;
+
+static const char *port_task_name(OSScTask *t) {
+    if (t == NULL) {
+        return "none";
+    }
+    return t->list.t.type == M_AUDTASK ? "audio" : t->list.t.type == M_GFXTASK ? "gfx" : "other";
+}
+
+/* For the 3DS watchdog's stall report: what the scheduler holds and how full its queues are. */
+void port_describe_sched(char *buffer, s32 size) {
+    OSSched *sc = sPortSched;
+    if (sc == NULL) {
+        plat_snprintf(buffer, size, "scheduler not started");
+        return;
+    }
+    plat_snprintf(buffer, size, "scheduler: rsp %s rdp %s held %s, retraces %u, audio list %d gfx list %d, "
+                  "interrupt queue %d/%d, command queue %d/%d",
+                  port_task_name(sc->curRSPTask), port_task_name(sc->curRDPTask), port_task_name(sc->unkTask),
+                  (unsigned) sc->frameCount, sc->audioListHead != NULL, sc->gfxListHead != NULL,
+                  (int) sc->interruptQ.validCount, (int) sc->interruptQ.msgCount, (int) sc->cmdQ.validCount,
+                  (int) sc->cmdQ.msgCount);
+}
+#endif
+
 void osCreateScheduler(OSSched *sc, void *stack, OSPri priority,
                        u8 mode, u8 numFields)
 {
+#ifdef TARGET_PORT
+    sPortSched = sc;
+#endif
     sc->curRSPTask      = 0;
     sc->curRDPTask      = 0;
     sc->clientList      = 0;

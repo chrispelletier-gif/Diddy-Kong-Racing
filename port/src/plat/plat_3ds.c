@@ -709,13 +709,39 @@ static void status_lines(const char *first, const char *second) {
 long port_autorun_enabled(void);
 void port_describe_game_state(char *buffer, long size);
 extern volatile unsigned long gPortEventsDropped;
+extern volatile unsigned long gPortEventsWaiting;
+void port_describe_sched(char *buffer, long size);
+void port_describe_threads(char *buffer, long size);
+void port_describe_rcp(char *buffer, long size);
+
+/*
+ * What every part of the emulated N64 is doing, logged 3 seconds into a stall (so a bug report sent soon after has it)
+ * and again with the hang log: the game's stage, the scheduler, the RCP workers, the queue each N64 thread is blocked
+ * on, and how busy the cores were over the last second (busy cores with nothing moving mean a thread is spinning;
+ * idle ones mean the threads are waiting on each other).
+ */
+static void log_stall_state(int seconds, unsigned idlePct, unsigned renderIdlePct) {
+    char text[512];
+    snprintf(text, sizeof(text), "stalled %d s: game core idle %u%%, render core idle %u%%, %lu done messages waiting, "
+             "%lu event messages lost\n", seconds, idlePct, renderIdlePct, gPortEventsWaiting, gPortEventsDropped);
+    log_line("watchdog: ", text);
+    port_describe_game_state(text, sizeof(text));
+    log_line("watchdog: ", text);
+    port_describe_sched(text, sizeof(text));
+    log_line("watchdog: ", text);
+    port_describe_rcp(text, sizeof(text));
+    log_line("watchdog: ", text);
+    port_describe_threads(text, sizeof(text));
+    log_line("watchdog: ", text);
+}
 
 /*
  * A renderer that has drawn nothing for 20 seconds (outside the HOME menu) is taken as a hang: the recent log is saved
  * to hang_log.txt, which the bug report on the next launch sends, and during the unattended test run the hang is
  * written down for the next launch to record (port_autorun.c). Both files go again if drawing resumes.
  */
-static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written) {
+static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, unsigned idlePct,
+                           unsigned renderIdlePct) {
     static char sRecent[40 * 1024];
     char path[256], logPath[256], text[160];
     snprintf(path, sizeof(path), "%s/autorun_hang.txt", plat_data_dir());
@@ -729,18 +755,18 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written) {
         }
         return;
     }
-    if (++*stalledSeconds == 20) {
+    if (++*stalledSeconds == 1) {
+        start_idle_meters(); // So the report at 3 seconds can say how busy the cores are.
+    }
+    if (*stalledSeconds == 3) {
+        log_stall_state(*stalledSeconds, idlePct, renderIdlePct);
+    }
+    if (*stalledSeconds == 20) {
         snprintf(text, sizeof(text), "renderer stuck while %s (gfx %u/%u, vi %u)\n",
                  gPlatGfxStage != NULL ? gPlatGfxStage : "-", gPlatCounters[PLAT_COUNTER_GFX_QUEUED],
                  gPlatCounters[PLAT_COUNTER_GFX_DONE], gPlatCounters[PLAT_COUNTER_VI]);
         log_line("watchdog: ", text);
-        {
-            char state[160];
-            port_describe_game_state(state, sizeof(state));
-            log_line("watchdog: ", state);
-            snprintf(state, sizeof(state), "%lu event messages lost to a full queue", gPortEventsDropped);
-            log_line("watchdog: ", state);
-        }
+        log_stall_state(*stalledSeconds, idlePct, renderIdlePct);
         *written = 1;
         if (port_autorun_enabled()) {
             plat_save_file(path, text, strlen(text));
@@ -752,6 +778,7 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written) {
 static void watchdog(void *arg) {
     unsigned int last[PLAT_COUNTER_COUNT];
     int seconds = 0, stalledSeconds = 0, hangWritten = 0;
+    unsigned long long lastIdle = 0, lastRenderIdle = 0;
 
     (void) arg;
     memset(last, 0, sizeof(last));
@@ -778,7 +805,16 @@ static void watchdog(void *arg) {
                      now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED],
                      now[PLAT_COUNTER_TEXTURE_FAILED], gpuFree / 10, gpuFree % 10, heapFree / 10, heapFree % 10);
         }
-        check_for_hang(now[PLAT_COUNTER_GFX_DONE] != last[PLAT_COUNTER_GFX_DONE], &stalledSeconds, &hangWritten);
+        {
+            // Idle time is only counted once the profiler or a stall has started the meters; 0 until then.
+            unsigned long long idle = sIdleNs, renderIdle = sRcpCore != 0 ? sRenderIdleNs : sIdleNs;
+            unsigned idlePct = lastIdle != 0 ? (unsigned) ((idle - lastIdle) / 10000000ULL) : 0;
+            unsigned renderIdlePct = lastRenderIdle != 0 ? (unsigned) ((renderIdle - lastRenderIdle) / 10000000ULL) : 0;
+            lastIdle = idle;
+            lastRenderIdle = renderIdle;
+            check_for_hang(now[PLAT_COUNTER_GFX_DONE] != last[PLAT_COUNTER_GFX_DONE], &stalledSeconds, &hangWritten,
+                           idlePct, renderIdlePct);
+        }
         memcpy(last, now, sizeof(last));
 
         // The status lines at the bottom of the screen, cut to fit.

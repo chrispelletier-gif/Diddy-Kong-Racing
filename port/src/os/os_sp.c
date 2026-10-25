@@ -31,6 +31,8 @@ static s32 sRcpStarted;
 static volatile s32 sGfxTasksPending;
 /* Tasks handed to the workers whose completion has not been raised yet (kernel lock). */
 static s32 sRcpTasksBusy;
+/* What the audio worker is doing, for the 3DS watchdog's stall report. */
+static const char *volatile sAudioStage = "not started";
 
 static OSTask *worker_next(RcpWorker *worker) {
     OSTask *task;
@@ -55,6 +57,13 @@ static void task_done(void) {
     sRcpTasksBusy--;
     plat_kbroadcast();
     plat_kunlock();
+}
+
+void port_describe_rcp(char *buffer, s32 size) {
+    plat_snprintf(buffer, size, "rcp: gfx tasks %u taken of %u, audio tasks %u taken of %u, %d busy, %d gfx pending, "
+                  "audio worker %s", (unsigned) sGfxWorker.read, (unsigned) sGfxWorker.write,
+                  (unsigned) sAudioWorker.read, (unsigned) sAudioWorker.write, (int) sRcpTasksBusy,
+                  (int) sGfxTasksPending, sAudioStage);
 }
 
 int port_rcp_idle(void) {
@@ -92,13 +101,16 @@ static void audio_thread(void *arg) {
     (void) arg;
     port_int_thread_init();
     for (;;) {
+        sAudioStage = "waiting for a task";
         task = worker_next(&sAudioWorker);
+        sAudioStage = "mixing";
         if (task->t.type == M_AUDTASK) {
             unsigned long long start = plat_time_ns();
             port_audio_run_task(task);
             prof_add(PROF_AUDIO, plat_time_ns() - start);
             gPlatCounters[PLAT_COUNTER_AUDIO]++;
         }
+        sAudioStage = "raising the SP interrupt";
         port_raise_event(OS_EVENT_SP);
         task_done();
     }

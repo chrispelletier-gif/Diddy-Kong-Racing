@@ -365,8 +365,47 @@ void port_lockstep_dma(u32 numBytes) {
 
 /******************************** Message queues ********************************/
 
+/* The queue each started thread is blocked on (for the 3DS watchdog's stall report). Kernel lock held to change. */
+static OSMesgQueue *volatile sBlockedOn[MAX_THREADS];
+static volatile u8 sBlockedSending[MAX_THREADS];
+
+static void wait_on_queue_inner(OSMesgQueue *mq, int forSpace);
+
 /* Blocks the calling thread until mq may have a message (or space, for a sender). Kernel lock held. */
 static void wait_on_queue(OSMesgQueue *mq, int forSpace) {
+    s32 t = thread_index((OSThread *) plat_get_current_os_thread());
+    if (t >= 0) {
+        sBlockedOn[t] = mq;
+        sBlockedSending[t] = forSpace;
+    }
+    wait_on_queue_inner(mq, forSpace);
+    if (t >= 0) {
+        sBlockedOn[t] = NULL;
+    }
+}
+
+/*
+ * One line per N64 thread: its id, and the queue it is blocked on (address, messages held / size) or "running" if
+ * it is not blocked on a queue (working, spinning, or waiting on something else).
+ */
+void port_describe_threads(char *buffer, s32 size) {
+    s32 i, used = 0;
+    buffer[0] = '\0';
+    // No kernel lock: this runs in the middle of a stall, perhaps one where a thread holds it.
+    for (i = 0; i < sNumThreads && used < size - 1; i++) {
+        OSMesgQueue *mq = sBlockedOn[i];
+        if (mq != NULL) {
+            used += plat_snprintf(buffer + used, size - used, "%sthread %d %s %p (%d/%d)", i > 0 ? ", " : "",
+                                  (int) sThreads[i]->id, sBlockedSending[i] ? "sending to" : "waiting on", (void *) mq,
+                                  (int) mq->validCount, (int) mq->msgCount);
+        } else {
+            used += plat_snprintf(buffer + used, size - used, "%sthread %d running", i > 0 ? ", " : "",
+                                  (int) sThreads[i]->id);
+        }
+    }
+}
+
+static void wait_on_queue_inner(OSMesgQueue *mq, int forSpace) {
     s32 i = port_lockstep_enabled() ? thread_index((OSThread *) plat_get_current_os_thread()) : -1;
     if (i < 0) {
         plat_kwait();
@@ -492,6 +531,8 @@ void osSetEventMesg(OSEvent event, OSMesgQueue *mq, OSMesg msg) {
 /* Raises an emulated hardware event. Waits for any thread that has interrupts disabled. */
 /* Event messages lost to a full queue (logged by the 3DS watchdog with a hang). */
 volatile u32 gPortEventsDropped;
+/* Task-done messages waiting for room in a full queue right now. */
+volatile u32 gPortEventsWaiting;
 
 void port_raise_event(OSEvent event) {
     static u32 sWaits;
@@ -515,12 +556,16 @@ void port_raise_event(OSEvent event) {
         }
         if (!waited) {
             waited = TRUE;
+            gPortEventsWaiting++;
             if (sWaits++ % 64 == 0) {
                 port_log("event queue full: %s done message waits for the scheduler (%u times)",
                          event == OS_EVENT_SP ? "SP" : "DP", (unsigned) sWaits);
             }
         }
         plat_sleep_ns(500000ULL);
+    }
+    if (waited) {
+        gPortEventsWaiting--;
     }
 }
 
