@@ -135,6 +135,9 @@ void plat_rom_loaded(void);
 extern volatile int gPlatSnapshotRequested;
 /* The frame number of the last snapshot saved (its files are diff_NNNNN_*), or 0 before the first one. */
 extern volatile int gPlatSnapshotSaved;
+/* What the player's kart is doing (lap, boost, item, ...), written by the game thread each frame (port_autorun.c) for
+ * bug reports to show next to the renderer's frame timing. */
+extern volatile char gPlatGameNote[64];
 
 /* Copies the most recent log lines, oldest first, into out (3DS only; empty elsewhere). Returns the length. */
 int plat_log_recent(char *out, int size);

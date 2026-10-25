@@ -1270,11 +1270,23 @@ void port_autorun_frame(s32 updateRate) {
     if (sRequest != REQUEST_NONE) {
         handle_request();
     }
+    obj = (get_game_mode() == GAMEMODE_INGAME) ? get_racer_object_by_port(PLAYER_ONE) : NULL;
+    racer = (obj != NULL) ? obj->racer : NULL;
+    {
+        // What the player is doing, for bug reports (gPlatGameNote).
+        char note[sizeof(gPlatGameNote)];
+        if (racer != NULL) {
+            plat_snprintf(note, sizeof(note), "lap %d cp %d boost %d item %d/%d shield %d magnet %d hit %d",
+                          racer->lap + 1, racer->nextCheckpoint, racer->boostTimer, racer->balloon_type,
+                          racer->balloon_quantity, racer->shieldTimer, racer->magnetTimer, racer->attackType);
+        } else {
+            plat_snprintf(note, sizeof(note), "not racing");
+        }
+        memcpy((char *) gPlatGameNote, note, sizeof(note));
+    }
     if (!port_autorun_active()) {
         return;
     }
-    obj = (get_game_mode() == GAMEMODE_INGAME) ? get_racer_object_by_port(PLAYER_ONE) : NULL;
-    racer = (obj != NULL) ? obj->racer : NULL;
     switch (sPhase) {
         case PHASE_LOADING:
             if (racer != NULL) {
