@@ -907,7 +907,7 @@ static char sCapturePath[256];
  * line (a screen column is a row of the rotated picture). DKR_RECENT_FRAMES=0 turns it off.
  */
 #define RECENT_SLOTS 8
-#define RECENT_EVERY 4
+#define RECENT_EVERY 3 // Odd, so the ring holds both even and odd frames
 #define RECENT_KEEP 2
 #define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8, 2 in 16-bit)
 static u8 *sRecent[RECENT_SLOTS];
@@ -1035,11 +1035,12 @@ static void allocate_recent_frames(void) {
 
 /*
  * The line watch: every frame, the last finished picture (the back buffer, before this frame's transfer is queued
- * into it) is checked for a bright vertical line, sampling every 4th pixel down each screen column. The first one
+ * into it) is checked for a bright vertical line, sampling every 8th pixel down each screen column. The first one
  * found sends a bug report by itself, so its snapshot (the next frame's draws, while the line is still there) shows
- * what drew it. Every other frame; normal frames score under 10 of 60. DKR_LINE_WATCH=0 turns it off.
+ * what drew it. Every frame, so a line shown only on odd or only on even frames is caught too; races score up to
+ * about 12 of 30. DKR_LINE_WATCH=0 turns it off.
  */
-#define LINE_WATCH_SAMPLES (TOP_HEIGHT / 4)
+#define LINE_WATCH_SAMPLES (TOP_HEIGHT / 8)
 #define LINE_WATCH_FOUND (LINE_WATCH_SAMPLES / 2)
 void bugreport_request(void);
 static int sLineWatch = -1, sLineReported, sLineLogged, sLineBest, sLineBestColumn;
@@ -1055,7 +1056,7 @@ static inline int pixel_luma(const u8 *p, int bpp) {
 }
 
 /* In 3D (eyes 2) each eye is scored on its own, so rows at the edge of one eye are never compared with the other's. */
-static int line_score(const u8 *pixels, int rows, int bpp, int step, int eyes, int *where) {
+static int line_score(const u8 *pixels, int rows, int bpp, int first, int step, int eyes, int *where) {
     int r, x, best = 0, stride = TOP_HEIGHT * bpp, eyeRows = rows / eyes;
     *where = -1;
     for (r = 3; r < rows - 3; r++) {
@@ -1064,7 +1065,7 @@ static int line_score(const u8 *pixels, int rows, int bpp, int step, int eyes, i
         }
         const u8 *row = pixels + r * stride, *left = row - 3 * stride, *right = row + 3 * stride;
         int count = 0;
-        for (x = 0; x < TOP_HEIGHT; x += step) {
+        for (x = first; x < TOP_HEIGHT; x += step) {
             int c = pixel_luma(row + x * bpp, bpp);
             if (c > pixel_luma(left + x * bpp, bpp) + 80 && c > pixel_luma(right + x * bpp, bpp) + 80) {
                 count++;
@@ -1085,7 +1086,7 @@ static void watch_for_line(void) {
         const char *env = plat_getenv("DKR_LINE_WATCH");
         sLineWatch = env != NULL ? atoi(env) : 1;
     }
-    if (!sLineWatch || sRecentScreenRows == 0 || sRecentFrozen || (sFrameCount & 1) != 0) {
+    if (!sLineWatch || sRecentScreenRows == 0 || sRecentFrozen) {
         return;
     }
     for (e = 0; e < 2; e++) {
@@ -1097,7 +1098,8 @@ static void watch_for_line(void) {
             // DKR_LINE_WATCH=2 tests it: a white line down the middle of the old picture a minute in.
             memset(eyes[e] + sRecentScreenRows / 2 * TOP_HEIGHT * sRecentScreenBpp, 255, TOP_HEIGHT * sRecentScreenBpp);
         }
-        score = line_score(eyes[e], sRecentScreenRows, sRecentScreenBpp, 4, 1, &where);
+        // Every 8th pixel down the column, starting 4 further on odd frames.
+        score = line_score(eyes[e], sRecentScreenRows, sRecentScreenBpp, (sFrameCount & 1) * 4, 8, 1, &where);
         if (score > sLineBest) {
             sLineBest = score;
             sLineBestColumn = where * TOP_WIDTH / sRecentScreenRows;
@@ -1162,7 +1164,7 @@ static void save_recent_frames(int snapshotFrame) {
         if (sRecentFrame[i] >= 0) {
             int eyeRows = sRecentRows[i] / sRecentEyes[i];
             GSPGPU_InvalidateDataCache(sRecent[i], sRecentRows[i] * TOP_HEIGHT * sRecentBpp[i]);
-            score[i] = line_score(sRecent[i], sRecentRows[i], sRecentBpp[i], 1, sRecentEyes[i], &where[i]);
+            score[i] = line_score(sRecent[i], sRecentRows[i], sRecentBpp[i], 0, 1, sRecentEyes[i], &where[i]);
             // Columns are counted in the 400-pixel screen, whatever the render width.
             plat_log("recent frame %d: line score %d at %scolumn %d", sRecentFrame[i], score[i],
                      sRecentEyes[i] == 1 || where[i] < 0 ? "" : (where[i] < eyeRows ? "left eye, " : "right eye, "),
