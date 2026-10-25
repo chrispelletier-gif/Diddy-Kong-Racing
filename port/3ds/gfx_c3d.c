@@ -38,6 +38,9 @@ extern C3DContextStart __C3D_Context;
 /* Bytes of vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most
  * about 3000 triangles, 9000 vertices, a frame, which is 48K of the largest vertices. */
 #define VBO_BYTES (48 * 1024 * 48)
+/* Bytes of vertex indices per frame (gfxb_draw_indexed): three 16-bit indices a triangle, more for triangles the guard
+ * band cuts up. */
+#define IBO_BYTES (64 * 1024)
 
 /*
  * What the vertex shader receives (roadmap item P5): the position already in the 3DS screen's clip space, the first
@@ -97,6 +100,8 @@ static u8 *sVbo; // The vertex buffer of the frame being built
 static int sVboUsed; // Bytes
 /* Vertices before this one have been flushed from the CPU cache this frame (see flush_new_vertices). */
 static int sVboFlushed;
+static u16 *sIbo; // The index buffer of the frame being built
+static int sIboUsed, sIboFlushed; // Indices
 static C3D_Tex sWhiteTex;
 extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
 static int sFrameStarted;
@@ -163,6 +168,13 @@ static void flush_new_vertices(void) {
         GSPGPU_FlushDataCache(sVbo + sVboFlushed, sVboUsed - sVboFlushed);
     }
     sVboFlushed = sVboUsed;
+    if (sIboFlushed > sIboUsed) {
+        sIboFlushed = 0;
+    }
+    if (sIboUsed > sIboFlushed && sIbo != NULL) {
+        GSPGPU_FlushDataCache(sIbo + sIboFlushed, (sIboUsed - sIboFlushed) * sizeof(u16));
+    }
+    sIboFlushed = sIboUsed;
 }
 
 
@@ -294,7 +306,7 @@ static int use_vertex_format(int fmt) {
  */
 
 // Bump when the self test, the vertex format or the shader changes, so that the test runs again once.
-#define GPU_SELF_TEST_VERSION 3
+#define GPU_SELF_TEST_VERSION 4
 static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
 static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
@@ -398,6 +410,7 @@ static void gpu_self_test(void) {
         "+ vertex format changes",
         "game clear rectangles",
         "+ stereo eye offset",
+        "+ indexed triangles",
     };
     GfxDrawState state;
     C3D_TexEnv *env;
@@ -519,6 +532,19 @@ static void gpu_self_test(void) {
     C3D_DrawArrays(GPU_TRIANGLES, first, 3);
     write_eye(0.0f, 0.0f);
     gpu_test_end(sNames[11]);
+
+    // 14: vertices drawn by index (P16), the index buffer in linear memory next to the vertices.
+    gpu_test_step(sNames[12]);
+    first = gpu_test_triangle(-1);
+    {
+        static const u16 sOrder[3] = { 2, 0, 1 };
+        for (i = 0; i < 3; i++) {
+            sIbo[i] = (u16) (first + sOrder[i]);
+        }
+        GSPGPU_FlushDataCache(sIbo, 3 * sizeof(u16));
+        C3D_DrawElements(GPU_TRIANGLES, 3, C3D_UNSIGNED_SHORT, sIbo);
+    }
+    gpu_test_end(sNames[12]);
     sVfmtBound = -1;
 
     plat_status("GPU test passed");
@@ -1184,6 +1210,7 @@ static int sHangSaved;
 #define MAX_LIST_PARTS 26 // With the rest of the list, the display transfer and a clear, under citro3d's 32 entries
 typedef struct FrameSlot {
     u8 *vbo;             // VBO_BYTES of vertices
+    u16 *ibo;            // IBO_BYTES of vertex indices
     u32 *cmd;            // The command list, sCmdWords long
     u32 *partAddr[MAX_LIST_PARTS];
     u32 partWords[MAX_LIST_PARTS];
@@ -1216,15 +1243,20 @@ static void alloc_frame_slots(void) {
     sCmdWords = __C3D_Context.cmdBufSize;
     for (i = 0; i < 2; i++) {
         sSlots[i].vbo = linearAlloc(VBO_BYTES);
+        sSlots[i].ibo = linearAlloc(IBO_BYTES);
         sSlots[i].cmd = linearAlloc(sCmdWords * 4);
-        if (sSlots[i].vbo == NULL || sSlots[i].cmd == NULL) {
+        if (sSlots[i].vbo == NULL || sSlots[i].ibo == NULL || sSlots[i].cmd == NULL) {
             if (sSlots[i].vbo != NULL) {
                 linearFree(sSlots[i].vbo);
+            }
+            if (sSlots[i].ibo != NULL) {
+                linearFree(sSlots[i].ibo);
             }
             if (sSlots[i].cmd != NULL) {
                 linearFree(sSlots[i].cmd);
             }
             sSlots[i].vbo = NULL;
+            sSlots[i].ibo = NULL;
             sSlots[i].cmd = NULL;
             break;
         }
@@ -1241,6 +1273,7 @@ static void alloc_frame_slots(void) {
              sNumSlots, (unsigned long) (VBO_BYTES / 1024),
              (unsigned long) (sCmdWords * 4 / 1024), (unsigned long) (linearSpaceFree() / 1024));
     sVbo = sSlots[0].vbo;
+    sIbo = sSlots[0].ibo;
 }
 
 /* Ends the part of the command list so far, which the GPU then finishes before it starts on the rest. */
@@ -1297,19 +1330,31 @@ static void bind_target(C3D_RenderTarget *target) {
     GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
 }
 
-/* Draws the vertices once, or in 3D once for each eye. */
-static void draw_arrays(int vertex, int count) {
+/* Draws count vertices from vertex on, or the count vertices the indices name; once, or in 3D once for each eye. */
+static void draw_prims(int vertex, int count, const u16 *indices) {
     if (!sStereo) {
-        C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+        if (indices != NULL) {
+            C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+        } else {
+            C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+        }
         return;
     }
     // sEyeSep is positive for the left eye's offset; what is sEyeConv away stays at the depth of the screen.
     bind_target(sTarget);
     write_eye(sEyeSep, -sEyeSep * sEyeConv);
-    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    if (indices != NULL) {
+        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+    } else {
+        C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    }
     bind_target(sTargetRight);
     write_eye(-sEyeSep, sEyeSep * sEyeConv);
-    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    if (indices != NULL) {
+        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+    } else {
+        C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    }
 }
 
 static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
@@ -1561,6 +1606,9 @@ void gfxb_start_frame(void) {
     sVbo = slot->vbo;
     sVboUsed = 0;
     sVboFlushed = 0;
+    sIbo = slot->ibo;
+    sIboUsed = 0;
+    sIboFlushed = 0;
     sVfmtBound = -1; // The first draw points the GPU at this slot's buffer.
     sVfmtSwitches = 0;
     GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
@@ -1693,6 +1741,9 @@ void gfxb_end_frame(void) {
 
         if (full_flush()) {
             GSPGPU_FlushDataCache(sVbo, sVboUsed);
+            if (sIboUsed > 0) {
+                GSPGPU_FlushDataCache(sIbo, sIboUsed * sizeof(u16));
+            }
         } else {
             flush_new_vertices();
         }
@@ -2874,7 +2925,9 @@ void C3Di_UpdateContext(void);
 
 static int sGuardBand = -1;
 static GfxVertex *sClipVerts;
-static int sClipCapacity;
+static u16 *sClipIndices;
+static u8 *sClipOutside; // For each vertex of the draw: outside the guard band
+static int sClipCapacity, sClipIndexCapacity, sClipOutsideCapacity;
 
 static inline int outside_band(const GfxVertex *v) {
     float g = GUARD_BAND * v->w;
@@ -2906,48 +2959,72 @@ static void lerp_vertex(GfxVertex *out, const GfxVertex *a, const GfxVertex *b, 
     out->a = (unsigned char) (a->a + (b->a - a->a) * t + 0.5f);
 }
 
-/* Returns the triangles with any that leave the guard band clipped to it, in a buffer of its own, or verts itself
- * when none do. */
-static const GfxVertex *clip_to_guard_band(const GfxVertex *verts, int *numTriangles) {
+static int grow(void **buf, int *capacity, int needed, size_t size) {
+    void *grown;
+    int capacity2;
+    if (needed <= *capacity) {
+        return 1;
+    }
+    capacity2 = *capacity * 2 > needed ? *capacity * 2 : needed;
+    grown = realloc(*buf, capacity2 * size);
+    if (grown == NULL) {
+        return 0;
+    }
+    *buf = grown;
+    *capacity = capacity2;
+    return 1;
+}
+
+/*
+ * Clips the triangles that leave the guard band to it. Each vertex is tested once; when none is outside, the draw is
+ * left as it is. Otherwise the vertices are copied, and the clipped triangles' new corners added after them, into
+ * buffers of their own, which replace verts and indices: triangles within the band keep their indices, the others
+ * are replaced by the fan of their clipped polygon (at most 7 corners, so 5 triangles).
+ */
+static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16 **indices, int *numTriangles) {
     GfxVertex poly[2][16];
-    int i, j, k, n, plane, count = *numTriangles * 3, used = 0;
+    const GfxVertex *in = *verts;
+    const u16 *idx = *indices;
+    int i, j, k, n, plane, count = *numTriangles * 3, used, usedIdx, any = 0;
 
     if (sGuardBand < 0) {
         const char *env = plat_getenv("DKR_GUARD_BAND");
         sGuardBand = env == NULL || atoi(env) != 0;
     }
-    if (!sGuardBand) {
-        return verts;
+    if (!sGuardBand || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
+        return;
     }
-    for (i = 0; i < count && !outside_band(&verts[i]); i++) {
+    for (i = 0; i < *numVerts; i++) {
+        sClipOutside[i] = outside_band(&in[i]);
+        any |= sClipOutside[i];
     }
-    if (i == count) {
-        return verts;
+    if (!any) {
+        return;
     }
+    if (!grow((void **) &sClipVerts, &sClipCapacity, *numVerts + *numTriangles * 7, sizeof(GfxVertex)) ||
+        !grow((void **) &sClipIndices, &sClipIndexCapacity, *numTriangles * 15, sizeof(u16))) {
+        return;
+    }
+    memcpy(sClipVerts, in, *numVerts * sizeof(GfxVertex));
+    used = *numVerts;
+    usedIdx = 0;
     for (i = 0; i < count; i += 3) {
-        // A triangle clipped by four planes has at most 7 corners, so 15 vertices once split up.
-        if (used + 15 > sClipCapacity) {
-            int capacity = sClipCapacity * 2 > used + 15 + count * 3 ? sClipCapacity * 2 : used + 15 + count * 3;
-            GfxVertex *grown = (GfxVertex *) realloc(sClipVerts, capacity * sizeof(GfxVertex));
-            if (grown == NULL) {
-                break;
-            }
-            sClipVerts = grown;
-            sClipCapacity = capacity;
-        }
-        if (!outside_band(&verts[i]) && !outside_band(&verts[i + 1]) && !outside_band(&verts[i + 2])) {
-            memcpy(&sClipVerts[used], &verts[i], 3 * sizeof(GfxVertex));
-            used += 3;
+        if (!sClipOutside[idx[i]] && !sClipOutside[idx[i + 1]] && !sClipOutside[idx[i + 2]]) {
+            sClipIndices[usedIdx++] = idx[i];
+            sClipIndices[usedIdx++] = idx[i + 1];
+            sClipIndices[usedIdx++] = idx[i + 2];
             continue;
         }
-        memcpy(poly[0], &verts[i], 3 * sizeof(GfxVertex));
+        poly[0][0] = in[idx[i]];
+        poly[0][1] = in[idx[i + 1]];
+        poly[0][2] = in[idx[i + 2]];
         n = 3;
         for (plane = 0; plane < 4 && n >= 3; plane++) {
-            const GfxVertex *in = poly[plane & 1];
+            const GfxVertex *pin = poly[plane & 1];
             GfxVertex *out = poly[(plane & 1) ^ 1];
             int m = 0;
             for (j = 0; j < n; j++) {
-                const GfxVertex *a = &in[j], *b = &in[(j + 1) % n];
+                const GfxVertex *a = &pin[j], *b = &pin[(j + 1) % n];
                 float da = clip_distance(a, plane), db = clip_distance(b, plane);
                 if (da >= 0.0f) {
                     out[m++] = *a;
@@ -2963,36 +3040,109 @@ static const GfxVertex *clip_to_guard_band(const GfxVertex *verts, int *numTrian
             if (poly[0][0].w <= 0.0f || poly[0][k].w <= 0.0f || poly[0][k + 1].w <= 0.0f) {
                 continue;
             }
-            sClipVerts[used++] = poly[0][0];
-            sClipVerts[used++] = poly[0][k];
-            sClipVerts[used++] = poly[0][k + 1];
+            // Each triangle of the fan gets its own copies, as the triangle list before indexing had.
+            sClipVerts[used] = poly[0][0];
+            sClipVerts[used + 1] = poly[0][k];
+            sClipVerts[used + 2] = poly[0][k + 1];
+            sClipIndices[usedIdx++] = (u16) used;
+            sClipIndices[usedIdx++] = (u16) (used + 1);
+            sClipIndices[usedIdx++] = (u16) (used + 2);
+            used += 3;
         }
     }
-    *numTriangles = used / 3;
-    return sClipVerts;
+    *verts = sClipVerts;
+    *numVerts = used;
+    *indices = sClipIndices;
+    *numTriangles = usedIdx / 3;
 }
 
-void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
+/*
+ * Indexed drawing (roadmap item P16): the frontend hands each vertex over once, however many triangles share it, so
+ * it is converted and the GPU transforms it once. DKR_INDEXED=0 writes the triangles' corners one by one as before.
+ */
+static int sIndexed = -1;
+
+static int indexed_enabled(void) {
+    if (sIndexed < 0) {
+        const char *env = plat_getenv("DKR_INDEXED");
+        sIndexed = env == NULL || atoi(env) != 0;
+        plat_log("vertices: %s", sIndexed ? "shared, drawn by index" : "one for each triangle corner (DKR_INDEXED=0)");
+    }
+    return sIndexed;
+}
+
+/* Writes the vertices in format fmt at out, stride apart, or if indices is given the vertices they name in order. */
+static void write_vertices(int fmt, u8 *out, const GfxVertex *verts, int count, const u16 *indices, int flat, float su0,
+                           float sv0, float su1, float sv1) {
+    int i;
+    // Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
+    if (fmt == VFMT_SHORT) {
+        C3DVertex *o = (C3DVertex *) out;
+        for (i = 0; i < count; i++) {
+            const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
+            place(v, o[i].pos, flat);
+            o[i].tc0[0] = v->u0 * su0;
+            o[i].tc0[1] = 1.0f - v->v0 * sv0;
+            memcpy(o[i].color, &v->r, 4);
+        }
+    } else if (fmt == VFMT_LONG) {
+        C3DVertex2 *o = (C3DVertex2 *) out;
+        for (i = 0; i < count; i++) {
+            const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
+            place(v, o[i].pos, flat);
+            o[i].tc0[0] = v->u0 * su0;
+            o[i].tc0[1] = 1.0f - v->v0 * sv0;
+            memcpy(o[i].color, &v->r, 4);
+            o[i].tc1[0] = v->u1 * su1;
+            o[i].tc1[1] = 1.0f - v->v1 * sv1;
+        }
+    } else {
+        C3DVertexOld *o = (C3DVertexOld *) out;
+        for (i = 0; i < count; i++) {
+            const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
+            place(v, o[i].pos, flat);
+            o[i].tc0[0] = v->u0 * su0;
+            o[i].tc0[1] = 1.0f - v->v0 * sv0;
+            o[i].tc1[0] = v->u1 * su1;
+            o[i].tc1[1] = 1.0f - v->v1 * sv1;
+            o[i].color[0] = v->r;
+            o[i].color[1] = v->g;
+            o[i].color[2] = v->b;
+            o[i].color[3] = v->a;
+        }
+    }
+}
+
+void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts, const u16 *indices,
+                       int numTriangles) {
     HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
-    int i, first, vertex, count, fmt, flat = state->flat;
+    int first, vertex, count, fmt, flat = state->flat, indexed = indexed_enabled();
+    int vertBytes, written;
+    u16 *ibo = NULL;
 
-    verts = clip_to_guard_band(verts, &numTriangles);
+    clip_to_guard_band(&verts, &numVerts, &indices, &numTriangles);
     if (numTriangles == 0) {
         return;
     }
     count = numTriangles * 3;
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
     fmt = sVfmtOld ? VFMT_OLD : state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
+    written = indexed ? numVerts : count; // Vertices written to the buffer
+    vertBytes = written * sVfmtStride[fmt];
 
-    if (sVboUsed + 15 + count * sVfmtStride[fmt] > VBO_BYTES || gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+    if (sVboUsed + 15 + vertBytes > VBO_BYTES || (indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16)) ||
+        gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         // Out of room in the frame's vertex buffer or command list (a full command list stops the program, and
         // nothing of the frame reaches the GPU before it ends, so splitting it would not make room): leave the rest
         // of the frame's triangles out. Races use under a fifth of either.
         if (sDrawsLeftOut++ < 5) {
-            plat_log("frame %d: %s full (%d bytes of vertices, %lu command words), triangles left out", sFrameCount,
-                     sVboUsed + 15 + count * sVfmtStride[fmt] > VBO_BYTES ? "vertex buffer" : "command list", sVboUsed,
-                     (unsigned long) cmd_position());
+            plat_log("frame %d: %s full (%d bytes of vertices, %d indices, %lu command words), triangles left out",
+                     sFrameCount,
+                     sVboUsed + 15 + vertBytes > VBO_BYTES ? "vertex buffer"
+                     : indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16) ? "index buffer"
+                                                                                       : "command list",
+                     sVboUsed, sIboUsed, (unsigned long) cmd_position());
         }
         return;
     }
@@ -3010,16 +3160,18 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         }
         const GfxTexture *tex = state->textures[0];
         const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
-        plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "
-                 "tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d "
-                 "cmd %lu",
-                 numTriangles, state->blend, state->alphaTest, state->alphaRef, state->depthTest, state->depthWrite,
-                 state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d,
-                 c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles, (void *) tex,
-                 tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0, t != NULL ? t->tex.width : 0,
-                 t != NULL ? t->tex.height : 0, t != NULL ? t->tex.data : NULL,
-                 (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
-                 verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
+        plat_log("draw %d tris %d verts blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d "
+                 "cyc %d tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d "
+                 "%d cmd %lu",
+                 numTriangles, numVerts, state->blend, state->alphaTest, state->alphaRef, state->depthTest,
+                 state->depthWrite, state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b,
+                 c->rgb[0].c, c->rgb[0].d, c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles,
+                 (void *) tex, tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0,
+                 t != NULL ? t->tex.width : 0, t != NULL ? t->tex.height : 0, t != NULL ? t->tex.data : NULL,
+                 (unsigned long) (t != NULL ? t->tex.param : 0), verts[indices[0]].x, verts[indices[0]].y,
+                 verts[indices[0]].z, verts[indices[0]].w, verts[indices[0]].u0, verts[indices[0]].v0,
+                 verts[indices[0]].r, verts[indices[0]].g, verts[indices[0]].b, verts[indices[0]].a,
+                 (unsigned long) gpuCmdBufOffset);
     }
     hangDraw = hang_draw_start(state, numTriangles);
     first = drain_before_draw(state, numTriangles);
@@ -3035,48 +3187,41 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
     }
 
     vertex = use_vertex_format(fmt);
-    // Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
-    if (fmt == VFMT_SHORT) {
-        C3DVertex *out = (C3DVertex *) (sVbo + sVboUsed);
-        for (i = 0; i < count; i++) {
-            const GfxVertex *v = &verts[i];
-            place(v, out[i].pos, flat);
-            out[i].tc0[0] = v->u0 * su0;
-            out[i].tc0[1] = 1.0f - v->v0 * sv0;
-            memcpy(out[i].color, &v->r, 4);
-        }
-    } else if (fmt == VFMT_LONG) {
-        C3DVertex2 *out = (C3DVertex2 *) (sVbo + sVboUsed);
-        for (i = 0; i < count; i++) {
-            const GfxVertex *v = &verts[i];
-            place(v, out[i].pos, flat);
-            out[i].tc0[0] = v->u0 * su0;
-            out[i].tc0[1] = 1.0f - v->v0 * sv0;
-            memcpy(out[i].color, &v->r, 4);
-            out[i].tc1[0] = v->u1 * su1;
-            out[i].tc1[1] = 1.0f - v->v1 * sv1;
-        }
-    } else {
-        C3DVertexOld *out = (C3DVertexOld *) (sVbo + sVboUsed);
-        for (i = 0; i < count; i++) {
-            const GfxVertex *v = &verts[i];
-            place(v, out[i].pos, flat);
-            out[i].tc0[0] = v->u0 * su0;
-            out[i].tc0[1] = 1.0f - v->v0 * sv0;
-            out[i].tc1[0] = v->u1 * su1;
-            out[i].tc1[1] = 1.0f - v->v1 * sv1;
-            out[i].color[0] = v->r;
-            out[i].color[1] = v->g;
-            out[i].color[2] = v->b;
-            out[i].color[3] = v->a;
-        }
+    if (indexed && vertex + numVerts > 0xFFFF) {
+        // The indices are 16 bits from the start of the buffer setting: start a new one here.
+        sVfmtBound = -1;
+        vertex = use_vertex_format(fmt);
     }
-    draw_arrays(vertex, count);
+    write_vertices(fmt, sVbo + sVboUsed, verts, written, indexed ? NULL : indices, flat, su0, sv0, su1, sv1);
+    if (indexed) {
+        int i;
+        ibo = sIbo + sIboUsed;
+        for (i = 0; i < count; i++) {
+            ibo[i] = (u16) (vertex + indices[i]);
+        }
+        sIboUsed += count;
+    }
+    draw_prims(vertex, count, ibo);
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
     }
-    sVboUsed += count * sVfmtStride[fmt];
+    sVboUsed += vertBytes;
     sFrameTriangles += numTriangles;
+}
+
+/* A triangle list: each corner its own vertex. */
+void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
+    static u16 sIdentity[GFX_MAX_BATCH_VERTICES];
+    int i;
+    if (numTriangles * 3 > GFX_MAX_BATCH_VERTICES) {
+        numTriangles = GFX_MAX_BATCH_VERTICES / 3;
+    }
+    if (sIdentity[1] == 0) {
+        for (i = 0; i < GFX_MAX_BATCH_VERTICES; i++) {
+            sIdentity[i] = (u16) i;
+        }
+    }
+    gfxb_draw_indexed(state, verts, numTriangles * 3, sIdentity, numTriangles);
 }
 
 /* Draws a screen rectangle with a flat colour, optionally only writing depth. */
