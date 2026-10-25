@@ -822,16 +822,16 @@ static char sCapturePath[256];
 /*
  * Recent frames for bug reports. A glitch that lasts a second is gone by the time the snapshot is taken, so every
  * RECENT_EVERY-th frame the screen's picture is copied, exactly as it was shown, into a ring of RECENT_SLOTS
- * (about 1.6 seconds), both eyes in 3D. A snapshot keeps the two that look most like they hold a bright vertical
+ * (about a second), both eyes in 3D. The slots are taken at start-up, before textures fill linear memory. A snapshot keeps the two that look most like they hold a bright vertical
  * line (a screen column is a row of the rotated picture). DKR_RECENT_FRAMES=0 turns it off.
  */
-#define RECENT_SLOTS 16
-#define RECENT_EVERY 3
+#define RECENT_SLOTS 8
+#define RECENT_EVERY 4
 #define RECENT_KEEP 2
 #define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8)
 static u8 *sRecent[RECENT_SLOTS];
 static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS];
-static int sRecentCount = -1, sRecentNext, sRecentFrozen;
+static int sRecentCount, sRecentNext, sRecentFrozen;
 
 /* Called before C3D_FrameEnd with the screen buffer the frame's display transfer will write (the back buffer until
  * citro3d swaps it in once the GPU is done), and after it to queue the copy. */
@@ -886,28 +886,104 @@ static void log_timing(void) {
     }
 }
 
+static void allocate_recent_frames(void) {
+    const char *env = plat_getenv("DKR_RECENT_FRAMES");
+    sRecentCount = 0;
+    // Leave most of linear memory for textures (each slot is 576 KB).
+    while (env == NULL || atoi(env) != 0) {
+        if (sRecentCount == RECENT_SLOTS || linearSpaceFree() < RECENT_MAX_BYTES + 14 * 1024 * 1024) {
+            break;
+        }
+        sRecent[sRecentCount] = linearAlloc(RECENT_MAX_BYTES);
+        if (sRecent[sRecentCount] == NULL) {
+            break;
+        }
+        sRecentFrame[sRecentCount++] = -1;
+    }
+    plat_log("recent frames for bug reports: %d slots, one frame in %d", sRecentCount, RECENT_EVERY);
+}
+
+/*
+ * The line watch: every frame, the last finished picture (the back buffer, before this frame's transfer is queued
+ * into it) is checked for a bright vertical line, sampling every 4th pixel down each screen column. The first one
+ * found sends a bug report by itself, so its snapshot (the next frame's draws, while the line is still there) shows
+ * what drew it. Every other frame; normal frames score under 10 of 60. DKR_LINE_WATCH=0 turns it off.
+ */
+#define LINE_WATCH_SAMPLES (TOP_HEIGHT / 4)
+#define LINE_WATCH_FOUND (LINE_WATCH_SAMPLES / 2)
+void bugreport_request(void);
+static int sLineWatch = -1, sLineReported, sLineLogged, sLineBest, sLineBestColumn;
+
+static int line_watch_score(const u8 *pixels, int rows, int *where) {
+    int r, x, best = 0;
+    *where = -1;
+    for (r = 3; r < rows - 3; r++) {
+        const u8 *row = pixels + r * TOP_HEIGHT * 3, *left = row - 9 * TOP_HEIGHT, *right = row + 9 * TOP_HEIGHT;
+        int count = 0;
+        for (x = 0; x < TOP_HEIGHT; x += 4) {
+#define LUMA(p) ((p)[0] + (p)[1] * 2 + (p)[2])
+            int c = LUMA(row + x * 3);
+            if (c > LUMA(left + x * 3) + 80 && c > LUMA(right + x * 3) + 80) {
+                count++;
+            }
+#undef LUMA
+        }
+        if (count > best) {
+            best = count;
+            *where = r;
+        }
+    }
+    return best;
+}
+
+static void watch_for_line(void) {
+    u8 *eyes[2] = { sRecentScreen, sRecentRight };
+    int e, where, score;
+    if (sLineWatch < 0) {
+        const char *env = plat_getenv("DKR_LINE_WATCH");
+        sLineWatch = env != NULL ? atoi(env) : 1;
+    }
+    if (!sLineWatch || sRecentScreenRows == 0 || sRecentFrozen || (sFrameCount & 1) != 0) {
+        return;
+    }
+    for (e = 0; e < 2; e++) {
+        if (eyes[e] == NULL) {
+            continue;
+        }
+        GSPGPU_InvalidateDataCache(eyes[e], sRecentScreenRows * TOP_HEIGHT * 3);
+        if (sLineWatch == 2 && sFrameCount >= 1800 && sFrameCount < 1830) {
+            // DKR_LINE_WATCH=2 tests it: a white line down the middle of the old picture a minute in.
+            memset(eyes[e] + sRecentScreenRows / 2 * TOP_HEIGHT * 3, 255, TOP_HEIGHT * 3);
+        }
+        score = line_watch_score(eyes[e], sRecentScreenRows, &where);
+        if (score > sLineBest) {
+            sLineBest = score;
+            sLineBestColumn = where * TOP_WIDTH / sRecentScreenRows;
+        }
+        if (score >= LINE_WATCH_FOUND && sLineLogged < 20) {
+            sLineLogged++;
+            plat_log("line watch: frame %d %s eye has a line at column %d (%d of %d), %s", sFrameCount - 2,
+                     e ? "right" : "left", where * TOP_WIDTH / sRecentScreenRows, score, LINE_WATCH_SAMPLES,
+                     (const char *) gPlatGameNote);
+            if (!sLineReported) {
+                sLineReported = 1;
+                bugreport_request();
+            }
+        }
+    }
+    if (sFrameCount % 150 == 0) {
+        plat_log("line watch: best %d of %d at column %d in the last 5 s", sLineBest, LINE_WATCH_SAMPLES,
+                 sLineBestColumn);
+        sLineBest = 0;
+    }
+}
+
 static void record_recent_frame(void) {
     u32 bytes = sRecentScreenRows * TOP_HEIGHT * 3;
     u8 *slot;
 
-    if (sRecentCount < 0) {
-        const char *env = plat_getenv("DKR_RECENT_FRAMES");
-        sRecentCount = 0;
-        // Leave plenty of linear memory for textures (each slot is 576 KB).
-        while (env == NULL || atoi(env) != 0) {
-            if (sRecentCount == RECENT_SLOTS || linearSpaceFree() < RECENT_MAX_BYTES + 12 * 1024 * 1024) {
-                break;
-            }
-            sRecent[sRecentCount] = linearAlloc(RECENT_MAX_BYTES);
-            if (sRecent[sRecentCount] == NULL) {
-                break;
-            }
-            sRecentFrame[sRecentCount++] = -1;
-        }
-        plat_log("recent frames for bug reports: %d slots, one frame in %d", sRecentCount, RECENT_EVERY);
-    }
     record_timing();
-    if (sRecentCount == 0 || sRecentFrozen || sFrameCount % RECENT_EVERY != 0 || sRecentScreen == NULL ||
+    if (sRecentCount <= 0 || sRecentFrozen || sFrameCount % RECENT_EVERY != 0 || sRecentScreen == NULL ||
         bytes == 0 || bytes > RECENT_MAX_BYTES) {
         return;
     }
@@ -1241,6 +1317,7 @@ static void alloc_frame_slots(void) {
              sNumSlots, (unsigned long) (VBO_BYTES / 1024),
              (unsigned long) (sCmdWords * 4 / 1024), (unsigned long) (linearSpaceFree() / 1024));
     sVbo = sSlots[0].vbo;
+    allocate_recent_frames();
 }
 
 /* Ends the part of the command list so far, which the GPU then finishes before it starts on the rest. */
@@ -1727,6 +1804,7 @@ void gfxb_end_frame(void) {
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
         find_recent_screen();
+        watch_for_line();
         if (full_flush()) {
             C3D_FrameEnd(0); // Also flushes the whole linear heap.
         } else {
