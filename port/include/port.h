@@ -185,6 +185,13 @@ s32 port_look_back_held(void);
 void port_set_look_back_held(s32 held);
 
 /*
+ * The port's settings in the game's menus (src/menu.c, plat/options.h): fills in the Options menu's rows when the
+ * menu text is loaded, and says whether a category's page is open (over the Options menu or the pause menu).
+ */
+void port_options_menu_strings(void);
+s32 port_options_menu_open(void);
+
+/*
  * 60 fps physics (src/objects.c sets these in obj_update). Much of the racer code takes one fixed step per logic frame
  * (the decomp marks these lines //!@Delta), tuned for 30 fps, where a frame is 2 retraces. At 60 fps a frame is 1
  * retrace, so those steps would happen twice as often: karts would speed up, slow down, steer and spin out twice as

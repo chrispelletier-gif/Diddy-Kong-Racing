@@ -45,7 +45,7 @@ LIBULTRA_SRC := \
 PORT_GAME_SRC := $(wildcard src/*.c src/os/*.c src/game/*.c src/gfx/*.c src/audio/*.c)
 # Port sources that use the platform's own headers.
 PORT_SYS_SRC := src/plat/plat_common.c src/plat/input_script.c $(wildcard src/gfx/sys/*.c src/audio/sys/*.c)
-PORT_SYS_SRC += src/plat/settings.c src/plat/controls.c src/plat/bottom_screen.c
+PORT_SYS_SRC += src/plat/settings.c src/plat/controls.c src/plat/bottom_screen.c src/plat/options.c
 
 ifeq ($(TARGET),3ds)
   PORT_SYS_SRC += src/plat/plat_3ds.c src/plat/bugreport.c $(wildcard 3ds/*.c)

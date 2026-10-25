@@ -1,6 +1,9 @@
 #include "menu.h"
 #ifdef TARGET_PORT
 #include "port.h"
+#ifdef TARGET_PORT
+#include "plat/options.h"
+#endif
 #endif
 #include "asset_enums.h"
 #include "asset_loading.h"
@@ -736,7 +739,12 @@ u8 gTitleCinematicTextColours[] = {
 
 UNUSED u8 unused_800DFA0C[] = { 0, 0, 15, 120 };
 
+#ifdef TARGET_PORT
+// Room for the port's VIDEO, CAMERA and CONTROL OPTIONS rows (port_options_menu_strings).
+char *gOptionMenuStrings[] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+#else
 char *gOptionMenuStrings[] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+#endif
 
 s16 gOptionMenuTextures[] = { 0x3D, 0x3C, 0x3F, 0x3E, 0x44, -1 };
 s16 gOptionMenuImageIndices[] = { -1 };
@@ -2046,6 +2054,9 @@ void load_menu_text(s32 language) {
     gOptionMenuStrings[3] = menuText[ASSET_MENU_TEXT_SAVEOPTIONS];                           // "SAVE OPTIONS"
     gOptionMenuStrings[4] = menuText[ASSET_MENU_TEXT_MAGICCODES];                            // "MAGIC CODES"
     gOptionMenuStrings[5] = menuText[ASSET_MENU_TEXT_RETURN];                                // "RETURN"
+#ifdef TARGET_PORT
+    port_options_menu_strings();
+#endif
     gFilenames[0] = menuText[ASSET_MENU_TEXT_GAMEA];                                         // "GAME A"
     gFilenames[1] = menuText[ASSET_MENU_TEXT_GAMEB];                                         // "GAME B"
     gFilenames[2] = menuText[ASSET_MENU_TEXT_GAMEC];                                         // "GAME C"
@@ -3682,11 +3693,326 @@ void titlescreen_free(void) {
     sound_volume_reset(TRUE);
 }
 
+#ifdef TARGET_PORT
+/*
+ * The port's settings in the game's own menus (plat/options.h): the Options menu gets VIDEO, CAMERA and CONTROL
+ * OPTIONS rows next to the game's, the Audio Options screen a MORE AUDIO OPTIONS row, and the pause menu an OPTIONS
+ * row that lists the categories (with only the settings that can change mid-race). A category's page is drawn in
+ * dialogue box 7 like the pause menu: up and down pick a row, left and right (or A) change it, B goes back. The 3DS
+ * bottom screen's Settings menu changes the same values, saved in the same files.
+ */
+#define PORT_OPT_ROWS 8     // Rows shown at once.
+#define PORT_OPT_TEXT 40    // Room for a row's label or value.
+#define PORT_OPT_HINT 64
+
+enum { PORT_OPT_CLOSED, PORT_OPT_LIST, PORT_OPT_PAGE };
+
+static const char *const sPortOptTitles[OPTIONS_CATEGORY_COUNT] = { "VIDEO OPTIONS", "CAMERA OPTIONS",
+                                                                     "AUDIO OPTIONS", "CONTROL OPTIONS" };
+static char sPortOptMoreAudio[] = "MORE AUDIO OPTIONS";
+static s8 sPortAudioMore = -1; // The Audio Options screen's row for it, or -1.
+static s16 sPortAudioMoreY;
+// The categories of the Options menu's rows from 3 on (-1 for the game's own rows after them).
+static s8 sPortOptMainRows[ARRAY_COUNT(gOptionMenuStrings)];
+
+static s8 sPortOptMode;       // PORT_OPT_*
+static s8 sPortOptInRace;     // Opened from the pause menu: only the rows that can change mid-race.
+static s8 sPortOptFromList;   // The page was opened from the category list, which B goes back to.
+static s8 sPortOptCategory;
+static s8 sPortOptListRow;
+static s8 sPortOptList[OPTIONS_CATEGORY_COUNT]; // The categories the list shows.
+static s8 sPortOptListCount;
+static s16 sPortOptRow;
+static s16 sPortOptFirst;
+// The text of what is drawn: the dialogue box keeps pointers to it until the frame is drawn.
+static char sPortOptLabels[PORT_OPT_ROWS][PORT_OPT_TEXT];
+static char sPortOptValues[PORT_OPT_ROWS][PORT_OPT_TEXT];
+static char sPortOptHint[PORT_OPT_HINT];
+static char sPortOptPageNumber[8];
+
+/*
+ * Copies text in capitals, as the game's menus write everything, in what the menu font has: it has no % / ( or ),
+ * so "6%" becomes "6 PERCENT", "Hop/drift" "HOP-DRIFT", and a note in brackets is left out.
+ */
+static void port_opt_upper(char *out, const char *text, s32 size) {
+    s32 n = 0;
+    for (; text != NULL && *text != '\0' && n < size - 1; text++) {
+        char c = *text;
+        if (c == '(') {
+            while (*text != '\0' && *text != ')') {
+                text++;
+            }
+            while (n > 0 && out[n - 1] == ' ') {
+                n--;
+            }
+            if (*text == '\0') {
+                break;
+            }
+        } else if (c == '%') {
+            const char *word = " PERCENT";
+            while (*word != '\0' && n < size - 1) {
+                out[n++] = *word++;
+            }
+        } else {
+            out[n++] = c == '/' ? '-' : (c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c;
+        }
+    }
+    out[n] = '\0';
+}
+
+/* Whether a label ends in "(restart)": the setting is used from the next start. */
+static s32 port_opt_needs_restart(const char *label) {
+    static const char sNote[] = "(restart)";
+    s32 length = 0, i;
+    while (label[length] != '\0') {
+        length++;
+    }
+    if (length < (s32) sizeof(sNote) - 1) {
+        return FALSE;
+    }
+    for (i = 0; sNote[i] != '\0'; i++) {
+        if (label[length - (sizeof(sNote) - 1) + i] != sNote[i]) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* The Options menu's rows: the game's first three, the port's categories, then SAVE OPTIONS, MAGIC CODES, RETURN. */
+void port_options_menu_strings(void) {
+    s32 i, row = 3;
+    char *save = gMenuText[ASSET_MENU_TEXT_SAVEOPTIONS];
+    char *magic = gMenuText[ASSET_MENU_TEXT_MAGICCODES];
+    char *ret = gMenuText[ASSET_MENU_TEXT_RETURN];
+
+    for (i = 0; i < OPTIONS_CATEGORY_COUNT; i++) {
+        // Audio's go on the game's own Audio Options screen.
+        if (i != OPTIONS_AUDIO && options_count(i, FALSE) > 0) {
+            sPortOptMainRows[row] = i;
+            gOptionMenuStrings[row++] = (char *) sPortOptTitles[i];
+        }
+    }
+    sPortOptMainRows[row] = -1;
+    gOptionMenuStrings[row++] = save;
+    sPortOptMainRows[row] = -1;
+    gOptionMenuStrings[row++] = magic;
+    sPortOptMainRows[row] = -1;
+    gOptionMenuStrings[row++] = ret;
+    gOptionMenuStrings[row] = NULL;
+}
+
+/* The Options menu's number of rows (RETURN is the last). */
+static s32 port_options_main_count(void) {
+    s32 count = 0;
+    while (gOptionMenuStrings[count] != NULL) {
+        count++;
+    }
+    return count;
+}
+
+/* The category of the Options menu's row, or -1 for one of the game's. */
+static s32 port_options_main_category(s32 row) {
+    return row >= 3 && row < (s32) ARRAY_COUNT(sPortOptMainRows) ? sPortOptMainRows[row] : -1;
+}
+
+s32 port_options_menu_open(void) {
+    return sPortOptMode != PORT_OPT_CLOSED;
+}
+
+static void port_options_open_page(s32 category, s32 inRace, s32 fromList) {
+    sPortOptMode = PORT_OPT_PAGE;
+    sPortOptCategory = category;
+    sPortOptInRace = inRace;
+    sPortOptFromList = fromList;
+    sPortOptRow = 0;
+    sPortOptFirst = 0;
+}
+
+/* The pause menu's OPTIONS: the categories with something that can change mid-race. */
+static void port_options_open_list(void) {
+    s32 i;
+    sPortOptListCount = 0;
+    for (i = 0; i < OPTIONS_CATEGORY_COUNT; i++) {
+        if (options_count(i, TRUE) > 0) {
+            sPortOptList[sPortOptListCount++] = i;
+        }
+    }
+    sPortOptMode = PORT_OPT_LIST;
+    sPortOptInRace = TRUE;
+    sPortOptListRow = 0;
+}
+
+static void port_options_close(void) {
+    sPortOptMode = PORT_OPT_CLOSED;
+    dialogue_close(7);
+    dialogue_clear(7);
+}
+
+/* Whether the pause menu has an OPTIONS row (something to change mid-race). */
+static s32 port_options_in_race_available(void) {
+    s32 i;
+    for (i = 0; i < OPTIONS_CATEGORY_COUNT; i++) {
+        if (options_count(i, TRUE) > 0) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* Draws the list or the page in dialogue box 7, in the colours of the player who paused (player 1's elsewhere). */
+static void port_options_render(s32 player) {
+    ColourRGBA *colour;
+    s32 i, y, count, rows, height, width, alpha, top;
+    const char *hint;
+
+    alpha = gOptionBlinkTimer * 8;
+    if (alpha > 255) {
+        alpha = 511 - alpha;
+    }
+    if (sPortOptMode == PORT_OPT_LIST) {
+        count = sPortOptListCount;
+        rows = count;
+        width = 200;
+    } else {
+        count = options_count(sPortOptCategory, sPortOptInRace);
+        rows = count < PORT_OPT_ROWS ? count : PORT_OPT_ROWS;
+        width = 296;
+    }
+    height = 28 + rows * 16 + (sPortOptMode == PORT_OPT_PAGE ? 16 : 0);
+    top = (osTvType == OS_TV_TYPE_PAL ? SCREEN_HEIGHT_HALF_PAL : SCREEN_HEIGHT_HALF) - (height >> 1);
+    if (!sPortOptInRace && top < 56) {
+        // Under the Options menu's title.
+        top = 56;
+    }
+    clear_dialogue_box_open_flag(7);
+    dialogue_clear(7);
+    set_current_dialogue_box_coords(7, SCREEN_WIDTH_HALF - (width >> 1), top, SCREEN_WIDTH_HALF + (width >> 1),
+                                    top + height);
+    colour = &gPlayerPauseBgColour[input_player_id(player)];
+    set_current_dialogue_background_colour(7, colour->r, colour->g, colour->b, colour->a);
+    set_dialogue_font(7, ASSET_FONTS_FUNFONT);
+    set_current_text_background_colour(7, 128, 128, 255, 0);
+    colour = &gPlayerPauseOptionsTextColour[input_player_id(player)];
+    set_current_text_colour(7, colour->r, colour->g, colour->b, colour->a, 255);
+
+    if (sPortOptMode == PORT_OPT_LIST) {
+        render_dialogue_text(7, POS_CENTRED, 12, gMenuText[ASSET_MENU_TEXT_OPTIONS], 1, ALIGN_MIDDLE_CENTER);
+        for (i = 0, y = 32; i < count; i++, y += 16) {
+            set_current_text_colour(7, 255, 255, 255, i == sPortOptListRow ? alpha : 0, 255);
+            render_dialogue_text(7, POS_CENTRED, y, (char *) sPortOptTitles[(s32) sPortOptList[i]], 1,
+                                 ALIGN_MIDDLE_CENTER);
+        }
+        open_dialogue_box(7);
+        return;
+    }
+
+    render_dialogue_text(7, POS_CENTRED, 12, (char *) sPortOptTitles[(s32) sPortOptCategory], 1, ALIGN_MIDDLE_CENTER);
+    set_dialogue_font(7, ASSET_FONTS_SMALLFONT);
+    if (count > PORT_OPT_ROWS) {
+        sprintf(sPortOptPageNumber, "%d/%d", sPortOptFirst / PORT_OPT_ROWS + 1,
+                (count + PORT_OPT_ROWS - 1) / PORT_OPT_ROWS);
+        render_dialogue_text(7, width - 10, 12, sPortOptPageNumber, 1, ALIGN_MIDDLE_RIGHT);
+    }
+    for (i = 0, y = 32; i < rows && sPortOptFirst + i < count; i++, y += 16) {
+        s32 row = sPortOptFirst + i;
+        char value[PORT_OPT_TEXT];
+        set_dialogue_font(7, ASSET_FONTS_FUNFONT);
+        set_current_text_colour(7, 255, 255, 255, row == sPortOptRow ? alpha : 0, 255);
+        port_opt_upper(sPortOptLabels[i], options_label(sPortOptCategory, sPortOptInRace, row), PORT_OPT_TEXT);
+        render_dialogue_text(7, 10, y, sPortOptLabels[i], 1, ALIGN_MIDDLE_LEFT);
+        options_value(sPortOptCategory, sPortOptInRace, row, value, sizeof(value));
+        if (row == sPortOptRow && value[0] != '\0') {
+            // The row being changed shows its value between arrows.
+            char arrows[PORT_OPT_TEXT];
+            sprintf(arrows, "< %.30s >", value);
+            port_opt_upper(sPortOptValues[i], arrows, PORT_OPT_TEXT);
+        } else {
+            port_opt_upper(sPortOptValues[i], value, PORT_OPT_TEXT);
+        }
+        render_dialogue_text(7, width - 10, y, sPortOptValues[i], 1, ALIGN_MIDDLE_RIGHT);
+    }
+    hint = options_hint(sPortOptCategory, sPortOptInRace, sPortOptRow);
+    if ((hint == NULL || hint[0] == '\0') &&
+        port_opt_needs_restart(options_label(sPortOptCategory, sPortOptInRace, sPortOptRow))) {
+        hint = "Used from the next time the game starts";
+    }
+    if (hint != NULL && hint[0] != '\0') {
+        sprintf(sPortOptHint, "%.63s", hint);
+        set_dialogue_font(7, ASSET_FONTS_SMALLFONT);
+        set_current_text_colour(7, 255, 255, 255, 0, 255);
+        render_dialogue_text(7, POS_CENTRED, y + 4, sPortOptHint, 1, ALIGN_MIDDLE_CENTER);
+    }
+    open_dialogue_box(7);
+}
+
+/*
+ * A frame of the open list or page: buttons are the ones just pressed, stickX and stickY the menu's stick steps
+ * (gControllersXAxisDirection's). Returns FALSE once B has closed it.
+ */
+static s32 port_options_update(s32 player, u32 buttons, s32 stickX, s32 stickY) {
+    s32 count;
+
+    if (sPortOptMode == PORT_OPT_LIST) {
+        if (buttons & B_BUTTON) {
+            sound_play(SOUND_MENU_BACK3, NULL);
+            port_options_close();
+            return FALSE;
+        }
+        if (buttons & (A_BUTTON | START_BUTTON)) {
+            sound_play(SOUND_SELECT2, NULL);
+            port_options_open_page(sPortOptList[(s32) sPortOptListRow], TRUE, TRUE);
+        } else if (stickY != 0 && sPortOptListCount > 1) {
+            sPortOptListRow = (sPortOptListRow + (stickY < 0 ? 1 : -1) + sPortOptListCount) % sPortOptListCount;
+            sound_play(SOUND_MENU_PICK2, NULL);
+        }
+    } else if (sPortOptMode == PORT_OPT_PAGE) {
+        count = options_count(sPortOptCategory, sPortOptInRace);
+        if (buttons & B_BUTTON) {
+            sound_play(SOUND_MENU_BACK3, NULL);
+            if (!sPortOptFromList) {
+                port_options_close();
+                return FALSE;
+            }
+            sPortOptMode = PORT_OPT_LIST;
+        } else if (count > 0 && (buttons & (A_BUTTON | START_BUTTON))) {
+            sound_play(SOUND_SELECT2, NULL);
+            options_change(sPortOptCategory, sPortOptInRace, sPortOptRow, 1);
+        } else if (count > 0 && stickX != 0) {
+            char value[PORT_OPT_TEXT];
+            // A row without a value does something when A picks it, not when the stick moves.
+            options_value(sPortOptCategory, sPortOptInRace, sPortOptRow, value, sizeof(value));
+            if (value[0] != '\0') {
+                sound_play(SOUND_MENU_PICK2, NULL);
+                options_change(sPortOptCategory, sPortOptInRace, sPortOptRow, stickX < 0 ? -1 : 1);
+            }
+        } else if (count > 1 && stickY != 0) {
+            sPortOptRow = (sPortOptRow + (stickY < 0 ? 1 : -1) + count) % count;
+            sound_play(SOUND_MENU_PICK2, NULL);
+        }
+        // A change can add or remove rows.
+        count = options_count(sPortOptCategory, sPortOptInRace);
+        if (sPortOptRow >= count) {
+            sPortOptRow = count > 0 ? count - 1 : 0;
+        }
+        if (sPortOptRow < sPortOptFirst || sPortOptRow >= sPortOptFirst + PORT_OPT_ROWS) {
+            sPortOptFirst = sPortOptRow - sPortOptRow % PORT_OPT_ROWS;
+        }
+    }
+    port_options_render(player);
+    return TRUE;
+}
+#endif
+
 /**
  * Initialise the root options menu.
  * Loads required fonts and sets the background music.
  */
 void menu_options_init(void) {
+#ifdef TARGET_PORT
+    // The categories are known by now (they may not have been when the menu text was loaded).
+    port_options_menu_strings();
+    sPortOptMode = PORT_OPT_CLOSED;
+#endif
     gOptionBlinkTimer = 0;
     gMenuDelay = 0;
     transition_begin(&sMenuTransitionFadeOut);
@@ -3723,6 +4049,15 @@ void optionscreen_render(UNUSED s32 updateRate) {
     optionMenuTextIndex = 0;
     yPos = 76;
 #endif
+#ifdef TARGET_PORT
+    if (port_options_menu_open()) {
+        // A category's page is open over the menu.
+        return;
+    }
+    if (port_options_main_count() > 6) {
+        yPos = 64;
+    }
+#endif
 
     set_text_font(ASSET_FONTS_FUNFONT);
 
@@ -3740,7 +4075,12 @@ void optionscreen_render(UNUSED s32 updateRate) {
                   ALIGN_MIDDLE_CENTER);
 
         optionMenuTextIndex++;
+#ifdef TARGET_PORT
+        // The port's rows make nine: closer together to fit.
+        yPos += port_options_main_count() > 6 ? 20 : 28;
+#else
         yPos += 28;
+#endif
     }
 }
 
@@ -3780,7 +4120,25 @@ s32 menu_options_loop(s32 updateRate) {
             analogueY += gControllersYAxisDirection[i];
         }
     }
+#ifdef TARGET_PORT
+    if (port_options_menu_open()) {
+        port_options_update(PLAYER_ONE, buttonsPressed, analogueX, analogueY);
+        gIgnorePlayerInputTime = 0;
+        return MENU_RESULT_CONTINUE;
+    }
+    if ((buttonsPressed & (A_BUTTON | START_BUTTON)) && port_options_main_category(gMenuCurIndex) >= 0) {
+        // VIDEO, CAMERA or CONTROL OPTIONS: their page opens over this menu.
+        sound_play(SOUND_SELECT2, NULL);
+        port_options_open_page(port_options_main_category(gMenuCurIndex), FALSE, FALSE);
+        port_options_render(PLAYER_ONE);
+        gIgnorePlayerInputTime = 0;
+        return MENU_RESULT_CONTINUE;
+    }
+    if ((buttonsPressed & B_BUTTON) ||
+        ((buttonsPressed & (A_BUTTON | START_BUTTON)) && gMenuCurIndex == port_options_main_count() - 1)) {
+#else
     if ((buttonsPressed & B_BUTTON) || ((buttonsPressed & (A_BUTTON | START_BUTTON)) && gMenuCurIndex == 5)) {
+#endif
         // Leave the option menu
         music_fade(-128);
         gMenuDelay = -1;
@@ -3840,9 +4198,15 @@ s32 menu_options_loop(s32 updateRate) {
         s32 prevOption = gMenuCurIndex;
         if (analogueY < 0) {
             gMenuCurIndex++;
+#ifdef TARGET_PORT
+            if (gMenuCurIndex >= port_options_main_count()) {
+                gMenuCurIndex = port_options_main_count() - 1;
+            }
+#else
             if (gMenuCurIndex >= 6) {
                 gMenuCurIndex = 5;
             }
+#endif
         }
         if (analogueY > 0) {
             gMenuCurIndex--;
@@ -3867,7 +4231,11 @@ s32 menu_options_loop(s32 updateRate) {
             menu_init(MENU_AUDIO_OPTIONS);
             return MENU_RESULT_CONTINUE;
         }
+#ifdef TARGET_PORT
+        if (gOptionMenuStrings[gMenuCurIndex] == gMenuText[ASSET_MENU_TEXT_SAVEOPTIONS]) {
+#else
         if (gMenuCurIndex == 3) {
+#endif
             optionscreen_free();
             menu_init(MENU_SAVE_OPTIONS);
             return MENU_RESULT_CONTINUE;
@@ -3924,6 +4292,17 @@ void menu_audio_options_init(void) {
         gAudioMenuStrings[3].y = 192;
         gMenuStage = 4;
     }
+#ifdef TARGET_PORT
+    // MORE AUDIO OPTIONS (the port's) goes before RETURN.
+    sPortOptMode = PORT_OPT_CLOSED;
+    sPortAudioMore = -1;
+    if (options_count(OPTIONS_AUDIO, FALSE) > 0) {
+        sPortAudioMore = gMenuStage - 1;
+        sPortAudioMoreY = gAudioMenuStrings[3].y - 8;
+        gAudioMenuStrings[3].y += 16;
+        gMenuStage++;
+    }
+#endif
 #if REGION != REGION_JP
     load_font(ASSET_FONTS_BIGFONT);
 #endif
@@ -3988,6 +4367,19 @@ void func_80084854(UNUSED s32 updateRate) {
     // j must be here.
     j = 0;
 
+#ifdef TARGET_PORT
+    if (sPortAudioMore >= 0) {
+        if (gOptionsMenuItemIndex == sPortAudioMore) {
+            i = -1;
+        } else if (gOptionsMenuItemIndex == gMenuStage - 1) {
+            i = 3;
+        } else if (gAudioMenuStrings[6].text != NULL && gOptionsMenuItemIndex == 3) {
+            i = 6;
+        } else {
+            i = gOptionsMenuItemIndex;
+        }
+    } else
+#endif
     if (gMenuStage < 5) {
         i = gOptionsMenuItemIndex;
     } else if (gOptionsMenuItemIndex < 3) {
@@ -4010,6 +4402,13 @@ void func_80084854(UNUSED s32 updateRate) {
         draw_text(&sMenuCurrDisplayList, gAudioMenuStrings[j].x, gAudioMenuStrings[j].y, gAudioMenuStrings[j].text,
                   gAudioMenuStrings[j].alignmentFlags);
     }
+#ifdef TARGET_PORT
+    if (sPortAudioMore >= 0) {
+        set_text_font(ASSET_FONTS_FUNFONT);
+        set_text_colour(255, 255, 255, i < 0 ? temp : 0, 255);
+        draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF, sPortAudioMoreY, sPortOptMoreAudio, ALIGN_MIDDLE_CENTER);
+    }
+#endif
 }
 
 /**
@@ -4033,6 +4432,24 @@ s32 menu_audio_options_loop(s32 updateRate) {
             gMenuDelay -= updateRate;
         }
     }
+#ifdef TARGET_PORT
+    if (port_options_menu_open()) {
+        // MORE AUDIO OPTIONS is open over the screen.
+        buttonsPressed = 0;
+        contX = 0;
+        contY = 0;
+        if (gIgnorePlayerInputTime == 0) {
+            for (i = 0; i < 4; i++) {
+                buttonsPressed |= input_pressed(i);
+                contX += gControllersXAxisDirection[i];
+                contY += gControllersYAxisDirection[i];
+            }
+        }
+        port_options_update(PLAYER_ONE, buttonsPressed, contX, contY);
+        gIgnorePlayerInputTime = 0;
+        return 0;
+    }
+#endif
     if (gMenuDelay > -20 && gMenuDelay < 20) {
         func_80084854(updateRate);
     }
@@ -4060,6 +4477,15 @@ s32 menu_audio_options_loop(s32 updateRate) {
                 }
             }
             contXAxis >>= 2;
+#ifdef TARGET_PORT
+            if ((buttonsPressed & (A_BUTTON | START_BUTTON)) && gOptionsMenuItemIndex == sPortAudioMore) {
+                sound_play(SOUND_SELECT2, NULL);
+                port_options_open_page(OPTIONS_AUDIO, FALSE, FALSE);
+                port_options_render(PLAYER_ONE);
+                gIgnorePlayerInputTime = 0;
+                return 0;
+            }
+#endif
             if ((buttonsPressed & (A_BUTTON | START_BUTTON) && gMenuStage == gOptionsMenuItemIndex + 1) ||
                 buttonsPressed & B_BUTTON) {
                 gMenuDelay = -1;
@@ -4117,7 +4543,11 @@ s32 menu_audio_options_loop(s32 updateRate) {
                         }
                     }
                 }
+#ifdef TARGET_PORT
+            } else if (gAudioMenuStrings[6].text != NULL && gOptionsMenuItemIndex == 3) {
+#else
             } else if (gMenuStage >= 5 && gOptionsMenuItemIndex == 3) {
+#endif
                 if (contX < 0 && gMusicTestSongIndex > 0) {
                     gMusicTestSongIndex--;
                     playSound = 1;
@@ -10287,10 +10717,23 @@ void menu_pause_init(void) {
         if (gIsInTracksMode == TRUE && gNumberOfActivePlayers == 1) {
             gMenuOptionText[gMenuOptionCap++] = gMenuText[ASSET_MENU_TEXT_SELECTCHARACTER];
         }
+#ifdef TARGET_PORT
+        if (port_options_in_race_available()) {
+            gMenuOptionText[gMenuOptionCap++] = gMenuText[ASSET_MENU_TEXT_OPTIONS];
+        }
+#endif
         gMenuOptionText[gMenuOptionCap++] = gMenuText[ASSET_MENU_TEXT_QUITGAME];
     } else {
+#ifdef TARGET_PORT
+        if (port_options_in_race_available()) {
+            gMenuOptionText[gMenuOptionCap++] = gMenuText[ASSET_MENU_TEXT_OPTIONS];
+        }
+#endif
         gMenuOptionText[gMenuOptionCap++] = gMenuText[ASSET_MENU_TEXT_QUITTROPHYRACE];
     }
+#ifdef TARGET_PORT
+    sPortOptMode = PORT_OPT_CLOSED;
+#endif
     gMenuOption = 0;
     gOptionBlinkTimer = 0;
     gMenuDelay = 0;
@@ -10407,6 +10850,26 @@ s32 menu_pause_loop(UNUSED Gfx **dl, s32 updateRate) {
         buttonsPressed = input_pressed(gLastPlayerWhoPaused);
     }
 
+#ifdef TARGET_PORT
+    if (port_options_menu_open()) {
+        // OPTIONS: the categories, or one's page, in place of the pause menu until B closes them.
+        if (!port_options_update(gLastPlayerWhoPaused, buttonsPressed,
+                                 gControllersXAxisDirection[gLastPlayerWhoPaused],
+                                 gControllersYAxisDirection[gLastPlayerWhoPaused])) {
+            pausemenu_render(updateRate);
+        }
+        gIgnorePlayerInputTime = 0;
+        return PAUSE_NONE;
+    }
+    if (gMenuDelay == 0 && gMenuSubOption == 0 && (buttonsPressed & (A_BUTTON | START_BUTTON)) &&
+        gMenuOptionText[gMenuOption] == gMenuText[ASSET_MENU_TEXT_OPTIONS]) {
+        sound_play(SOUND_SELECT2, NULL);
+        port_options_open_list();
+        port_options_render(gLastPlayerWhoPaused);
+        gIgnorePlayerInputTime = 0;
+        return PAUSE_NONE;
+    }
+#endif
     if (gMenuDelay == 0) {
         if (gMenuSubOption != 0) {
             if (buttonsPressed & (A_BUTTON | START_BUTTON)) {

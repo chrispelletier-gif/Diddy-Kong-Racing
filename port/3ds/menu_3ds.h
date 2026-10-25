@@ -15,6 +15,9 @@ enum { MENU_STAY, MENU_CLOSE, MENU_UPDATES, MENU_BUGREPORT };
 void menu_3ds_add_page(const char *title, int (*count)(void), const char *(*label)(int i),
                        void (*value)(int i, char *out, int size), void (*change)(int i, int step));
 
+/* Adds the video settings to the game's own menus (plat/options.h). */
+void menu_3ds_add_options(void);
+
 void menu_3ds_open(void);
 void menu_3ds_close(void);
 int menu_3ds_on_main_page(void);

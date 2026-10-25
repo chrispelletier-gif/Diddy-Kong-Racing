@@ -16,6 +16,7 @@
 
 #include "menu_3ds.h"
 #include "plat/bottom_screen.h"
+#include "plat/options.h"
 #include "plat/plat.h"
 
 void plat_3ds_menu_draw(const BsMenu *menu);
@@ -56,6 +57,7 @@ static const MenuPage *sPage;
 static int sFirst;  // First row shown.
 static int sResult; // What a tap asked of the panel (MENU_*).
 static int sDrawnTestRun = -1;
+static unsigned int sDrawnChanges; // options_change_count() when drawn: the game's menus change the same values.
 
 static const MenuPage sMainPage, sTestRunPage, sScreenPage;
 
@@ -261,6 +263,43 @@ static const MenuPage sTestRunPage = {
     "Test run", test_count, test_label, test_value, test_change, test_hint, "Starts at the title; saves not written"
 };
 
+/*
+ * The game's VIDEO OPTIONS (plat/options.h): the main page's anti-aliasing to colour boost rows, then the Screen
+ * page's. Every one can change mid-race, as here.
+ */
+static int video_count(void) {
+    return MAIN_SCREEN + screen_count();
+}
+
+static const char *video_label(int i) {
+    return i < MAIN_SCREEN ? main_label(i) : screen_label(i - MAIN_SCREEN);
+}
+
+static void video_value(int i, char *out, int size) {
+    if (i < MAIN_SCREEN) {
+        main_value(i, out, size);
+    } else {
+        screen_value(i - MAIN_SCREEN, out, size);
+    }
+}
+
+static void video_change(int i, int step) {
+    if (i < MAIN_SCREEN) {
+        main_change(i, step);
+    } else {
+        screen_change(i - MAIN_SCREEN, step);
+    }
+}
+
+static const char *video_hint(int i) {
+    return i < MAIN_SCREEN ? main_hint(i) : screen_hint(i - MAIN_SCREEN);
+}
+
+void menu_3ds_add_options(void) {
+    static const OptionsSection sVideo = { video_count, video_label, video_value, video_change, video_hint, NULL };
+    options_add(OPTIONS_VIDEO, &sVideo);
+}
+
 void menu_3ds_add_page(const char *title, int (*count)(void), const char *(*label)(int i),
                        void (*value)(int i, char *out, int size), void (*change)(int i, int step)) {
     MenuPage *page;
@@ -309,6 +348,7 @@ static void draw(void) {
     }
     plat_3ds_menu_draw(&menu);
     sDrawnTestRun = port_autorun_enabled() != 0;
+    sDrawnChanges = options_change_count();
 }
 
 /* The panel's calls. */
@@ -373,9 +413,10 @@ int menu_3ds_tap(int x, int y) {
     return sResult;
 }
 
-/* Every few seconds: the test run can end by itself, which changes what its rows say. */
+/* Every few seconds: the test run can end by itself, and the game's menus can change a setting shown. */
 void menu_3ds_refresh(void) {
-    if (sPage != NULL && sDrawnTestRun != (port_autorun_enabled() != 0)) {
+    if (sPage != NULL &&
+        (sDrawnTestRun != (port_autorun_enabled() != 0) || sDrawnChanges != options_change_count())) {
         draw();
     }
 }
