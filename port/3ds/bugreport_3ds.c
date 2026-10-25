@@ -185,6 +185,23 @@ typedef struct Report {
     int fileCount;
 } Report;
 
+/* Whether a saved recent frame (width, height, then BGR8) is more than one 400-row picture. */
+static int recent_frame_is_large(const char *name) {
+    char path[160];
+    u32 header[2] = { 0, 0 };
+    FILE *f;
+    snprintf(path, sizeof(path), "%s/%s", DATA_DIR, name);
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return 0;
+    }
+    if (fread(header, sizeof(header), 1, f) != 1) {
+        header[1] = 0;
+    }
+    fclose(f);
+    return header[1] > 400;
+}
+
 static void add_file(Report *report, const char *name) {
     char path[256];
     unsigned int size = 0;
@@ -609,19 +626,27 @@ static void report_now(void) {
     report.kind = REPORT_BUTTON;
     if (gPlatSnapshotSaved != before) {
         char name[64];
-        int frame = gPlatSnapshotSaved;
+        int frame = gPlatSnapshotSaved, largeRecent;
         snprintf(report.title, sizeof(report.title), "[3DS bug report] frame %d", frame);
         snprintf(name, sizeof(name), "diff_%05d_log.txt", frame);
         add_file(&report, name);
-        // The recent frame most likely to show the glitch, before the larger files (see save_recent_frames).
+        // The recent frame most likely to show the glitch, before the larger files (see save_recent_frames). In 3D (both
+        // eyes) or at 800 pixels it is twice the size, so it goes after them instead of using up the attachment budget.
         snprintf(name, sizeof(name), "diff_%05d_recent1.bin", frame);
-        add_file(&report, name);
+        largeRecent = recent_frame_is_large(name);
+        if (!largeRecent) {
+            add_file(&report, name);
+        }
         snprintf(name, sizeof(name), "diff_%05d_ref.png", frame);
         add_file(&report, name);
         snprintf(name, sizeof(name), "diff_%05d_gpu.bin", frame);
         add_file(&report, name);
         snprintf(name, sizeof(name), "diff_%05d_cmd.bin", frame);
         add_file(&report, name);
+        if (largeRecent) {
+            snprintf(name, sizeof(name), "diff_%05d_recent1.bin", frame);
+            add_file(&report, name);
+        }
     } else {
         snprintf(report.title, sizeof(report.title), "[3DS bug report] no snapshot (renderer: %s)",
                  gPlatGfxStage != NULL ? gPlatGfxStage : "-");
