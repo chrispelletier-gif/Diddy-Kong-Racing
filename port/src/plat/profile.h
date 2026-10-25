@@ -78,6 +78,7 @@ typedef struct ProfStats {
     unsigned int worstGpuUs;      /* Longest GPU drawing time for one frame. */
     unsigned int hitches;         /* Game frames that took longer than 50 ms. */
     unsigned long long idleNs;    /* Main core idle time (3DS with the idle meter, else 0). */
+    unsigned long long renderIdleNs; /* The renderer's core (the same core on an Old 3DS). */
 } ProfStats;
 
 /* A window of statistics: started with prof_window_start, read (any number of times) with prof_window_read. */

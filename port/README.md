@@ -93,9 +93,14 @@ the game is shipped. Taps on the menu play the game's own menu sounds. Until the
   instead of dropped, at the cost of one frame more input lag; the game keeps a third display list heap for it).
   `DKR_RENDER_AHEAD=2` in `env.txt` tries it without the menu; it also works on the host build.
 - **Profiler**: frame times on the bottom screen (see Profiler).
-- **Test run**: start a full test, a quick test or the AA bench, or stop the one running.
+- **Test run**: start a full test, a quick test, the boss fights or the GPU bench, or stop the one running.
 - **Controls**: button layout, remapping and circle pad deadzone, sensitivity and response (see Controls).
-- **Sound** (roadmap P9 and O5):
+- **Sound** (roadmap Phase 7):
+  - *Sound engine*: DSP voices (default) plays every voice of the game's music and sound effects on one of the 3DS
+    DSP's 24 channels, which decode, resample, envelope and mix it; the CPU only runs the game's sequencer and the
+    N64 reverbs (see Sound below). CPU mixer runs the N64 audio microcode on the CPU instead, as before. Applies on
+    the next start. The mixing core, rate and buffer rows only apply to the CPU mixer; with the DSP voices they
+    read "CPU mixer only".
   - *Mixing core*: Renderer (default) mixes the sound next to the renderer. System mixes it on the 3DS's system
     core instead, with the application's share of it raised to 80% and below the system's own services there
     (the first try, at the renderer's priority, held up the GPU's service and doubled frame times). Applies on the
@@ -103,8 +108,9 @@ the game is shipped. Taps on the menu play the game's own menu sounds. Until the
   - *Mixer rate*: 22 kHz (the game's own) or 32 kHz, which keeps more of the high frequencies when sounds are
     pitched up, for about 45% more mixing work. Pitches and reverb lengths are scaled to sound the same. Applies on
     the next start.
-  - *Smooth resampling*: ON (default) lets the DSP use its polyphase filter to bring the mix up to its output rate
-    instead of linear interpolation, which is softer on high frequencies. Free on the CPU; from the next sound.
+  - *Smooth resampling*: ON (default) lets the DSP use its polyphase filter to resample (each voice with the DSP
+    voices, the whole mix with the CPU mixer) instead of linear interpolation, which is softer on high frequencies.
+    Free on the CPU; from the next sound.
   - *Sound buffer*: Large keeps 50 ms more sound queued, so a late audio frame doesn't leave a gap, at the cost of
     the sound coming 50 ms later.
 - **Check for updates** and **Send a bug report** (see below).
@@ -122,7 +128,8 @@ value and a change function, and the main page gets a row that opens it.
 | `src/gfx/gfx_rdp.c`        | F3DDKR display list interpreter. Transforms vertices on the CPU, decodes and caches textures, decodes the RDP colour combiner and blender. |
 | `3ds/gfx_c3d.c`            | citro3d backend. Compiles the combiner to TEV stages. |
 | `host/gfx_soft.c`          | Software rasteriser backend for the host build. |
-| `src/audio/audio_rsp.c`    | C implementation of the aspMain audio microcode. The resampler table is read from the ROM. |
+| `src/audio/audio_rsp.c`    | C implementation of the aspMain audio microcode (the CPU mixer). The resampler table is read from the ROM. |
+| `src/audio/voices.c`       | The DSP voices: the synthesizer's voice changes as DSP channel settings, the samples decoded, the N64 reverbs on the aux buses (see Sound). |
 | `3ds/`                     | Other 3DS frontend parts: input, ndsp audio output, the main loop. |
 | `host/`                    | Other host frontend parts. |
 
@@ -142,7 +149,8 @@ environment variables:
 | `DKR_FRAMES`        | Exit after this many frames. |
 | `DKR_DUMP_EVERY`    | Write every Nth frame to `DKR_DUMP_DIR/frame_NNNNN.png`. |
 | `DKR_INPUT`         | Scripted input, e.g. `"700:START 710: 900:A 910: 1250:STICK=0,-80 1262:"`: each step holds the listed buttons from that poll number until the next step. |
-| `DKR_DUMP_AUDIO`    | Write the audio output to this file as raw 16 bit stereo PCM. |
+| `DKR_DUMP_AUDIO`    | Write the audio output to this file as raw 16 bit stereo PCM (22050 Hz with the CPU mixer, 32728 Hz with the DSP voices). |
+| `DKR_AUDIO_DSP`     | `0` runs the CPU mixer instead of the DSP voices (see Sound). |
 | `DKR_TRACE_FRAME`   | Log every display list command and draw of this frame. |
 | `DKR_BOTTOM_PREVIEW`| Draw the 3DS bottom screen's views (home, profiler, menu pages, updater) to PNG files in this directory and exit. `DKR_MONO_FONT` can name a copy of libctru's 8x8 font (2048 bytes) for the dense text. |
 
@@ -209,6 +217,11 @@ controls) work there, as do these renderer switches:
 - `DKR_MIPMAP=0` (never builds mipmaps, so they take no memory; the Settings switch then does nothing)
 - `DKR_MIP_FILTER=0` (reads the nearest mipmap instead of blending the two nearest)
 - `DKR_SINGLE_CORE=1` (on a New 3DS, keeps the renderer on the main core as on an Old 3DS, and the sound with it)
+- `DKR_AUDIO_DSP=0` (the CPU mixer instead of the DSP voices, whatever the Sound page says; also on the host build)
+- `DKR_AUDIO_DEBUG=1` (with the DSP voices, logs how many voices play and how late their changes were applied)
+- `DKR_AUDIO_NOFX=1` (with the DSP voices, no reverb, for comparison)
+- `DKR_DUMP_AUDIO=name` (with the DSP voices, writes the DSP's finished stereo output, 16 bit at its 32728 Hz, to
+  `sdmc:/3ds/dkr/name`)
 - `DKR_AUDIO_SIMD=0` (mixes the sound with the plain C loops instead of the ARM SIMD ones; the sound is the same)
 - `DKR_AUDIO_RATE=n` (runs the mixer at n Hz, whatever the Sound page says; also works on the host build)
 - `DKR_SYSCORE_LIMIT=n` (the share of the system core, in percent, asked for when the sound is mixed there; 80)
@@ -265,6 +278,28 @@ playing and the new build runs next time. It only works when the game was starte
 
 While the repository is public no token is needed. For a private repository the token in
 `sdmc:/3ds/dkr/bugreport.txt` is used, and it needs Contents set to Read-only as well (step 4 above).
+
+## Sound
+
+By default the sound plays on the 3DS DSP as the system's own games do (roadmap Phase 7, "DSP voices"). The game's
+sequence players and sound player run unchanged on the N64 synthesizer driver (libultra's `alAudioFrame`), which
+allocates physical voices and queues their parameter changes (start, stop, volume, pan, pitch, effect mix) with
+sample-accurate times. On the N64 the driver then builds a command list for the RSP, which the port runs on the CPU
+(`src/audio/audio_rsp.c`). With the DSP voices no command list is built: each of the 24 physical voices is one DSP
+channel (`src/audio/voices.c`), and its changes become channel settings, applied by the DSP's own frame clock (every
+160 samples, 4.9 ms) so they keep their timing. The DSP decodes, resamples, envelopes and mixes every voice and
+outputs at its own rate (about 32.7 kHz), so nothing is downsampled to 22 kHz on the way. The samples are decoded
+from the ROM's VADPCM to 16 bit PCM once at start-up (12 MB of linear memory, about a second).
+
+The reverbs are the N64's own: the game's two effect buses (its custom one and the "big room") are the DSP's two
+aux buses, and the voices' effect sends come back to the CPU every frame, where the same delay networks the RSP ran
+(`alFxPull`) are applied as plain arithmetic (`pv_aux_process`) before the DSP mixes the returns in. libctru does not
+expose that aux path, so `3ds/audio_ndsp.c` reads and writes the DSP's shared memory region for it directly.
+
+What differs from the N64: the DSP's resampler, envelope steps every 4.9 ms instead of every 8 samples, 24 physical
+voices instead of 40 (the driver steals the quietest, as it did when the N64 ran out), and the reverb's chorus taps
+use linear interpolation. The CPU mixer stays as a Settings > Sound fallback. The host build has a software
+stand-in for the channels (`host/audio_soft.c`), so `DKR_DUMP_AUDIO` records the same engine on a PC.
 
 ## Profiler
 
@@ -341,17 +376,18 @@ through the ground shows up as unsticks or as a race that never finishes. The ra
 (the test run's columns plus `build`). `DKR_AUTORUN_BOSS=1` runs it at every start; `DKR_AUTORUN_BOSS_TRACKS`,
 `DKR_AUTORUN_BOSS_CHARACTER` and `DKR_AUTORUN_BOSS_PASSES` change the levels, the character and the races per boss.
 
-### Anti-aliasing benchmark
+### GPU benchmark
 
-Tap Settings, Test run, then AA bench. It is a short test run (about half an hour) that measures what anti-aliasing costs on
-the heaviest races: Whale Bay, Jungle Falls and Frosty Village, the slowest tracks of hardware test run #10, raced
-by Bumper four times each with anti-aliasing off, on, on, off (so neither setting gets the cooler console or the warm
-caches). The game switches anti-aliasing itself before each race and puts your own setting back at the end. The
-results issue ("[3DS test run] AA benchmark ...") has a table of the two settings side by side for each track and
-what AA costs in GPU time and frame rate; the races are in `aa_bench_results.csv` (the test run's columns plus
-`aa`), which `autorun_report.py` also splits by track and AA. It keeps its own progress file, so a full test run it
-interrupts carries on afterwards. `DKR_AUTORUN_BENCH=1` runs it at every start instead; `DKR_AUTORUN_BENCH_TRACKS`
-and `DKR_AUTORUN_BENCH_CHARACTER` change the tracks and the character.
+Tap Settings, Test run, then GPU bench. It is a short test run (about 50 minutes) that measures the render settings on
+the heaviest races: Jungle Falls, Crescent Island and Haunted Woods, the slowest tracks of the quick tests, raced by
+Bumper once with each of 8 settings: anti-aliasing 4x, 2x or off, 32 or 16-bit buffers, and 60 fps with AA off or 2x.
+The game switches the settings itself before each race and puts your own back at the end. The results issue
+("[3DS test run] GPU benchmark ...") has one line per track and setting, with the GPU time it saves against AA 4x and
+how many frames made 60 fps; the races are in `gpu_bench_results.csv` (the test run's columns plus `config` and
+`pct_60fps`), which `autorun_report.py` also splits by track and setting. It keeps its own progress file, so a full test
+run it interrupts carries on afterwards. `DKR_AUTORUN_BENCH=1` runs it at every start instead;
+`DKR_AUTORUN_BENCH_TRACKS`, `DKR_AUTORUN_BENCH_CHARACTER` and `DKR_AUTORUN_BENCH_CONFIGS` (indexes into the 8 settings)
+change the tracks, the character and the settings. It replaced the anti-aliasing benchmark of roadmap item G0.
 
 ## Automated testing
 

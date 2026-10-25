@@ -40,6 +40,9 @@
 #include "video.h"
 #include "waves.h"
 #include "weather.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 
 #define OBJECT_MAP_SIZE 0x3000
 #define MAX_CHECKPOINTS 60
@@ -2843,6 +2846,9 @@ void obj_update(s32 updateRate) {
     s32 sp54;
     Object *obj;
 
+#ifdef TARGET_PORT
+    port_set_logic_rate(updateRate);
+#endif
     func_800245B4(-1);
     gEventStartTimer = gEventCountdown;
     if (gEventCountdown > 0 && race_starting() != FALSE) {

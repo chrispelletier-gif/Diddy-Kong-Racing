@@ -5,6 +5,9 @@
 #include "objects.h"
 #include "PR/libaudio.h"
 #include "video.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 
 #define SOUND_PARAM_DURATION(m) (m->velocityMax * 33333)
 #define SOUND_PARAM_NEXT_SOUND(m) (m->velocityMin + (m->keyMin & 0xC0) * 4)
@@ -132,6 +135,9 @@ ALMicroTime sndp_voice_handler(void *node) {
     ALSndpEvent evt;
     u32 eventType = AL_SNDP_API_EVT;
 
+#ifdef TARGET_PORT
+    gPortAudioStage = "handling sound effect events";
+#endif
     do {
         switch (sndp->nextEvent.type) {
             case (AL_SNDP_API_EVT):
@@ -146,6 +152,9 @@ ALMicroTime sndp_voice_handler(void *node) {
         sndp->nextDelta = alEvtqNextEvent(&sndp->evtq, &sndp->nextEvent);
 
     } while (sndp->nextDelta == 0);
+#ifdef TARGET_PORT
+    gPortAudioStage = "synthesizing a frame";
+#endif
     sndp->curTime += sndp->nextDelta;
     return sndp->nextDelta;
 }
@@ -562,10 +571,23 @@ ALSoundState *sndp_allocate(UNUSED ALBank *bank, ALSound *sound) {
     u32 mask;
     s32 priority;
 
+#ifdef TARGET_PORT
+    // The free list is read with interrupts disabled: the sound thread allocates too (retriggered sounds), and taking
+    // the head it had just taken linked one state into both lists.
+    mask = osSetIntMask(OS_IM_NONE);
     state = gSoundStateLists.freeHead;
     keyMap = sound->keyMap;
+    if (state == NULL) {
+        osSetIntMask(mask);
+    }
+#else
+    state = gSoundStateLists.freeHead;
+    keyMap = sound->keyMap;
+#endif
     if (state != NULL) {
+#ifndef TARGET_PORT
         mask = osSetIntMask(OS_IM_NONE);
+#endif
         gSoundStateLists.freeHead = state->next;
         alUnlink((ALLink *) state);
         if (gSoundStateLists.allocHead != NULL) {

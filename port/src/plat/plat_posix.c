@@ -36,6 +36,10 @@ unsigned long long plat_idle_ns(void) {
     return 0;
 }
 
+unsigned long long plat_render_idle_ns(void) {
+    return 0;
+}
+
 void plat_shutdown(void) {
 }
 
@@ -59,10 +63,11 @@ void plat_send_test_results(const char *title, const char *summary) {
     fprintf(stderr, "test results: %s\n%s\n", title, summary);
 }
 
-static int sAntialias = 1;
+static int sAntialias = PLAT_AA_4X, sFb16;
 
-void plat_set_antialias(int on) {
-    sAntialias = on < 0 ? 1 : on;
+void plat_set_gpu_config(int aa, int fb16) {
+    sAntialias = aa < 0 ? PLAT_AA_4X : aa;
+    sFb16 = fb16 > 0;
 }
 
 float plat_aspect_scale(void) {
@@ -97,6 +102,10 @@ float plat_camera_fov(float fovy) {
 
 int plat_antialias(void) {
     return sAntialias;
+}
+
+int plat_fb16(void) {
+    return sFb16;
 }
 
 static void *thread_entry(void *arg) {

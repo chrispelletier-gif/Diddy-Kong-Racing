@@ -131,6 +131,8 @@ static void crash_write_file(const char *path, const char *text, u32 length) {
     FSFILE_Close(file);
 }
 
+void plat_audio_crash_silence(void);
+
 static void crash_handler(ERRF_ExceptionInfo *info, CpuRegisters *regs) {
     static const char *const sTypes[] = { "prefetch abort", "data abort", "undefined instruction", "VFP exception" };
     int length = 0, i;
@@ -161,7 +163,9 @@ static void crash_handler(ERRF_ExceptionInfo *info, CpuRegisters *regs) {
         length = sizeof(sCrashText) - 1;
     }
     crash_write_file("/3ds/dkr/crash.txt", sCrashText, length);
-    // Back to the Homebrew Launcher; the next start offers to send the report.
+    // Silence the DSP's voices (audio_ndsp.c), then back to the Homebrew Launcher; the next start offers to send
+    // the report.
+    plat_audio_crash_silence();
     svcExitProcess();
 }
 
@@ -640,7 +644,7 @@ static void report_now(void) {
 static volatile int sReportRequested;
 static volatile int sResultsRequested;
 static char sResultsTitle[160];
-static char sResultsSummary[2048];
+static char sResultsSummary[6144];
 
 /* "Send a bug report" in the Settings menu (menu_3ds.c, via update_3ds.c): the same as SELECT + touch. */
 void bugreport_request(void) {
@@ -671,7 +675,7 @@ static void send_test_results(void) {
     report.extra = sResultsSummary;
     snprintf(report.title, sizeof(report.title), "%s", sResultsTitle);
     add_file(&report, "autorun_results.csv");
-    add_file(&report, "aa_bench_results.csv");
+    add_file(&report, "gpu_bench_results.csv");
     add_file(&report, "quick_test_results.csv");
     add_file(&report, "boss_test_results.csv");
     add_file(&report, "autorun_problems.txt");

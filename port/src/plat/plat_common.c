@@ -208,3 +208,36 @@ void plat_set_render_ahead(int frames) {
     sRenderAhead = frames == 2 ? 2 : 1;
     settings_set("renderahead", sRenderAhead);
 }
+
+/* The 60 fps setting (see plat_frame_retraces): -1 until first read. sFps60 is what frames use now. */
+static volatile int sFps60Setting = -1, sFps60;
+
+static void read_60fps_setting(void) {
+    if (sFps60Setting < 0) {
+        const char *env = plat_getenv("DKR_60FPS");
+        sFps60Setting = settings_get("fps60", env != NULL && atoi(env) != 0) != 0;
+        sFps60 = sFps60Setting;
+        plat_log("frame rate cap: %d fps", sFps60 ? 60 : 30);
+    }
+}
+
+int plat_frame_retraces(void) {
+    read_60fps_setting();
+    return sFps60 ? 1 : 2;
+}
+
+void plat_set_60fps(int on) {
+    read_60fps_setting();
+    sFps60 = on < 0 ? sFps60Setting : on != 0;
+}
+
+int plat_60fps_setting(void) {
+    read_60fps_setting();
+    return sFps60Setting;
+}
+
+void plat_set_60fps_setting(int on) {
+    read_60fps_setting();
+    sFps60Setting = sFps60 = on != 0;
+    settings_set("fps60", sFps60Setting);
+}

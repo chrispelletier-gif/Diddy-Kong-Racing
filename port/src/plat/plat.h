@@ -36,8 +36,13 @@ void plat_thread_park(void) __attribute__((noreturn));
 void plat_set_current_os_thread(void *thread);
 void *plat_get_current_os_thread(void);
 
-/* Time the application core has spent idle (only measured on the 3DS; 0 elsewhere). */
+/*
+ * Time the application core (the game's own threads) has spent idle, and the same for the renderer's core (core 2 on
+ * a New 3DS, where the renderer and the sound run; the application core again elsewhere). Only measured on the 3DS;
+ * 0 elsewhere.
+ */
 unsigned long long plat_idle_ns(void);
+unsigned long long plat_render_idle_ns(void);
 
 /* Monotonic time. */
 unsigned long long plat_time_ns(void);
@@ -152,12 +157,14 @@ void plat_overlay_show(const char *text);
 /* Sends the unattended test run's results as a GitHub issue, in the background, if bug reports are set up (3DS). */
 void plat_send_test_results(const char *title, const char *summary);
 /*
- * Anti-aliasing (the 3DS draws at twice the resolution and scales down): 1 on, 0 off, -1 back to the player's setting (the
- * Settings menu, else DKR_AA).
- * The renderer switches between two frames. plat_antialias says whether the frames drawn now are anti-aliased (the
- * host build only remembers the setting).
+ * The 3DS render target: anti-aliasing (the GPU draws more pixels than the screen has and the display transfer averages
+ * them; PLAT_AA_4X twice the resolution both ways, PLAT_AA_2X twice the height only) and 16-bit colour and depth
+ * buffers, 1 on. -1 for either is the player's setting (the Settings menu, else DKR_AA and DKR_FB16).
+ * The renderer switches between two frames. plat_antialias and plat_fb16 say what the frames drawn now use (the host
+ * build only remembers the setting).
  */
-void plat_set_antialias(int on);
+enum { PLAT_AA_OFF, PLAT_AA_4X, PLAT_AA_2X };
+void plat_set_gpu_config(int aa, int fb16);
 int plat_antialias(void);
 /*
  * Widescreen (roadmap item G3): how much wider than 4:3 the game's camera is to be, 1 for 4:3 or 1.25 to fill the
@@ -173,6 +180,17 @@ float plat_aspect_scale(void);
 float plat_camera_fov(float fovy);
 /* What the style multiplies tan(fovy / 2) by: 1 for Wide, below 1 for the narrower ones (plat_camera_fov). */
 float plat_fov_tan_scale(void);
+int plat_fb16(void);
+/*
+ * The frame rate cap (roadmap G6): the scheduler hands the game each finished frame after 2 retraces (30 fps, the
+ * N64 game's own) or, at 60 fps, after 1. The game's logic already steps by however many retraces a frame took, and
+ * falls back to 30 fps by itself when frames don't fit in one. plat_set_60fps is for the GPU benchmark (1 on, 0 off,
+ * -1 the player's setting: settings.txt "fps60", else DKR_60FPS); the setting is saved by plat_set_60fps_setting.
+ */
+int plat_frame_retraces(void);
+void plat_set_60fps(int on);
+int plat_60fps_setting(void);
+void plat_set_60fps_setting(int on);
 /* The build's version (git describe), as bug reports show it; "host" for a host build without one. */
 const char *plat_build_version(void);
 /* How the sound is being made, for the test runs' results (e.g. "sys/22k/smooth"; "host" on the host). */

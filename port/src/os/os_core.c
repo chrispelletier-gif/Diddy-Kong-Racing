@@ -365,8 +365,62 @@ void port_lockstep_dma(u32 numBytes) {
 
 /******************************** Message queues ********************************/
 
+/* The queue each started thread is blocked on (for the 3DS watchdog's stall report). Kernel lock held to change. */
+static OSMesgQueue *volatile sBlockedOn[MAX_THREADS];
+static volatile u8 sBlockedSending[MAX_THREADS];
+
+static void wait_on_queue_inner(OSMesgQueue *mq, int forSpace);
+
+/*
+ * On the N64 a thread with interrupts disabled cannot be switched away from until it blocks: nothing can wake a
+ * higher priority thread. Here the other threads still get their messages (the scheduler may already be running), so
+ * a woken thread first waits for any interrupt disabled section to end. Without this the sound thread could run in the
+ * middle of the game's (sound_play's sndp_allocate's) and edit the same lists, which tied them into a loop the sound
+ * thread then spun in forever (60 fps freezes, issues #91, #93, #97 and #102). Not needed in lockstep, where only one
+ * thread runs and the CPU only changes hands when a thread blocks.
+ */
+static void wait_for_int_enabled(void) {
+    if (!sIntDisabled && !port_lockstep_enabled()) {
+        plat_intlock_lock();
+        plat_intlock_unlock();
+    }
+}
+
 /* Blocks the calling thread until mq may have a message (or space, for a sender). Kernel lock held. */
 static void wait_on_queue(OSMesgQueue *mq, int forSpace) {
+    s32 t = thread_index((OSThread *) plat_get_current_os_thread());
+    if (t >= 0) {
+        sBlockedOn[t] = mq;
+        sBlockedSending[t] = forSpace;
+    }
+    wait_on_queue_inner(mq, forSpace);
+    if (t >= 0) {
+        sBlockedOn[t] = NULL;
+    }
+}
+
+/*
+ * One line per N64 thread: its id, and the queue it is blocked on (address, messages held / size) or "running" if
+ * it is not blocked on a queue (working, spinning, or waiting on something else).
+ */
+void port_describe_threads(char *buffer, s32 size) {
+    s32 i, used = 0;
+    buffer[0] = '\0';
+    // No kernel lock: this runs in the middle of a stall, perhaps one where a thread holds it.
+    for (i = 0; i < sNumThreads && used < size - 1; i++) {
+        OSMesgQueue *mq = sBlockedOn[i];
+        if (mq != NULL) {
+            used += plat_snprintf(buffer + used, size - used, "%sthread %d %s %p (%d/%d)", i > 0 ? ", " : "",
+                                  (int) sThreads[i]->id, sBlockedSending[i] ? "sending to" : "waiting on", (void *) mq,
+                                  (int) mq->validCount, (int) mq->msgCount);
+        } else {
+            used += plat_snprintf(buffer + used, size - used, "%sthread %d running", i > 0 ? ", " : "",
+                                  (int) sThreads[i]->id);
+        }
+    }
+}
+
+static void wait_on_queue_inner(OSMesgQueue *mq, int forSpace) {
     s32 i = port_lockstep_enabled() ? thread_index((OSThread *) plat_get_current_os_thread()) : -1;
     if (i < 0) {
         plat_kwait();
@@ -391,6 +445,7 @@ void osCreateMesgQueue(OSMesgQueue *mq, OSMesg *msg, s32 count) {
 
 s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     int hadInt = (flag == OS_MESG_BLOCK) ? port_int_release() : FALSE;
+    int waited = FALSE;
 
     plat_klock();
     while (mq->validCount >= mq->msgCount) {
@@ -400,17 +455,22 @@ s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
             return -1;
         }
         wait_on_queue(mq, TRUE);
+        waited = TRUE;
     }
     mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
     mq->validCount++;
     plat_kbroadcast();
     plat_kunlock();
     port_int_restore(hadInt);
+    if (waited) {
+        wait_for_int_enabled();
+    }
     return 0;
 }
 
 s32 osJamMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     int hadInt = (flag == OS_MESG_BLOCK) ? port_int_release() : FALSE;
+    int waited = FALSE;
 
     plat_klock();
     while (mq->validCount >= mq->msgCount) {
@@ -420,6 +480,7 @@ s32 osJamMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
             return -1;
         }
         wait_on_queue(mq, TRUE);
+        waited = TRUE;
     }
     mq->first = (mq->first + mq->msgCount - 1) % mq->msgCount;
     mq->msg[mq->first] = msg;
@@ -427,11 +488,15 @@ s32 osJamMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     plat_kbroadcast();
     plat_kunlock();
     port_int_restore(hadInt);
+    if (waited) {
+        wait_for_int_enabled();
+    }
     return 0;
 }
 
 s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag) {
     int hadInt = (flag == OS_MESG_BLOCK) ? port_int_release() : FALSE;
+    int waited = FALSE;
 
     plat_klock();
     while (mq->validCount == 0) {
@@ -441,6 +506,7 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag) {
             return -1;
         }
         wait_on_queue(mq, FALSE);
+        waited = TRUE;
     }
     if (msg != NULL) {
         *msg = mq->msg[mq->first];
@@ -450,21 +516,32 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag) {
     plat_kbroadcast();
     plat_kunlock();
     port_int_restore(hadInt);
+    if (waited) {
+        wait_for_int_enabled();
+    }
     return 0;
 }
 
 /* Used by emulated hardware to post a message, like an interrupt handler would. Never blocks. */
-void port_post_mesg(OSMesgQueue *mq, OSMesg msg) {
+/* Returns FALSE if the queue was full, like an interrupt's message on the N64, which is then lost. */
+static s32 post_mesg(OSMesgQueue *mq, OSMesg msg) {
+    s32 posted = FALSE;
     if (mq == NULL) {
-        return;
+        return TRUE;
     }
     plat_klock();
     if (mq->validCount < mq->msgCount) {
         mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
         mq->validCount++;
         plat_kbroadcast();
+        posted = TRUE;
     }
     plat_kunlock();
+    return posted;
+}
+
+void port_post_mesg(OSMesgQueue *mq, OSMesg msg) {
+    post_mesg(mq, msg);
 }
 
 /******************************** Events ********************************/
@@ -482,13 +559,44 @@ void osSetEventMesg(OSEvent event, OSMesgQueue *mq, OSMesg msg) {
 }
 
 /* Raises an emulated hardware event. Waits for any thread that has interrupts disabled. */
+/* Event messages lost to a full queue (logged by the 3DS watchdog with a hang). */
+volatile u32 gPortEventsDropped;
+/* Task-done messages waiting for room in a full queue right now. */
+volatile u32 gPortEventsWaiting;
+
 void port_raise_event(OSEvent event) {
+    static u32 sWaits;
+    s32 posted, waited = FALSE;
     if (event >= OS_NUM_EVENTS) {
         return;
     }
-    plat_intlock_lock();
-    port_post_mesg(sEventTable[event].queue, sEventTable[event].msg);
-    plat_intlock_unlock();
+    for (;;) {
+        plat_intlock_lock();
+        posted = post_mesg(sEventTable[event].queue, sEventTable[event].msg);
+        plat_intlock_unlock();
+        // A lost task-done message leaves the scheduler waiting for it forever: the game and the sound both stop
+        // (issues #91 and #93, at 60 fps, where the scheduler's 8-message queue holds less time). The RCP workers are
+        // threads, not interrupts, so the done message waits for room instead.
+        if (posted) {
+            break;
+        }
+        if (event != OS_EVENT_SP && event != OS_EVENT_DP) {
+            gPortEventsDropped++;
+            break;
+        }
+        if (!waited) {
+            waited = TRUE;
+            gPortEventsWaiting++;
+            if (sWaits++ % 64 == 0) {
+                port_log("event queue full: %s done message waits for the scheduler (%u times)",
+                         event == OS_EVENT_SP ? "SP" : "DP", (unsigned) sWaits);
+            }
+        }
+        plat_sleep_ns(500000ULL);
+    }
+    if (waited) {
+        gPortEventsWaiting--;
+    }
 }
 
 /******************************** Time ********************************/
