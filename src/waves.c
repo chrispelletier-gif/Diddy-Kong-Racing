@@ -75,7 +75,7 @@ s32 gWaveVertexFlip;         // either 1 or 0, toggled in waves_update, used to 
 f32 gWaveLowerY;             // is set to lowest value of gWaveHeightTable
 f32 gWaveUpperY;             // is set to highest value of gWaveHeightTable
 UNUSED s32 D_8012A024;
-Vertex D_8012A028[2][4]; // stores values of gWaveVertices to be used in waves_render
+Vertex D_8012A028[FRAME_BUFFERS][4]; // stores values of gWaveVertices to be used in waves_render
 s32 gWavePlayerCount;    // controls whether 2 or 4 items are used in gWaveVertices / gWaveTriangles
 TriangleBatchInfo *gWaveBatch;
 TextureHeader *gWaveTexture;
@@ -1054,8 +1054,8 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                             numVerts = gWaveController.subdivisions + 1;
                             var_t0 = ((sp104 & 0xFF) - 1) * numVerts * numVerts;
                             for (j = 0; j < gWaveController.subdivisions; j++) {
-                                vtx = &gWaveVertices[gWaveVertexFlip + viewportID][var_t0];
-                                tri = &gWaveTriangles[gWaveVertexFlip + viewportID]
+                                vtx = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0];
+                                tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS]
                                                      [j * (gWaveController.subdivisions << 1)];
 
                                 gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
@@ -1080,8 +1080,8 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                 numVerts = gWaveController.subdivisions + 1;
                 var_t0 = ((sp104 & 0xFF) - 1) * numVerts * numVerts;
                 for (j = 0; j < gWaveController.subdivisions; j++) {
-                    vtx = &gWaveVertices[gWaveVertexFlip + viewportID][var_t0];
-                    tri = &gWaveTriangles[gWaveVertexFlip + viewportID][j * (gWaveController.subdivisions << 1)];
+                    vtx = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0];
+                    tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][j * (gWaveController.subdivisions << 1)];
 
                     gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
                     gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);

@@ -2202,10 +2202,10 @@ void func_8007FFEC(s32 numberOfPanels) {
             gMenuGeometry[i].vertices[b] = &gWoodPanelVertices[b][panelIndex];
             gMenuGeometry[i].triangles[b] = &gWoodPanelTriangles[b][triangleCount];
         }
-        gMenuGeometry[i].texture[0] = 0;
-        gMenuGeometry[i].texture[1] = 0;
-        gMenuGeometry[i].unk18[0] = 0;
-        gMenuGeometry[i].unk18[1] = 0;
+        for (b = 0; b < FRAME_BUFFERS; b++) {
+            gMenuGeometry[i].texture[b] = 0;
+            gMenuGeometry[i].unk18[b] = 0;
+        }
         panelIndex += 20;
         triangleCount += 10;
     }
@@ -2214,7 +2214,7 @@ void func_8007FFEC(s32 numberOfPanels) {
     for (i = 0; i < numberOfPanels; i++) {
         panelIndex = 0;
         for (IndicesIndex = 0; IndicesIndex < 10; triItemIndex++, panelIndex += 3, IndicesIndex++) {
-            for (triListIndex = 0; triListIndex < 2; triListIndex++) {
+            for (triListIndex = 0; triListIndex < FRAME_BUFFERS; triListIndex++) {
                 gWoodPanelTriangles[triListIndex][triItemIndex].verticesArray[0] = BACKFACE_DRAW;
                 gWoodPanelTriangles[triListIndex][triItemIndex].verticesArray[1] = gWoodPanelsIndices[panelIndex];
                 gWoodPanelTriangles[triListIndex][triItemIndex].verticesArray[2] = gWoodPanelsIndices[panelIndex + 1];
@@ -8398,13 +8398,18 @@ void menu_track_select_init(void) {
     }
 
     i = 40;
-    gTrackSelectBgTriangles[0] = mempool_alloc_safe(0xB40, COLOUR_TAG_YELLOW);
-    gTrackSelectBgTriangles[1] = gTrackSelectBgTriangles[0] + i;
-    gTrackSelectBgVertices[0] = (Vertex *) (gTrackSelectBgTriangles[1] + i);
-    gTrackSelectBgVertices[1] = gTrackSelectBgVertices[0] + i * 2;
+    // 0x5A0 bytes per copy: 40 triangles and 80 vertices.
+    gTrackSelectBgTriangles[0] = mempool_alloc_safe(0x5A0 * FRAME_BUFFERS, COLOUR_TAG_YELLOW);
+    for (j = 1; j < FRAME_BUFFERS; j++) {
+        gTrackSelectBgTriangles[j] = gTrackSelectBgTriangles[0] + i * j;
+    }
+    gTrackSelectBgVertices[0] = (Vertex *) (gTrackSelectBgTriangles[0] + i * FRAME_BUFFERS);
+    for (j = 1; j < FRAME_BUFFERS; j++) {
+        gTrackSelectBgVertices[j] = gTrackSelectBgVertices[0] + i * 2 * j;
+    }
 
     var_a0 = -160;
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < FRAME_BUFFERS; i++) {
         for (j = 0; j < 80; j++) {
             gTrackSelectBgVertices[i][j].x = var_a0;
             gTrackSelectBgVertices[i][j].z = -0x400;
@@ -8414,7 +8419,7 @@ void menu_track_select_init(void) {
             var_a0 = -var_a0;
         }
     }
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < FRAME_BUFFERS; i++) {
         for (j = 0; j < 40; j++) {
             gTrackSelectBgTriangles[i][j].flags = BACKFACE_DRAW;
             gTrackSelectBgTriangles[i][j].vi0 = 0;
