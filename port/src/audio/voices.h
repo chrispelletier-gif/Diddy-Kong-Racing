@@ -34,6 +34,8 @@ void pv_aux_process(int bus, int *left, int *right, int count);
 /* The game's audio output in this mode: osAiSetNextBuffer sizes and what is still to be played, both in bytes. */
 void pv_output_queue(unsigned numBytes);
 unsigned pv_output_remaining(void);
+/* After the DSP was unloaded and reloaded (HOME menu, sleep): restarts the playing voices from a known point. */
+void pv_resync(void);
 /* For the results label: e.g. "dsp" with the peak channel count. */
 const char *pv_describe(void);
 

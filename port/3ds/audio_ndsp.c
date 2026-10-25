@@ -127,11 +127,14 @@ void port_audio_output_init(u32 frequency) {
 }
 
 /* The application is closing. Later calls see no DSP and only count time. */
+static aptHookCookie sVoiceAptCookie;
+
 void port_audio_output_exit(void) {
     if (sDspAvailable) {
         int i;
         sDspAvailable = 0;
         ndspSetCallback(NULL, NULL);
+        aptUnhook(&sVoiceAptCookie);
         for (i = 0; i < PV_CHANNELS; i++) {
             ndspChnWaveBufClear(i);
         }
@@ -356,10 +359,35 @@ static void voices_apply_interp(void) {
 }
 
 /* Every DSP frame, on ndsp's thread: the voices' parameter changes, then the reverbs on the aux returns. */
+/*
+ * The HOME menu and sleep unload the DSP (libctru's APT handling); on the way back it is reloaded and libctru
+ * resends its channel settings, but which samples go on playing is not reliable: voices cut out, and some played on
+ * with libctru's bookkeeping of them lost. So the engine restarts its voices once the DSP runs again. The hook runs on
+ * the APT thread before the DSP is back, so it only leaves a note for the frame callback.
+ */
+static volatile int sVoiceResumePending;
+
+static void voices_apt_hook(APT_HookType hook, void *param) {
+    (void) param;
+    if (hook == APTHOOK_ONRESTORE || hook == APTHOOK_ONWAKEUP) {
+        sVoiceResumePending = 1;
+    }
+}
+
 static void voices_frame(void *arg) {
+    static u16 sLastFrameId = 0xFFFF;
     int bus;
     (void) arg;
 
+    // ndsp calls this from its loop even when it is not running a frame (ndspFrameId unchanged): skip those.
+    if (ndspFrameId == sLastFrameId) {
+        return;
+    }
+    sLastFrameId = ndspFrameId;
+    if (sVoiceResumePending) {
+        sVoiceResumePending = 0;
+        pv_resync();
+    }
     pv_frame_tick();
     if (ndspVars[NDSP_AUX_REGION][0] == NULL || ndspVars[NDSP_AUX_REGION][1] == NULL) {
         sVoiceFrames++;
@@ -409,6 +437,7 @@ int pv_backend_init(unsigned synthRate) {
         }
     }
     ndspSetCallback(voices_frame, NULL);
+    aptHook(&sVoiceAptCookie, voices_apt_hook, NULL);
     plat_log("audio: DSP voices on %d channels, %lu KB of linear memory left for textures", PV_CHANNELS,
              (unsigned long) (linearSpaceFree() / 1024));
     return 1;

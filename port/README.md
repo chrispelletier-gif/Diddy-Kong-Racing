@@ -300,6 +300,8 @@ channel (`src/audio/voices.c`), and its changes become channel settings, applied
 160 samples, 4.9 ms) so they keep their timing. The DSP decodes, resamples, envelopes and mixes every voice and
 outputs at its own rate (about 32.7 kHz), so nothing is downsampled to 22 kHz on the way. The samples are decoded
 from the ROM's VADPCM to 16 bit PCM once at start-up (12 MB of linear memory, about a second).
+The HOME menu and sleep unload the DSP; when it is back the engine restarts its looping voices from their loops
+and drops the one-shot sounds that were playing, since the firmware does not reliably carry the channels over.
 
 The reverbs are the N64's own: the game's two effect buses (its custom one and the "big room") are the DSP's two
 aux buses, and the voices' effect sends come back to the CPU every frame, where the same delay networks the RSP ran
