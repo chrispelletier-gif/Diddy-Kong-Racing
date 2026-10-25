@@ -19,13 +19,17 @@ Vec2s *gWaveHeightIndices = NULL; // holds some sort of index?
 TexCoords *gWaveUVTable = NULL;
 f32 *D_800E304C[9] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
 
-Vertex *gWaveVertices[4] = { NULL, NULL, NULL, NULL };
-Triangle *gWaveTriangles[4] = { NULL, NULL, NULL, NULL };
-Triangle D_800E3090[4] = {
+Vertex *gWaveVertices[FRAME_BUFFERS * 2];
+Triangle *gWaveTriangles[FRAME_BUFFERS * 2];
+Triangle D_800E3090[FRAME_BUFFERS * 2] = {
     { { { BACKFACE_DRAW, 0, 2, 1 } }, { { { 0, 0 } } }, { { { 0, 0 } } }, { { { 0, 0 } } } },
     { { { BACKFACE_DRAW, 1, 2, 3 } }, { { { 0, 0 } } }, { { { 0, 0 } } }, { { { 0, 0 } } } },
     { { { BACKFACE_DRAW, 0, 2, 1 } }, { { { 0, 0 } } }, { { { 0, 0 } } }, { { { 0, 0 } } } },
     { { { BACKFACE_DRAW, 1, 2, 3 } }, { { { 0, 0 } } }, { { { 0, 0 } } }, { { { 0, 0 } } } },
+#ifdef TARGET_PORT
+    { { { BACKFACE_DRAW, 0, 2, 1 } }, { { { 0, 0 } } }, { { { 0, 0 } } }, { { { 0, 0 } } } },
+    { { { BACKFACE_DRAW, 1, 2, 3 } }, { { { 0, 0 } } }, { { { 0, 0 } } }, { { { 0, 0 } } } },
+#endif
 };
 
 TextureHeader *gWaveTextureHeader = NULL;
@@ -71,7 +75,7 @@ s32 gWaveVertexFlip;         // either 1 or 0, toggled in waves_update, used to 
 f32 gWaveLowerY;             // is set to lowest value of gWaveHeightTable
 f32 gWaveUpperY;             // is set to highest value of gWaveHeightTable
 UNUSED s32 D_8012A024;
-Vertex D_8012A028[2][4]; // stores values of gWaveVertices to be used in waves_render
+Vertex D_8012A028[FRAME_BUFFERS][4]; // stores values of gWaveVertices to be used in waves_render
 s32 gWavePlayerCount;    // controls whether 2 or 4 items are used in gWaveVertices / gWaveTriangles
 TriangleBatchInfo *gWaveBatch;
 TextureHeader *gWaveTexture;
@@ -175,24 +179,16 @@ void waves_alloc(void) {
     }
     temp = (gWaveController.subdivisions + 1);
     allocSize = (temp * 250 * (gWaveController.subdivisions + 1));
-    if (gWavePlayerCount != 2) { // 1 player
-        gWaveVertices[0] = (Vertex *) mempool_alloc_safe(allocSize << 1, COLOUR_TAG_CYAN);
-        gWaveVertices[1] = (Vertex *) (((u32) gWaveVertices[0]) + allocSize);
-    } else { // 2 Player
-        gWaveVertices[0] = (Vertex *) mempool_alloc_safe(allocSize << 2, COLOUR_TAG_CYAN);
-        gWaveVertices[1] = (Vertex *) (((u32) gWaveVertices[0]) + allocSize);
-        gWaveVertices[2] = (Vertex *) (((u32) gWaveVertices[1]) + allocSize);
-        gWaveVertices[3] = (Vertex *) (((u32) gWaveVertices[2]) + allocSize);
+    // One set of FRAME_BUFFERS copies for each player's viewport (set k is at index k * FRAME_BUFFERS).
+    temp = gWavePlayerCount != 2 ? FRAME_BUFFERS : FRAME_BUFFERS * 2;
+    gWaveVertices[0] = (Vertex *) mempool_alloc_safe(allocSize * temp, COLOUR_TAG_CYAN);
+    for (i = 1; i < temp; i++) {
+        gWaveVertices[i] = (Vertex *) (((u32) gWaveVertices[0]) + allocSize * i);
     }
     allocSize = (gWaveController.subdivisions * 32) * gWaveController.subdivisions;
-    if (gWavePlayerCount != 2) { // 1 Player
-        gWaveTriangles[0] = mempool_alloc_safe(allocSize << 1, COLOUR_TAG_CYAN);
-        gWaveTriangles[1] = (Triangle *) (((u32) gWaveTriangles[0]) + allocSize);
-    } else { // 2 Player
-        gWaveTriangles[0] = (Triangle *) mempool_alloc_safe(allocSize << 2, COLOUR_TAG_CYAN);
-        gWaveTriangles[1] = (Triangle *) (((u32) gWaveTriangles[0]) + allocSize);
-        gWaveTriangles[2] = (Triangle *) (((u32) gWaveTriangles[1]) + allocSize);
-        gWaveTriangles[3] = (Triangle *) (((u32) gWaveTriangles[2]) + allocSize);
+    gWaveTriangles[0] = (Triangle *) mempool_alloc_safe(allocSize * temp, COLOUR_TAG_CYAN);
+    for (i = 1; i < temp; i++) {
+        gWaveTriangles[i] = (Triangle *) (((u32) gWaveTriangles[0]) + allocSize * i);
     }
     gWaveTextureHeader = load_texture(gWaveController.textureId);
 }
@@ -301,9 +297,9 @@ void waves_init(LevelModel *model, LevelHeader *header, s32 playerCount) {
     i_2 = 0;
     load_rng_seed();
     if (playerCount != 2) {
-        playerCount = 2;
+        playerCount = FRAME_BUFFERS;
     } else {
-        playerCount = 4;
+        playerCount = FRAME_BUFFERS * 2;
     }
     for (var_s3 = 0; var_s3 < 25; var_s3++) {
         if (0 <= gWaveController.subdivisions) {
@@ -610,7 +606,7 @@ void func_800B92F4(s32 blockID, s32 viewportID) {
         }
 
         sp84 = D_8012A5E8[k].unk6;
-        vertices = &gWaveVertices[gWaveVertexFlip + viewportID][sp90 * sp98];
+        vertices = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][sp90 * sp98];
         sp98 = D_800E30E4[sp98];
         vertexIdx = 0;
         for (i = 0; i <= gWaveController.subdivisions; i++) {
@@ -710,7 +706,7 @@ void func_800B97A8(s32 blockID, s32 arg1) {
         }
 
         var_a0 = D_8012A5E8[k].unk6;
-        vertices = &gWaveVertices[gWaveVertexFlip + arg1][spA0 * spA8];
+        vertices = &gWaveVertices[gWaveVertexFlip + (arg1 >> 1) * FRAME_BUFFERS][spA0 * spA8];
         spA8 = D_800E30E4[spA8];
         for (i = 0, vertexIdx = 0; i <= gWaveController.subdivisions; i++) {
             var_s1 = D_8012A5E8[k].unk4;
@@ -772,7 +768,7 @@ void waves_update(s32 updateRate) {
     s32 j_2;
     s32 i_2;
 
-    gWaveVertexFlip = 1 - gWaveVertexFlip;
+    gWaveVertexFlip = FRAME_FLIP(gWaveVertexFlip);
     for (i_2 = 0, j_2 = 0; i_2 < gWaveController.tileCount; i_2++) {
         for (k_2 = 0; k_2 < gWaveController.tileCount; k_2++) {
             gWaveHeightIndices[j_2].s[0] += updateRate;
@@ -822,18 +818,18 @@ void waves_update(s32 updateRate) {
     for (i = 0; i < gWaveController.subdivisions; i++) {
         for (j = 0; j < gWaveController.subdivisions; j++) {
             for (k = 0; k < var_t2; k++) {
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0].uv0.u = gWaveUVTable[var_t5].u;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0].uv0.v = gWaveUVTable[var_t5 + 1].v;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0].uv1.u = gWaveUVTable[var_ra].u;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0].uv1.v = gWaveUVTable[var_ra].v;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0].uv2.u = gWaveUVTable[var_t5 + 1].u;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0].uv2.v = gWaveUVTable[var_t5 + 1].v;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0 + 1].uv0.u = gWaveUVTable[var_t5 + 1].u;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0 + 1].uv0.v = gWaveUVTable[var_t5 + 1].v;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0 + 1].uv1.u = gWaveUVTable[var_ra].u;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0 + 1].uv1.v = gWaveUVTable[var_ra + 1].v;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0 + 1].uv2.u = gWaveUVTable[var_ra + 1].u;
-                gWaveTriangles[gWaveVertexFlip + (k << 1)][var_s0 + 1].uv2.v = gWaveUVTable[var_ra + 1].v;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0].uv0.u = gWaveUVTable[var_t5].u;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0].uv0.v = gWaveUVTable[var_t5 + 1].v;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0].uv1.u = gWaveUVTable[var_ra].u;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0].uv1.v = gWaveUVTable[var_ra].v;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0].uv2.u = gWaveUVTable[var_t5 + 1].u;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0].uv2.v = gWaveUVTable[var_t5 + 1].v;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0 + 1].uv0.u = gWaveUVTable[var_t5 + 1].u;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0 + 1].uv0.v = gWaveUVTable[var_t5 + 1].v;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0 + 1].uv1.u = gWaveUVTable[var_ra].u;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0 + 1].uv1.v = gWaveUVTable[var_ra + 1].v;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0 + 1].uv2.u = gWaveUVTable[var_ra + 1].u;
+                gWaveTriangles[gWaveVertexFlip + k * FRAME_BUFFERS][var_s0 + 1].uv2.v = gWaveUVTable[var_ra + 1].v;
             }
             var_t5++;
             var_ra++;
@@ -1058,8 +1054,8 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                             numVerts = gWaveController.subdivisions + 1;
                             var_t0 = ((sp104 & 0xFF) - 1) * numVerts * numVerts;
                             for (j = 0; j < gWaveController.subdivisions; j++) {
-                                vtx = &gWaveVertices[gWaveVertexFlip + viewportID][var_t0];
-                                tri = &gWaveTriangles[gWaveVertexFlip + viewportID]
+                                vtx = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0];
+                                tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS]
                                                      [j * (gWaveController.subdivisions << 1)];
 
                                 gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
@@ -1069,7 +1065,7 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                             }
                         } else {
                             gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(&D_8012A028[gWaveVertexFlip]), 4, 0);
-                            gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(&D_800E3090[gWaveVertexFlip << 1]), 2,
+                            gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(&D_800E3090[gWaveVertexFlip * 2]), 2,
                                        TRIN_ENABLE_TEXTURE);
                         }
                         mtx_pop(&gWaveDL);
@@ -1084,8 +1080,8 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                 numVerts = gWaveController.subdivisions + 1;
                 var_t0 = ((sp104 & 0xFF) - 1) * numVerts * numVerts;
                 for (j = 0; j < gWaveController.subdivisions; j++) {
-                    vtx = &gWaveVertices[gWaveVertexFlip + viewportID][var_t0];
-                    tri = &gWaveTriangles[gWaveVertexFlip + viewportID][j * (gWaveController.subdivisions << 1)];
+                    vtx = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0];
+                    tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][j * (gWaveController.subdivisions << 1)];
 
                     gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
                     gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);

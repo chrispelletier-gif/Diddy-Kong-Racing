@@ -1266,8 +1266,8 @@ u8 gTrackSelectBgData[295] = {
     34, 8, 255, 255, 0,  35, 9, 255, 255, 0,  36, 8, 255, 255, 32, 37,  9, 255, 255, 32, 38, 8, 255, 255, 0,
     39, 9, 255, 255, 0,  40, 8, 255, 255, 32, 41, 9, 255, 255, 32, 255, 0, 0,   0,   0
 };
-Vertex *gTrackSelectBgVertices[2] = { NULL, NULL };
-Triangle *gTrackSelectBgTriangles[2] = { NULL, NULL };
+Vertex *gTrackSelectBgVertices[FRAME_BUFFERS];
+Triangle *gTrackSelectBgTriangles[FRAME_BUFFERS];
 char *gDefaultTrackName = "?";
 
 // Boolean. Set to TRUE once in the Track Select menu, then
@@ -1939,9 +1939,9 @@ s16 gWoodPanelVertColours[5][4] = {
     { 256, 256, 256, 256 }  // Colour for the center of the panel
 };
 
-Vertex *gWoodPanelVertices[2] = { NULL, NULL };
+Vertex *gWoodPanelVertices[FRAME_BUFFERS];
 
-Triangle *gWoodPanelTriangles[2] = { NULL, NULL };
+Triangle *gWoodPanelTriangles[FRAME_BUFFERS];
 
 s32 gMenuTrisFlip = 0;
 s32 gWoodPanelCount = 0;
@@ -2192,26 +2192,31 @@ void func_8007FFEC(s32 numberOfPanels) {
     vertexSize = sizeof(Vertex) * (20 * numberOfPanels);
     triangleCount = sizeof(Triangle) * (10 * numberOfPanels);
 
-    gWoodPanelTriangles[0] =
-        (Triangle *) mempool_alloc_safe(((vertexSize + triangleCount) * 2) + menuGeometrySize, COLOUR_TAG_WHITE);
-    gWoodPanelTriangles[1] = (Triangle *) ((u32) gWoodPanelTriangles[0] + triangleCount);
+    gWoodPanelTriangles[0] = (Triangle *) mempool_alloc_safe(
+        ((vertexSize + triangleCount) * FRAME_BUFFERS) + menuGeometrySize, COLOUR_TAG_WHITE);
+    for (i = 1; i < FRAME_BUFFERS; i++) {
+        gWoodPanelTriangles[i] = (Triangle *) ((u32) gWoodPanelTriangles[0] + triangleCount * i);
+    }
 
-    gMenuGeometry = (unk80080BC8 *) ((u32) gWoodPanelTriangles[1] + triangleCount);
+    gMenuGeometry = (unk80080BC8 *) ((u32) gWoodPanelTriangles[0] + triangleCount * FRAME_BUFFERS);
 
     gWoodPanelVertices[0] = (Vertex *) ((u32) gMenuGeometry + menuGeometrySize);
-    gWoodPanelVertices[1] = (Vertex *) ((u32) gWoodPanelVertices[0] + vertexSize);
+    for (i = 1; i < FRAME_BUFFERS; i++) {
+        gWoodPanelVertices[i] = (Vertex *) ((u32) gWoodPanelVertices[0] + vertexSize * i);
+    }
 
     panelIndex = 0;
     triangleCount = 0;
     for (i = 0; i < numberOfPanels; i++) {
-        gMenuGeometry[i].vertices[0] = &gWoodPanelVertices[0][panelIndex];
-        gMenuGeometry[i].vertices[1] = &gWoodPanelVertices[1][panelIndex];
-        gMenuGeometry[i].triangles[0] = &gWoodPanelTriangles[0][triangleCount];
-        gMenuGeometry[i].triangles[1] = &gWoodPanelTriangles[1][triangleCount];
-        gMenuGeometry[i].texture[0] = 0;
-        gMenuGeometry[i].texture[1] = 0;
-        gMenuGeometry[i].unk18[0] = 0;
-        gMenuGeometry[i].unk18[1] = 0;
+        s32 b;
+        for (b = 0; b < FRAME_BUFFERS; b++) {
+            gMenuGeometry[i].vertices[b] = &gWoodPanelVertices[b][panelIndex];
+            gMenuGeometry[i].triangles[b] = &gWoodPanelTriangles[b][triangleCount];
+        }
+        for (b = 0; b < FRAME_BUFFERS; b++) {
+            gMenuGeometry[i].texture[b] = 0;
+            gMenuGeometry[i].unk18[b] = 0;
+        }
         panelIndex += 20;
         triangleCount += 10;
     }
@@ -2220,7 +2225,7 @@ void func_8007FFEC(s32 numberOfPanels) {
     for (i = 0; i < numberOfPanels; i++) {
         panelIndex = 0;
         for (IndicesIndex = 0; IndicesIndex < 10; triItemIndex++, panelIndex += 3, IndicesIndex++) {
-            for (triListIndex = 0; triListIndex < 2; triListIndex++) {
+            for (triListIndex = 0; triListIndex < FRAME_BUFFERS; triListIndex++) {
                 gWoodPanelTriangles[triListIndex][triItemIndex].verticesArray[0] = BACKFACE_DRAW;
                 gWoodPanelTriangles[triListIndex][triItemIndex].verticesArray[1] = gWoodPanelsIndices[panelIndex];
                 gWoodPanelTriangles[triListIndex][triItemIndex].verticesArray[2] = gWoodPanelsIndices[panelIndex + 1];
@@ -2376,7 +2381,7 @@ void func_80080BC8(Gfx **dList) {
         }
     }
     gWoodPanelCount = 0;
-    gMenuTrisFlip = 1 - gMenuTrisFlip;
+    gMenuTrisFlip = FRAME_FLIP(gMenuTrisFlip);
     rendermode_reset(dList);
 }
 
@@ -2385,7 +2390,7 @@ void func_80080BC8(Gfx **dList) {
  */
 void menu_geometry_end(void) {
     gWoodPanelCount = 0;
-    gMenuTrisFlip = 1 - gMenuTrisFlip;
+    gMenuTrisFlip = FRAME_FLIP(gMenuTrisFlip);
 }
 
 void func_80080E90(Gfx **dList, s32 startX, s32 startY, s32 width, s32 height, s32 borderWidth, s32 borderHeight,
@@ -8828,13 +8833,18 @@ void menu_track_select_init(void) {
     }
 
     i = 40;
-    gTrackSelectBgTriangles[0] = mempool_alloc_safe(0xB40, COLOUR_TAG_YELLOW);
-    gTrackSelectBgTriangles[1] = gTrackSelectBgTriangles[0] + i;
-    gTrackSelectBgVertices[0] = (Vertex *) (gTrackSelectBgTriangles[1] + i);
-    gTrackSelectBgVertices[1] = gTrackSelectBgVertices[0] + i * 2;
+    // 0x5A0 bytes per copy: 40 triangles and 80 vertices.
+    gTrackSelectBgTriangles[0] = mempool_alloc_safe(0x5A0 * FRAME_BUFFERS, COLOUR_TAG_YELLOW);
+    for (j = 1; j < FRAME_BUFFERS; j++) {
+        gTrackSelectBgTriangles[j] = gTrackSelectBgTriangles[0] + i * j;
+    }
+    gTrackSelectBgVertices[0] = (Vertex *) (gTrackSelectBgTriangles[0] + i * FRAME_BUFFERS);
+    for (j = 1; j < FRAME_BUFFERS; j++) {
+        gTrackSelectBgVertices[j] = gTrackSelectBgVertices[0] + i * 2 * j;
+    }
 
     var_a0 = -160;
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < FRAME_BUFFERS; i++) {
         for (j = 0; j < 80; j++) {
             gTrackSelectBgVertices[i][j].x = var_a0;
             gTrackSelectBgVertices[i][j].z = -0x400;
@@ -8844,7 +8854,7 @@ void menu_track_select_init(void) {
             var_a0 = -var_a0;
         }
     }
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < FRAME_BUFFERS; i++) {
         for (j = 0; j < 40; j++) {
             gTrackSelectBgTriangles[i][j].flags = BACKFACE_DRAW;
             gTrackSelectBgTriangles[i][j].vi0 = 0;
@@ -9464,7 +9474,7 @@ void trackmenu_render_names(UNUSED s32 updateRate) {
                                 gTrackSelectRenderDetails[i].vp2);
         }
     }
-    gTrackSelectVertsFlip = 1 - gTrackSelectVertsFlip;
+    gTrackSelectVertsFlip = FRAME_FLIP(gTrackSelectVertsFlip);
 }
 
 /**

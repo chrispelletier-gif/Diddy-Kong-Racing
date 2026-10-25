@@ -3,6 +3,7 @@
 
 #include "structs.h"
 #include "f3ddkr.h"
+#include "macros.h"
 
 #define LOCAL_OFFSET_TO_RAM_ADDRESS(type, ptr) ptr = (type) ((s32) ((u8 *) ptr) + (s32) ((u8 *) mdl))
 
@@ -44,8 +45,8 @@ typedef struct unk8011B330 {
 
 /* Size: 0x10 bytes */
 typedef struct VoidMesh {
-    Triangle *tris[2];
-    Vertex *verts[2];
+    Triangle *tris[FRAME_BUFFERS];
+    Vertex *verts[FRAME_BUFFERS];
 } VoidMesh;
 
 typedef struct unk8011C238 {

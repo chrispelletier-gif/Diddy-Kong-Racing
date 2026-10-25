@@ -61,8 +61,9 @@ void plat_format_game_note(const PlatGameNote *note, char *out, int size) {
         plat_snprintf(out, size, "not racing");
         return;
     }
-    plat_snprintf(out, size, "lap %d cp %d boost %d item %d/%d shield %d magnet %d hit %d", note->lap, note->checkpoint,
-                  note->boost, note->itemType, note->itemCount, note->shield, note->magnet, note->hit);
+    plat_snprintf(out, size, "lap %d cp %d bananas %d boost %d item %d/%d shield %d magnet %d hit %d", note->lap,
+                  note->checkpoint, note->bananas, note->boost, note->itemType, note->itemCount, note->shield,
+                  note->magnet, note->hit);
 }
 
 void plat_request_game_pause(void) {
@@ -239,6 +240,24 @@ const char *plat_build_version(void) {
 #else
     return "host";
 #endif
+}
+
+/* The render ahead setting (see plat.h): -1 until first read. */
+static volatile int sRenderAhead = -1;
+
+int plat_render_ahead(void) {
+    if (sRenderAhead < 0) {
+        const char *env = plat_getenv("DKR_RENDER_AHEAD");
+        int frames = settings_get("renderahead", env != NULL ? atoi(env) : 1);
+        sRenderAhead = frames == 2 ? 2 : 1;
+        plat_log("render ahead: %d frame%s", sRenderAhead, sRenderAhead == 1 ? "" : "s");
+    }
+    return sRenderAhead;
+}
+
+void plat_set_render_ahead(int frames) {
+    sRenderAhead = frames == 2 ? 2 : 1;
+    settings_set("renderahead", sRenderAhead);
 }
 
 /* The 60 fps setting (see plat_frame_retraces): -1 until first read. sFps60 is what frames use now. */

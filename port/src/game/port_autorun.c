@@ -1347,6 +1347,7 @@ void port_autorun_frame(s32 updateRate) {
             note.racing = 1;
             note.lap = racer->lap + 1;
             note.checkpoint = racer->nextCheckpoint;
+            note.bananas = racer->bananas;
             note.boost = racer->boostTimer;
             note.itemType = racer->balloon_type;
             note.itemCount = racer->balloon_quantity;

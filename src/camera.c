@@ -3,6 +3,7 @@
 #include "game.h"
 #include "libultra/src/libc/rmonPrintf.h"
 #include "math_util.h"
+#include "macros.h"
 #include "menu.h"
 #include "objects.h"
 #include "PRinternal/piint.h"
@@ -43,7 +44,7 @@ Vertex gVehiclePartVertex = { 0, 0, 0, 255, 255, 255, 255 };
 #define G_HALFZ (G_MAXZ / 2) /* 9 bits of integer screen-Z precision */
 
 // RSP Viewports
-Vp gViewportStack[20] = {
+Vp gViewportStack[10 + 5 * FRAME_BUFFERS] = {
     { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } }, { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } },
     { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } }, { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } },
     { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } }, { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } },
@@ -54,6 +55,11 @@ Vp gViewportStack[20] = {
     { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } }, { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } },
     { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } }, { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } },
     { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } }, { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } },
+#ifdef TARGET_PORT
+    { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } }, { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } },
+    { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } }, { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } },
+    { { { 0, 0, G_HALFZ, 0 }, { 0, 0, G_HALFZ, 0 } } },
+#endif
 };
 
 ObjectTransform D_800DD288 = {
@@ -414,7 +420,7 @@ void copy_viewports_to_stack(void) {
     s32 xPos;
     s32 i;
 
-    gViewportWithBG = 1 - gViewportWithBG;
+    gViewportWithBG = FRAME_FLIP(gViewportWithBG);
     for (i = 0; i < 4; i++) {
         if (gScreenViewports[i].flags & VIEWPORT_UNK_04) {
             gScreenViewports[i].flags &= ~VIEWPORT_EXTRA_BG;

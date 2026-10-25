@@ -71,7 +71,7 @@ static void open_page(const MenuPage *page) {
 
 /* The main page: anti-aliasing, frame rate, 16-bit buffers, mipmaps, colour boost, the screen page, the profiler, the
  * added pages, then the test run, updates and bug report. */
-enum { MAIN_AA, MAIN_FPS, MAIN_FB16, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_SCREEN, MAIN_PROFILER, MAIN_PAGES };
+enum { MAIN_AA, MAIN_FPS, MAIN_FB16, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_SCREEN, MAIN_AHEAD, MAIN_PROFILER, MAIN_PAGES };
 
 /* Anti-aliasing in the order the row steps through (PLAT_AA_* values). */
 static const int sAaOrder[3] = { PLAT_AA_OFF, PLAT_AA_2X, PLAT_AA_4X };
@@ -98,6 +98,8 @@ static const char *main_label(int i) {
         return "Colour boost";
     } else if (i == MAIN_SCREEN) {
         return "Screen";
+    } else if (i == MAIN_AHEAD) {
+        return "Render ahead";
     } else if (i == MAIN_PROFILER) {
         return "Profiler";
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -117,6 +119,8 @@ static void main_value(int i, char *out, int size) {
         snprintf(out, size, "%s", sMipmapModes[plat_3ds_mipmap_setting()]);
     } else if (i == MAIN_COLOUR) {
         snprintf(out, size, "%s", sColourLevels[plat_3ds_colour_setting()]);
+    } else if (i == MAIN_AHEAD) {
+        snprintf(out, size, "%d frame%s", plat_render_ahead(), plat_render_ahead() == 1 ? "" : "s");
     } else if (i == MAIN_PROFILER) {
         snprintf(out, size, "%s", prof_user_enabled() ? "On" : "Off");
     } else {
@@ -140,6 +144,8 @@ static const char *main_hint(int i) {
         return "Richer colours on the 3DS screen";
     } else if (i == MAIN_SCREEN) {
         return "Widescreen, 800 pixels, 3D";
+    } else if (i == MAIN_AHEAD) {
+        return plat_render_ahead() == 2 ? "Fewer dropped frames, a frame more lag" : "The N64's timing";
     } else if (i == MAIN_PROFILER) {
         return "Frame times on this screen";
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -165,6 +171,8 @@ static void main_change(int i, int step) {
         plat_3ds_set_colour_setting((plat_3ds_colour_setting() + step + 4) % 4);
     } else if (i == MAIN_SCREEN) {
         open_page(&sScreenPage);
+    } else if (i == MAIN_AHEAD) {
+        plat_set_render_ahead(plat_render_ahead() == 1 ? 2 : 1);
     } else if (i == MAIN_PROFILER) {
         prof_set_user_enabled(!prof_user_enabled());
     } else if (i < MAIN_PAGES + sPageCount) {
@@ -265,34 +273,43 @@ static const MenuPage sTestRunPage = {
 
 /*
  * The game's VIDEO OPTIONS (plat/options.h): the main page's anti-aliasing to colour boost rows, then the Screen
- * page's. Every one can change mid-race, as here.
+ * page's, then Render ahead. Every one can change mid-race, as here.
  */
 static int video_count(void) {
-    return MAIN_SCREEN + screen_count();
+    return MAIN_SCREEN + screen_count() + 1;
+}
+
+/* The main page row a Video Options row stands for, or -1 for a Screen page row. */
+static int video_main_row(int i) {
+    return i < MAIN_SCREEN ? i : i == MAIN_SCREEN + screen_count() ? MAIN_AHEAD : -1;
 }
 
 static const char *video_label(int i) {
-    return i < MAIN_SCREEN ? main_label(i) : screen_label(i - MAIN_SCREEN);
+    int row = video_main_row(i);
+    return row >= 0 ? main_label(row) : screen_label(i - MAIN_SCREEN);
 }
 
 static void video_value(int i, char *out, int size) {
-    if (i < MAIN_SCREEN) {
-        main_value(i, out, size);
+    int row = video_main_row(i);
+    if (row >= 0) {
+        main_value(row, out, size);
     } else {
         screen_value(i - MAIN_SCREEN, out, size);
     }
 }
 
 static void video_change(int i, int step) {
-    if (i < MAIN_SCREEN) {
-        main_change(i, step);
+    int row = video_main_row(i);
+    if (row >= 0) {
+        main_change(row, step);
     } else {
         screen_change(i - MAIN_SCREEN, step);
     }
 }
 
 static const char *video_hint(int i) {
-    return i < MAIN_SCREEN ? main_hint(i) : screen_hint(i - MAIN_SCREEN);
+    int row = video_main_row(i);
+    return row >= 0 ? main_hint(row) : screen_hint(i - MAIN_SCREEN);
 }
 
 void menu_3ds_add_options(void) {

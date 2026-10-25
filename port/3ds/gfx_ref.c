@@ -8,6 +8,7 @@
 #define gfxb_clear_color refb_clear_color
 #define gfxb_clear_depth refb_clear_depth
 #define gfxb_draw_triangles refb_draw_triangles
+#define gfxb_draw_indexed refb_draw_indexed
 #define gfxb_texture_upload refb_texture_upload
 #define gfxb_texture_free refb_texture_free
 #define gfxb_texture_share refb_texture_share

@@ -332,8 +332,12 @@ void plat_kunlock(void) {
     LightLock_Unlock(&sKernelLock);
 }
 
+/*
+ * Bounded, as every caller loops on its condition: a broadcast the condition variable loses then costs a few
+ * milliseconds instead of a frozen game (see QUEUE_WAIT_NS in os_core.c).
+ */
 void plat_kwait(void) {
-    CondVar_Wait(&sKernelCond, &sKernelLock);
+    CondVar_WaitTimeout(&sKernelCond, &sKernelLock, 4000000LL);
 }
 
 int plat_kwait_timeout(unsigned long long ns) {

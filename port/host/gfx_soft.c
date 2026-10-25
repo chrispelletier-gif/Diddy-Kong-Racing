@@ -611,6 +611,22 @@ static void log_combiner(const GfxDrawState *st) {
     fflush(f);
 }
 
+/* The software renderer works on triangle lists: indexed draws are unpacked into one. */
+void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts, const unsigned short *indices,
+                       int numTriangles) {
+    static GfxVertex sList[GFX_MAX_BATCH_TRIANGLES * 3];
+    int i, count = numTriangles * 3;
+    (void) numVerts;
+    if (numTriangles > GFX_MAX_BATCH_TRIANGLES) {
+        numTriangles = GFX_MAX_BATCH_TRIANGLES;
+        count = numTriangles * 3;
+    }
+    for (i = 0; i < count; i++) {
+        sList[i] = verts[indices[i]];
+    }
+    gfxb_draw_triangles(state, sList, numTriangles);
+}
+
 void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, int numTriangles) {
     static int sNullRender = -1;
     int t, i, n;

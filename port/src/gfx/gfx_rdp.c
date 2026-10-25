@@ -15,7 +15,8 @@
 #include "gfx_backend.h"
 
 #define MAX_VERTICES 64
-#define MAX_BATCH_TRIANGLES 256
+#define MAX_BATCH_TRIANGLES GFX_MAX_BATCH_TRIANGLES
+#define MAX_BATCH_VERTICES GFX_MAX_BATCH_VERTICES
 #define DL_STACK_SIZE 18
 
 /******************************** State ********************************/
@@ -96,7 +97,8 @@ void refb_start_frame(void);
 void refb_end_frame(void);
 void refb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a);
 void refb_clear_depth(const short rect[4]);
-void refb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
+void refb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts, const unsigned short *indices,
+                       int numTriangles);
 void refb_save_png(const char *path);
 void gfxb_capture_frame(const char *path);
 void gfxb_log_draws(int snapshotFrame);
@@ -117,9 +119,19 @@ static s32 sRefInitialised;
         plat_log(__VA_ARGS__);            \
     }
 
-static GfxVertex sBatchVerts[MAX_BATCH_TRIANGLES * 3];
-static s32 sBatchCount;
+/*
+ * The batch of triangles waiting to be drawn, as vertices and indices into them (gfxb_draw_indexed). Corners that are
+ * the same vertex drawn with the same texture coordinates share one entry (see draw_dkr_triangles), so the backend
+ * converts each about once instead of three times a triangle, and the GPU transforms it once.
+ */
+static GfxVertex sBatchVerts[MAX_BATCH_VERTICES];
+static u16 sBatchIndices[MAX_BATCH_TRIANGLES * 3];
+static s32 sBatchCount;    // Triangles
+static s32 sBatchVertices; // Vertices used
 static GfxDrawState sBatchState;
+/* Changes whenever the batch's vertices become invalid (a flush, or a new triangle command): entries of the
+ * triangle command's shared vertex table are only valid for the generation they were made in. */
+static u32 sBatchGeneration;
 
 /*
  * The draw state of the last triangle command. Between two triangle commands DKR usually only loads vertices or
@@ -755,7 +767,7 @@ static void flush_batch(void) {
             const GfxVertex *v = &sBatchVerts[0];
             float minU = v->u0, maxU = v->u0, minV = v->v0, maxV = v->v0, minW = v->w, maxW = v->w;
             s32 i;
-            for (i = 1; i < sBatchCount * 3; i++) {
+            for (i = 1; i < sBatchVertices; i++) {
                 const GfxVertex *o = &sBatchVerts[i];
                 minU = (o->u0 < minU) ? o->u0 : minU;
                 maxU = (o->u0 > maxU) ? o->u0 : maxU;
@@ -765,26 +777,48 @@ static void flush_batch(void) {
                 maxW = (o->w > maxW) ? o->w : maxW;
             }
             trace_state(&sBatchState, sBatchCount);
-            plat_log("    v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d", v->x, v->y, v->z, v->w, v->u0, v->v0,
-                     v->r, v->g, v->b, v->a);
+            plat_log("    %d vertices, v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d", (int) sBatchVertices, v->x,
+                     v->y, v->z, v->w, v->u0, v->v0, v->r, v->g, v->b, v->a);
             plat_log("    u %.3f..%.3f v %.3f..%.3f w %.1f..%.1f", minU, maxU, minV, maxV, minW, maxW);
         }
-        gfxb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount);
+        gfxb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
-        REF_CALL(refb_draw_triangles(&sBatchState, sBatchVerts, sBatchCount));
+        REF_CALL(refb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount));
         sBatchCount = 0;
+        sBatchVertices = 0;
+        sBatchGeneration++;
     }
 }
 
-static GfxVertex *batch_triangle(const GfxDrawState *state) {
-    if (sBatchCount > 0 && (sBatchCount >= MAX_BATCH_TRIANGLES || !draw_states_equal(state, &sBatchState))) {
+/* Whether the batch has room for one more triangle with up to three new vertices. */
+static inline s32 batch_has_room(void) {
+    return sBatchCount < MAX_BATCH_TRIANGLES && sBatchVertices + 3 <= MAX_BATCH_VERTICES;
+}
+
+/* Makes the batch one of this state with room for the triangles and vertices, flushing it first if it is full or of
+ * another state. */
+static void batch_reserve(const GfxDrawState *state, s32 triangles, s32 vertices) {
+    if (sBatchCount > 0 && (sBatchCount + triangles > MAX_BATCH_TRIANGLES ||
+                            sBatchVertices + vertices > MAX_BATCH_VERTICES || !draw_states_equal(state, &sBatchState))) {
         flush_batch();
     }
     if (sBatchCount == 0) {
         sBatchState = *state;
     }
-    return &sBatchVerts[sBatchCount++ * 3];
+}
+
+/* Starts a triangle in the batch of this state (see batch_reserve). Returns where its three indices go; the vertices
+ * come from batch_vertex. */
+static u16 *batch_triangle(const GfxDrawState *state) {
+    batch_reserve(state, 1, 3);
+    return &sBatchIndices[sBatchCount++ * 3];
+}
+
+/* Adds a vertex to the batch (which must have room) and returns its index. */
+static inline u16 batch_vertex(GfxVertex **out) {
+    *out = &sBatchVerts[sBatchVertices];
+    return (u16) sBatchVertices++;
 }
 
 /******************************** RSP ********************************/
@@ -882,6 +916,20 @@ static void finish_vertex(GfxVertex *out, const RspVertex *in, const Viewport *v
     out->a = fog ? in->fog : in->a;
 }
 
+/*
+ * The batch vertices made so far for each of the RSP's vertices in the triangle command being drawn: a DKR triangle
+ * carries its own texture coordinates for each corner, so a vertex is shared only between corners with the same
+ * ones. In the game's models about half the corners are such repeats, nearly always among the last few uses.
+ */
+#define SHARED_PER_VERTEX 4
+typedef struct SharedVertex {
+    u32 generation; // sBatchGeneration the entries were made in
+    u32 key[SHARED_PER_VERTEX]; // Texture coordinates (u << 16 | v)
+    u16 index[SHARED_PER_VERTEX];
+    u8 count;
+} SharedVertex;
+static SharedVertex sShared[MAX_VERTICES];
+
 static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
@@ -933,11 +981,13 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         tex_axis_init(&u1, tile1->shifts, tile1->uls, (u32) w1, shift);
         tex_axis_init(&v1, tile1->shiftt, tile1->ult, (u32) h1, shift);
     }
+    // Vertices of earlier commands (or loads) can't be shared: the vertex data, viewport and fog may have changed.
+    sBatchGeneration++;
     for (i = 0; i < count; i++) {
         const Triangle *t = &tris[i];
         const TexCoords *uv[3] = { &t->uv0, &t->uv1, &t->uv2 };
         u8 idx[3] = { t->vi0, t->vi1, t->vi2 };
-        GfxVertex *out;
+        u16 *out;
 
         if (idx[0] >= MAX_VERTICES || idx[1] >= MAX_VERTICES || idx[2] >= MAX_VERTICES) {
             continue;
@@ -945,28 +995,52 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         // Backface culling: flag 0x40 means double sided. The game mirrors the viewport for mirror mode.
         state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : frontCull;
         state.flat = g.verts[idx[0]].flat && g.verts[idx[1]].flat && g.verts[idx[2]].flat;
-        if ((state.cullMode | (state.flat << 2)) == batchedKey && sBatchCount > 0 &&
-            sBatchCount < MAX_BATCH_TRIANGLES) {
+        if ((state.cullMode | (state.flat << 2)) == batchedKey && sBatchCount > 0 && batch_has_room()) {
             // Only the culling and flatness change from one triangle to the next, so the batch's state is still this
             // one.
-            out = &sBatchVerts[sBatchCount++ * 3];
+            out = &sBatchIndices[sBatchCount++ * 3];
         } else {
             out = batch_triangle(&state);
             batchedKey = state.cullMode | (state.flat << 2);
         }
         for (k = 0; k < 3; k++) {
-            finish_vertex(&out[k], &g.verts[idx[k]], &vp, fog);
+            SharedVertex *shared = &sShared[idx[k]];
+            u32 key = ((u32) (u16) uv[k]->u << 16) | (u16) uv[k]->v;
+            GfxVertex *v;
+            s32 q, n;
+
+            if (shared->generation != sBatchGeneration) {
+                shared->generation = sBatchGeneration;
+                shared->count = 0;
+            }
+            n = shared->count;
+            for (q = 0; q < n; q++) {
+                if (shared->key[q] == key) {
+                    break;
+                }
+            }
+            if (q < n) {
+                out[k] = shared->index[q];
+                continue;
+            }
+            out[k] = batch_vertex(&v);
+            if (n < SHARED_PER_VERTEX) {
+                shared->key[n] = key;
+                shared->index[n] = out[k];
+                shared->count = n + 1;
+            }
+            finish_vertex(v, &g.verts[idx[k]], &vp, fog);
             if (tex0) {
-                out[k].u0 = tex_axis_coord(&u0, uv[k]->u);
-                out[k].v0 = tex_axis_coord(&v0, uv[k]->v);
+                v->u0 = tex_axis_coord(&u0, uv[k]->u);
+                v->v0 = tex_axis_coord(&v0, uv[k]->v);
             } else {
-                out[k].u0 = out[k].v0 = 0.0f;
+                v->u0 = v->v0 = 0.0f;
             }
             if (tex1) {
-                out[k].u1 = tex_axis_coord(&u1, uv[k]->u);
-                out[k].v1 = tex_axis_coord(&v1, uv[k]->v);
+                v->u1 = tex_axis_coord(&u1, uv[k]->u);
+                v->v1 = tex_axis_coord(&v1, uv[k]->v);
             } else {
-                out[k].u1 = out[k].v1 = 0.0f;
+                v->u1 = v->v1 = 0.0f;
             }
         }
     }
@@ -985,7 +1059,7 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
                       s32 textured) {
     GfxDrawState state;
     GfxVertex corners[4];
-    GfxVertex *out;
+    u16 first[4], *out;
     s32 i;
     float w0 = 1.0f, h0 = 1.0f, w1 = 1.0f, h1 = 1.0f, shift0 = 0.0f, shift1 = 0.0f;
     Tile *tile = &g.tiles[g.rdpHalf1 & 7];
@@ -1024,14 +1098,20 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
         corners[i].r = corners[i].g = corners[i].b = corners[i].a = 255;
     }
     state.cullMode = 0;
-    out = batch_triangle(&state);
-    out[0] = corners[0];
-    out[1] = corners[2];
-    out[2] = corners[1];
-    out = batch_triangle(&state);
-    out[0] = corners[1];
-    out[1] = corners[2];
-    out[2] = corners[3];
+    batch_reserve(&state, 2, 4);
+    for (i = 0; i < 4; i++) {
+        GfxVertex *v;
+        first[i] = batch_vertex(&v);
+        *v = corners[i];
+    }
+    out = &sBatchIndices[sBatchCount++ * 3];
+    out[0] = first[0];
+    out[1] = first[2];
+    out[2] = first[1];
+    out = &sBatchIndices[sBatchCount++ * 3];
+    out[0] = first[1];
+    out[1] = first[2];
+    out[2] = first[3];
 }
 
 static void texture_rectangle(u32 w0, u32 w1, s32 flip) {

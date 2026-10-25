@@ -3,6 +3,7 @@
 
 #include "structs.h"
 #include "PR/gbi.h"
+#include "macros.h"
 #include "font.h"
 #include "save_data.h"
 
@@ -327,10 +328,10 @@ typedef struct MenuAsset {
 } MenuAsset;
 
 typedef struct unk80080BC8 {
-    Vertex *vertices[2];
-    Triangle *triangles[2];
-    TextureHeader *texture[2];
-    s32 unk18[2];
+    Vertex *vertices[FRAME_BUFFERS];
+    Triangle *triangles[FRAME_BUFFERS];
+    TextureHeader *texture[FRAME_BUFFERS];
+    s32 unk18[FRAME_BUFFERS];
 } unk80080BC8;
 
 typedef struct unk80126460 {

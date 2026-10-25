@@ -40,6 +40,9 @@ extern C3DContextStart __C3D_Context;
 /* Bytes of vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most
  * about 3000 triangles, 9000 vertices, a frame, which is 48K of the largest vertices. */
 #define VBO_BYTES (48 * 1024 * 48)
+/* Bytes of vertex indices per frame (gfxb_draw_indexed): three 16-bit indices a triangle, more for triangles the guard
+ * band cuts up. */
+#define IBO_BYTES (64 * 1024)
 
 /*
  * What the vertex shader receives (roadmap item P5): the position already in the 3DS screen's clip space, the first
@@ -107,6 +110,8 @@ static u8 *sVbo; // The vertex buffer of the frame being built
 static int sVboUsed; // Bytes
 /* Vertices before this one have been flushed from the CPU cache this frame (see flush_new_vertices). */
 static int sVboFlushed;
+static u16 *sIbo; // The index buffer of the frame being built
+static int sIboUsed, sIboFlushed; // Indices
 static C3D_Tex sWhiteTex;
 extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
 static int sFrameStarted;
@@ -173,6 +178,13 @@ static void flush_new_vertices(void) {
         GSPGPU_FlushDataCache(sVbo + sVboFlushed, sVboUsed - sVboFlushed);
     }
     sVboFlushed = sVboUsed;
+    if (sIboFlushed > sIboUsed) {
+        sIboFlushed = 0;
+    }
+    if (sIboUsed > sIboFlushed && sIbo != NULL) {
+        GSPGPU_FlushDataCache(sIbo + sIboFlushed, (sIboUsed - sIboFlushed) * sizeof(u16));
+    }
+    sIboFlushed = sIboUsed;
 }
 
 
@@ -304,7 +316,7 @@ static int use_vertex_format(int fmt) {
  */
 
 // Bump when the self test, the vertex format or the shader changes, so that the test runs again once.
-#define GPU_SELF_TEST_VERSION 3
+#define GPU_SELF_TEST_VERSION 4
 static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
 static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
@@ -408,6 +420,7 @@ static void gpu_self_test(void) {
         "+ vertex format changes",
         "game clear rectangles",
         "+ stereo eye offset",
+        "+ indexed triangles",
     };
     GfxDrawState state;
     C3D_TexEnv *env;
@@ -529,6 +542,19 @@ static void gpu_self_test(void) {
     C3D_DrawArrays(GPU_TRIANGLES, first, 3);
     write_eye(0.0f, 0.0f);
     gpu_test_end(sNames[11]);
+
+    // 14: vertices drawn by index (P16), the index buffer in linear memory next to the vertices.
+    gpu_test_step(sNames[12]);
+    first = gpu_test_triangle(-1);
+    {
+        static const u16 sOrder[3] = { 2, 0, 1 };
+        for (i = 0; i < 3; i++) {
+            sIbo[i] = (u16) (first + sOrder[i]);
+        }
+        GSPGPU_FlushDataCache(sIbo, 3 * sizeof(u16));
+        C3D_DrawElements(GPU_TRIANGLES, 3, C3D_UNSIGNED_SHORT, sIbo);
+    }
+    gpu_test_end(sNames[12]);
     sVfmtBound = -1;
 
     plat_status("GPU test passed");
@@ -877,21 +903,21 @@ static char sCapturePath[256];
 /*
  * Recent frames for bug reports. A glitch that lasts a second is gone by the time the snapshot is taken, so every
  * RECENT_EVERY-th frame the screen's picture is copied, exactly as it was shown, into a ring of RECENT_SLOTS
- * (about 1.6 seconds), both eyes in 3D. A snapshot keeps the two that look most like they hold a bright vertical
+ * (about a second), both eyes in 3D. The slots are taken at start-up, before textures fill linear memory. A snapshot keeps the two that look most like they hold a bright vertical
  * line (a screen column is a row of the rotated picture). DKR_RECENT_FRAMES=0 turns it off.
  */
-#define RECENT_SLOTS 16
-#define RECENT_EVERY 3
+#define RECENT_SLOTS 8
+#define RECENT_EVERY 3 // Odd, so the ring holds both even and odd frames
 #define RECENT_KEEP 2
-#define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8)
+#define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8, 2 in 16-bit)
 static u8 *sRecent[RECENT_SLOTS];
-static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS], sRecentEyes[RECENT_SLOTS];
-static int sRecentCount = -1, sRecentNext, sRecentFrozen;
+static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS], sRecentBpp[RECENT_SLOTS], sRecentEyes[RECENT_SLOTS];
+static int sRecentCount, sRecentNext, sRecentFrozen;
 
 /* Called before C3D_FrameEnd with the screen buffer the frame's display transfer will write (the back buffer until
  * citro3d swaps it in once the GPU is done), and after it to queue the copy. */
 static u8 *sRecentScreen;
-static int sRecentScreenRows;
+static int sRecentScreenRows, sRecentScreenBpp; // Bytes per pixel: 3 (BGR8) or 2 (RGB565, with 16-bit buffers)
 
 static u8 *sRecentRight; // The right eye's, in 3D (then 400 rows each, so both fit a slot)
 
@@ -931,10 +957,39 @@ __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool has
     __real_gfxScreenSwapBuffers(scr, hasStereo);
 }
 
+/*
+ * citro3d picks the screen buffer a frame's picture is copied into when the frame ends: the one libctru's last swap
+ * made the back buffer. But a swap only reaches the screen at the next VBlank, so a frame ending before that (one
+ * finished quickly after a slow one, as when a banana or balloon is picked up, or "LAP 2" appears) would have its
+ * picture copied into the buffer still on screen, while the screen reads it: a tear down the screen, the white line.
+ * So a frame waits, only then, for the last swap to be shown (the GPU carries on drawing it meanwhile).
+ * DKR_PRESENT_WAIT=0 = old.
+ */
+static int sPresentWait = -1;
+static unsigned int sPresentWaits;
+
+static void wait_for_present(void) {
+    int i;
+    if (sPresentWait < 0) {
+        const char *env = plat_getenv("DKR_PRESENT_WAIT");
+        sPresentWait = env == NULL || atoi(env) != 0;
+    }
+    if (!sPresentWait || !gspIsPresentPending(GSP_SCREEN_TOP)) {
+        return;
+    }
+    sPresentWaits++;
+    // Polled, at most two refreshes: the next VBlank shows it.
+    for (i = 0; i < 70 && gspIsPresentPending(GSP_SCREEN_TOP); i++) {
+        svcSleepThread(500 * 1000);
+    }
+}
+
 static void find_recent_screen(void) {
     u16 w = 0, h = 0;
+    GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
     sRecentScreen = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
-    sRecentScreenRows = (w == TOP_HEIGHT && gfxGetScreenFormat(GFX_TOP) == GSP_BGR8_OES) ? h : 0;
+    sRecentScreenBpp = format == GSP_BGR8_OES ? 3 : format == GSP_RGB565_OES ? 2 : 0;
+    sRecentScreenRows = (w == TOP_HEIGHT && sRecentScreenBpp != 0) ? h : 0;
     sRecentRight = sStereo && h == TOP_WIDTH ? gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, NULL, NULL) : NULL;
 }
 
@@ -988,28 +1043,123 @@ static void log_timing(void) {
     }
 }
 
+static void allocate_recent_frames(void) {
+    const char *env = plat_getenv("DKR_RECENT_FRAMES");
+    sRecentCount = 0;
+    // Leave most of linear memory for textures (each slot is 576 KB).
+    while (env == NULL || atoi(env) != 0) {
+        if (sRecentCount == RECENT_SLOTS || linearSpaceFree() < RECENT_MAX_BYTES + 14 * 1024 * 1024) {
+            break;
+        }
+        sRecent[sRecentCount] = linearAlloc(RECENT_MAX_BYTES);
+        if (sRecent[sRecentCount] == NULL) {
+            break;
+        }
+        sRecentFrame[sRecentCount++] = -1;
+    }
+    plat_log("recent frames for bug reports: %d slots, one frame in %d", sRecentCount, RECENT_EVERY);
+}
+
+/*
+ * The line watch: every frame, the last finished picture (the back buffer, before this frame's transfer is queued
+ * into it) is checked for a bright vertical line, sampling every 8th pixel down each screen column. The first one
+ * found sends a bug report by itself, so its snapshot (the next frame's draws, while the line is still there) shows
+ * what drew it. Every frame, so a line shown only on odd or only on even frames is caught too; races score up to
+ * about 12 of 30. DKR_LINE_WATCH=0 turns it off.
+ */
+#define LINE_WATCH_SAMPLES (TOP_HEIGHT / 8)
+#define LINE_WATCH_FOUND (LINE_WATCH_SAMPLES / 2)
+void bugreport_request(void);
+static int sLineWatch = -1, sLineReported, sLineLogged, sLineBest, sLineBestColumn;
+
+/* How much a picture looks like it holds a bright vertical line: the most pixels in one screen column (a row here)
+ * that are clearly brighter than the columns 3 to each side, checking every step-th pixel down it. */
+static inline int pixel_luma(const u8 *p, int bpp) {
+    if (bpp == 2) {
+        int c = p[0] | (p[1] << 8); // RGB565
+        return ((c >> 11) << 3) + (((c >> 5) & 0x3F) << 3) + ((c & 0x1F) << 3); // 0..1020
+    }
+    return p[0] + p[1] * 2 + p[2]; // 0..1020
+}
+
+/* In 3D (eyes 2) each eye is scored on its own, so rows at the edge of one eye are never compared with the other's. */
+static int line_score(const u8 *pixels, int rows, int bpp, int first, int step, int eyes, int *where) {
+    int r, x, best = 0, stride = TOP_HEIGHT * bpp, eyeRows = rows / eyes;
+    *where = -1;
+    for (r = 3; r < rows - 3; r++) {
+        if (r % eyeRows < 3 || r % eyeRows >= eyeRows - 3) {
+            continue;
+        }
+        const u8 *row = pixels + r * stride, *left = row - 3 * stride, *right = row + 3 * stride;
+        int count = 0;
+        for (x = first; x < TOP_HEIGHT; x += step) {
+            int c = pixel_luma(row + x * bpp, bpp);
+            if (c > pixel_luma(left + x * bpp, bpp) + 80 && c > pixel_luma(right + x * bpp, bpp) + 80) {
+                count++;
+            }
+        }
+        if (count > best) {
+            best = count;
+            *where = r;
+        }
+    }
+    return best;
+}
+
+static void watch_for_line(void) {
+    u8 *eyes[2] = { sRecentScreen, sRecentRight };
+    int e, where, score;
+    if (sLineWatch < 0) {
+        const char *env = plat_getenv("DKR_LINE_WATCH");
+        sLineWatch = env != NULL ? atoi(env) : 1;
+    }
+    if (!sLineWatch || sRecentScreenRows == 0 || sRecentFrozen) {
+        return;
+    }
+    for (e = 0; e < 2; e++) {
+        if (eyes[e] == NULL) {
+            continue;
+        }
+        GSPGPU_InvalidateDataCache(eyes[e], sRecentScreenRows * TOP_HEIGHT * sRecentScreenBpp);
+        if (sLineWatch == 2 && sFrameCount >= 1800 && sFrameCount < 1830) {
+            // DKR_LINE_WATCH=2 tests it: a white line down the middle of the old picture a minute in.
+            memset(eyes[e] + sRecentScreenRows / 2 * TOP_HEIGHT * sRecentScreenBpp, 255, TOP_HEIGHT * sRecentScreenBpp);
+        }
+        // Every 8th pixel down the column, starting 4 further on odd frames.
+        score = line_score(eyes[e], sRecentScreenRows, sRecentScreenBpp, (sFrameCount & 1) * 4, 8, 1, &where);
+        if (score > sLineBest) {
+            sLineBest = score;
+            sLineBestColumn = where * TOP_WIDTH / sRecentScreenRows;
+        }
+        if (score >= LINE_WATCH_FOUND && sLineLogged < 20) {
+            PlatGameNote gameNote;
+            char note[96] = "player unknown";
+            if (plat_get_game_note(&gameNote)) {
+                plat_format_game_note(&gameNote, note, sizeof(note));
+            }
+            sLineLogged++;
+            plat_log("line watch: frame %d %s eye has a line at column %d (%d of %d), %s", sFrameCount - 2,
+                     e ? "right" : "left", where * TOP_WIDTH / sRecentScreenRows, score, LINE_WATCH_SAMPLES, note);
+            if (!sLineReported) {
+                sLineReported = 1;
+                bugreport_request();
+            }
+        }
+    }
+    if (sFrameCount % 150 == 0) {
+        plat_log("line watch: best %d of %d at column %d in the last 5 s; %u frames waited for the screen", sLineBest,
+                 LINE_WATCH_SAMPLES, sLineBestColumn, sPresentWaits);
+        sPresentWaits = 0;
+        sLineBest = 0;
+    }
+}
+
 static void record_recent_frame(void) {
-    u32 bytes = sRecentScreenRows * TOP_HEIGHT * 3;
+    u32 bytes = sRecentScreenRows * TOP_HEIGHT * sRecentScreenBpp;
     u8 *slot;
 
-    if (sRecentCount < 0) {
-        const char *env = plat_getenv("DKR_RECENT_FRAMES");
-        sRecentCount = 0;
-        // Leave plenty of linear memory for textures (each slot is 576 KB).
-        while (env == NULL || atoi(env) != 0) {
-            if (sRecentCount == RECENT_SLOTS || linearSpaceFree() < RECENT_MAX_BYTES + 12 * 1024 * 1024) {
-                break;
-            }
-            sRecent[sRecentCount] = linearAlloc(RECENT_MAX_BYTES);
-            if (sRecent[sRecentCount] == NULL) {
-                break;
-            }
-            sRecentFrame[sRecentCount++] = -1;
-        }
-        plat_log("recent frames for bug reports: %d slots, one frame in %d", sRecentCount, RECENT_EVERY);
-    }
     record_timing();
-    if (sRecentCount == 0 || sRecentFrozen || sFrameCount % RECENT_EVERY != 0 || sRecentScreen == NULL ||
+    if (sRecentCount <= 0 || sRecentFrozen || sFrameCount % RECENT_EVERY != 0 || sRecentScreen == NULL ||
         bytes == 0 || bytes > RECENT_MAX_BYTES) {
         return;
     }
@@ -1019,43 +1169,15 @@ static void record_recent_frame(void) {
     GX_TextureCopy((u32 *) sRecentScreen, 0, (u32 *) slot, 0, bytes, GX_TRANSFER_RAW_COPY(1));
     sRecentFrame[sRecentNext] = sFrameCount - 1; // The frame just ended (sFrameCount already counts it).
     sRecentRows[sRecentNext] = sRecentScreenRows;
+    sRecentBpp[sRecentNext] = sRecentScreenBpp;
     sRecentEyes[sRecentNext] = 1;
-    if (sRecentRight != NULL) {
-        // In 3D the right eye goes after the left, so the saved picture shows the two side by side. Each eye is 400
-        // rows then (find_recent_screen), so both always fit a slot.
+    if (sRecentRight != NULL && bytes * 2 <= RECENT_MAX_BYTES) {
+        // In 3D the right eye goes after the left, so the saved picture shows the two side by side.
         GX_TextureCopy((u32 *) sRecentRight, 0, (u32 *) (slot + bytes), 0, bytes, GX_TRANSFER_RAW_COPY(1));
         sRecentRows[sRecentNext] *= 2;
         sRecentEyes[sRecentNext] = 2;
     }
     sRecentNext = (sRecentNext + 1) % sRecentCount;
-}
-
-/* How much a frame looks like it holds a bright vertical line: the most pixels in one screen column (a row here)
- * that are clearly brighter than the columns 3 to each side. In 3D each eye is scored on its own, so rows at the
- * edge of one eye are never compared with the other eye's. */
-static int line_score(const u8 *pixels, int rows, int eyes, int *where) {
-    int r, x, best = 0, eyeRows = rows / eyes;
-    *where = -1;
-    for (r = 3; r < rows - 3; r++) {
-        if (r % eyeRows < 3 || r % eyeRows >= eyeRows - 3) {
-            continue;
-        }
-        const u8 *row = pixels + r * TOP_HEIGHT * 3, *left = row - 9 * TOP_HEIGHT, *right = row + 9 * TOP_HEIGHT;
-        int count = 0;
-        for (x = 0; x < TOP_HEIGHT; x++) {
-#define LUMA(p) ((p)[0] + (p)[1] * 2 + (p)[2]) // 0..1020
-            int c = LUMA(row + x * 3);
-            if (c > LUMA(left + x * 3) + 80 && c > LUMA(right + x * 3) + 80) {
-                count++;
-            }
-#undef LUMA
-        }
-        if (count > best) {
-            best = count;
-            *where = r;
-        }
-    }
-    return best;
 }
 
 /* Saves the recent frames most likely to show a line as diff_NNNNN_recentK.bin (width, height, then BGR8), and
@@ -1069,8 +1191,8 @@ static void save_recent_frames(int snapshotFrame) {
         score[i] = -1;
         if (sRecentFrame[i] >= 0) {
             int eyeRows = sRecentRows[i] / sRecentEyes[i];
-            GSPGPU_InvalidateDataCache(sRecent[i], sRecentRows[i] * TOP_HEIGHT * 3);
-            score[i] = line_score(sRecent[i], sRecentRows[i], sRecentEyes[i], &where[i]);
+            GSPGPU_InvalidateDataCache(sRecent[i], sRecentRows[i] * TOP_HEIGHT * sRecentBpp[i]);
+            score[i] = line_score(sRecent[i], sRecentRows[i], sRecentBpp[i], 0, 1, sRecentEyes[i], &where[i]);
             // Columns are counted in the 400-pixel screen, whatever the render width.
             plat_log("recent frame %d: line score %d at %scolumn %d", sRecentFrame[i], score[i],
                      sRecentEyes[i] == 1 || where[i] < 0 ? "" : (where[i] < eyeRows ? "left eye, " : "right eye, "),
@@ -1086,12 +1208,22 @@ static void save_recent_frames(int snapshotFrame) {
         }
         if (pick >= 0) {
             u32 header[2] = { TOP_HEIGHT, (u32) sRecentRows[pick] };
-            u32 bytes = sRecentRows[pick] * TOP_HEIGHT * 3;
+            u32 pixels = sRecentRows[pick] * TOP_HEIGHT, bytes = pixels * 3, p;
             u8 *file = malloc(8 + bytes);
             score[pick] = -1;
             if (file != NULL) {
                 memcpy(file, header, 8);
-                memcpy(file + 8, sRecent[pick], bytes);
+                if (sRecentBpp[pick] == 3) {
+                    memcpy(file + 8, sRecent[pick], bytes);
+                } else {
+                    // 16-bit buffers: saved as BGR8 all the same.
+                    for (p = 0; p < pixels; p++) {
+                        int c = sRecent[pick][p * 2] | (sRecent[pick][p * 2 + 1] << 8);
+                        file[8 + p * 3] = (c & 0x1F) << 3;
+                        file[8 + p * 3 + 1] = ((c >> 5) & 0x3F) << 2;
+                        file[8 + p * 3 + 2] = (c >> 11) << 3;
+                    }
+                }
                 plat_snprintf(path, sizeof(path), "%s/diff_%05d_recent%d.bin", plat_data_dir(), snapshotFrame, k + 1);
                 plat_save_file(path, file, 8 + bytes);
                 free(file);
@@ -1309,6 +1441,7 @@ static int sHangSaved;
 #define MAX_LIST_PARTS 26 // With the rest of the list, the display transfer and a clear, under citro3d's 32 entries
 typedef struct FrameSlot {
     u8 *vbo;             // VBO_BYTES of vertices
+    u16 *ibo;            // IBO_BYTES of vertex indices
     u32 *cmd;            // The command list, sCmdWords long
     u32 *partAddr[MAX_LIST_PARTS];
     u32 partWords[MAX_LIST_PARTS];
@@ -1341,15 +1474,20 @@ static void alloc_frame_slots(void) {
     sCmdWords = __C3D_Context.cmdBufSize;
     for (i = 0; i < 2; i++) {
         sSlots[i].vbo = linearAlloc(VBO_BYTES);
+        sSlots[i].ibo = linearAlloc(IBO_BYTES);
         sSlots[i].cmd = linearAlloc(sCmdWords * 4);
-        if (sSlots[i].vbo == NULL || sSlots[i].cmd == NULL) {
+        if (sSlots[i].vbo == NULL || sSlots[i].ibo == NULL || sSlots[i].cmd == NULL) {
             if (sSlots[i].vbo != NULL) {
                 linearFree(sSlots[i].vbo);
+            }
+            if (sSlots[i].ibo != NULL) {
+                linearFree(sSlots[i].ibo);
             }
             if (sSlots[i].cmd != NULL) {
                 linearFree(sSlots[i].cmd);
             }
             sSlots[i].vbo = NULL;
+            sSlots[i].ibo = NULL;
             sSlots[i].cmd = NULL;
             break;
         }
@@ -1366,6 +1504,8 @@ static void alloc_frame_slots(void) {
              sNumSlots, (unsigned long) (VBO_BYTES / 1024),
              (unsigned long) (sCmdWords * 4 / 1024), (unsigned long) (linearSpaceFree() / 1024));
     sVbo = sSlots[0].vbo;
+    sIbo = sSlots[0].ibo;
+    allocate_recent_frames();
 }
 
 /* Ends the part of the command list so far, which the GPU then finishes before it starts on the rest. */
@@ -1422,19 +1562,31 @@ static void bind_target(C3D_RenderTarget *target) {
     GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
 }
 
-/* Draws the vertices once, or in 3D once for each eye. */
-static void draw_arrays(int vertex, int count) {
+/* Draws count vertices from vertex on, or the count vertices the indices name; once, or in 3D once for each eye. */
+static void draw_prims(int vertex, int count, const u16 *indices) {
     if (!sStereo) {
-        C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+        if (indices != NULL) {
+            C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+        } else {
+            C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+        }
         return;
     }
     // sEyeSep is positive for the left eye's offset; what is sEyeConv away stays at the depth of the screen.
     bind_target(sTarget);
     write_eye(sEyeSep, -sEyeSep * sEyeConv);
-    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    if (indices != NULL) {
+        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+    } else {
+        C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    }
     bind_target(sTargetRight);
     write_eye(-sEyeSep, sEyeSep * sEyeConv);
-    C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    if (indices != NULL) {
+        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+    } else {
+        C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    }
 }
 
 static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
@@ -1686,6 +1838,9 @@ void gfxb_start_frame(void) {
     sVbo = slot->vbo;
     sVboUsed = 0;
     sVboFlushed = 0;
+    sIbo = slot->ibo;
+    sIboUsed = 0;
+    sIboFlushed = 0;
     sVfmtBound = -1; // The first draw points the GPU at this slot's buffer.
     sVfmtSwitches = 0;
     GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
@@ -1818,6 +1973,9 @@ void gfxb_end_frame(void) {
 
         if (full_flush()) {
             GSPGPU_FlushDataCache(sVbo, sVboUsed);
+            if (sIboUsed > 0) {
+                GSPGPU_FlushDataCache(sIbo, sIboUsed * sizeof(u16));
+            }
         } else {
             flush_new_vertices();
         }
@@ -1851,7 +2009,9 @@ void gfxb_end_frame(void) {
         sDrainSplits = 0;
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
+        wait_for_present();
         find_recent_screen();
+        watch_for_line();
         if (full_flush()) {
             C3D_FrameEnd(0); // Also flushes the whole linear heap.
         } else {
@@ -2999,7 +3159,9 @@ void C3Di_UpdateContext(void);
 
 static int sGuardBand = -1;
 static GfxVertex *sClipVerts;
-static int sClipCapacity;
+static u16 *sClipIndices;
+static u8 *sClipOutside; // For each vertex of the draw: outside the guard band
+static int sClipCapacity, sClipIndexCapacity, sClipOutsideCapacity;
 
 static inline int outside_band(const GfxVertex *v) {
     float g = GUARD_BAND * v->w;
@@ -3031,48 +3193,73 @@ static void lerp_vertex(GfxVertex *out, const GfxVertex *a, const GfxVertex *b, 
     out->a = (unsigned char) (a->a + (b->a - a->a) * t + 0.5f);
 }
 
-/* Returns the triangles with any that leave the guard band clipped to it, in a buffer of its own, or verts itself
- * when none do. */
-static const GfxVertex *clip_to_guard_band(const GfxVertex *verts, int *numTriangles) {
+static int grow(void **buf, int *capacity, int needed, size_t size) {
+    void *grown;
+    int capacity2;
+    if (needed <= *capacity) {
+        return 1;
+    }
+    capacity2 = *capacity * 2 > needed ? *capacity * 2 : needed;
+    grown = realloc(*buf, capacity2 * size);
+    if (grown == NULL) {
+        return 0;
+    }
+    *buf = grown;
+    *capacity = capacity2;
+    return 1;
+}
+
+/*
+ * Clips the triangles that leave the guard band to it. Each vertex is tested once; when none is outside, the draw is
+ * left as it is. Otherwise the vertices are copied, and the clipped triangles' new corners added after them, into
+ * buffers of their own, which replace verts and indices: triangles within the band keep their indices, the others
+ * are replaced by the fan of their clipped polygon (at most 7 corners, so 5 triangles).
+ */
+static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16 **indices, int *numTriangles) {
     GfxVertex poly[2][16];
-    int i, j, k, n, plane, count = *numTriangles * 3, used = 0;
+    const GfxVertex *in = *verts;
+    const u16 *idx = *indices;
+    int i, j, k, n, plane, count = *numTriangles * 3, used, usedIdx, any = 0;
 
     if (sGuardBand < 0) {
         const char *env = plat_getenv("DKR_GUARD_BAND");
         sGuardBand = env == NULL || atoi(env) != 0;
     }
-    if (!sGuardBand) {
-        return verts;
+    if (!sGuardBand || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
+        return;
     }
-    for (i = 0; i < count && !outside_band(&verts[i]); i++) {
+    for (i = 0; i < *numVerts; i++) {
+        sClipOutside[i] = outside_band(&in[i]);
+        any |= sClipOutside[i];
     }
-    if (i == count) {
-        return verts;
+    if (!any) {
+        return;
     }
+    // A triangle cut by all four planes has up to 7 corners: a fan of 5 triangles, each with its own 3 copies.
+    if (!grow((void **) &sClipVerts, &sClipCapacity, *numVerts + *numTriangles * 15, sizeof(GfxVertex)) ||
+        !grow((void **) &sClipIndices, &sClipIndexCapacity, *numTriangles * 15, sizeof(u16))) {
+        return;
+    }
+    memcpy(sClipVerts, in, *numVerts * sizeof(GfxVertex));
+    used = *numVerts;
+    usedIdx = 0;
     for (i = 0; i < count; i += 3) {
-        // A triangle clipped by four planes has at most 7 corners, so 15 vertices once split up.
-        if (used + 15 > sClipCapacity) {
-            int capacity = sClipCapacity * 2 > used + 15 + count * 3 ? sClipCapacity * 2 : used + 15 + count * 3;
-            GfxVertex *grown = (GfxVertex *) realloc(sClipVerts, capacity * sizeof(GfxVertex));
-            if (grown == NULL) {
-                break;
-            }
-            sClipVerts = grown;
-            sClipCapacity = capacity;
-        }
-        if (!outside_band(&verts[i]) && !outside_band(&verts[i + 1]) && !outside_band(&verts[i + 2])) {
-            memcpy(&sClipVerts[used], &verts[i], 3 * sizeof(GfxVertex));
-            used += 3;
+        if (!sClipOutside[idx[i]] && !sClipOutside[idx[i + 1]] && !sClipOutside[idx[i + 2]]) {
+            sClipIndices[usedIdx++] = idx[i];
+            sClipIndices[usedIdx++] = idx[i + 1];
+            sClipIndices[usedIdx++] = idx[i + 2];
             continue;
         }
-        memcpy(poly[0], &verts[i], 3 * sizeof(GfxVertex));
+        poly[0][0] = in[idx[i]];
+        poly[0][1] = in[idx[i + 1]];
+        poly[0][2] = in[idx[i + 2]];
         n = 3;
         for (plane = 0; plane < 4 && n >= 3; plane++) {
-            const GfxVertex *in = poly[plane & 1];
+            const GfxVertex *pin = poly[plane & 1];
             GfxVertex *out = poly[(plane & 1) ^ 1];
             int m = 0;
             for (j = 0; j < n; j++) {
-                const GfxVertex *a = &in[j], *b = &in[(j + 1) % n];
+                const GfxVertex *a = &pin[j], *b = &pin[(j + 1) % n];
                 float da = clip_distance(a, plane), db = clip_distance(b, plane);
                 if (da >= 0.0f) {
                     out[m++] = *a;
@@ -3088,36 +3275,122 @@ static const GfxVertex *clip_to_guard_band(const GfxVertex *verts, int *numTrian
             if (poly[0][0].w <= 0.0f || poly[0][k].w <= 0.0f || poly[0][k + 1].w <= 0.0f) {
                 continue;
             }
-            sClipVerts[used++] = poly[0][0];
-            sClipVerts[used++] = poly[0][k];
-            sClipVerts[used++] = poly[0][k + 1];
+            // Each triangle of the fan gets its own copies, as the triangle list before indexing had.
+            sClipVerts[used] = poly[0][0];
+            sClipVerts[used + 1] = poly[0][k];
+            sClipVerts[used + 2] = poly[0][k + 1];
+            sClipIndices[usedIdx++] = (u16) used;
+            sClipIndices[usedIdx++] = (u16) (used + 1);
+            sClipIndices[usedIdx++] = (u16) (used + 2);
+            used += 3;
         }
     }
-    *numTriangles = used / 3;
-    return sClipVerts;
+    *verts = sClipVerts;
+    *numVerts = used;
+    *indices = sClipIndices;
+    *numTriangles = usedIdx / 3;
 }
 
-void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
+/*
+ * Indexed drawing (roadmap item P16): the frontend hands each vertex over once, however many triangles share it, so
+ * it is converted and the GPU transforms it once. DKR_INDEXED=0 writes the triangles' corners one by one as before.
+ */
+static int sIndexed = -1;
+
+static int indexed_enabled(void) {
+    if (sIndexed < 0) {
+        const char *env = plat_getenv("DKR_INDEXED");
+        sIndexed = env == NULL || atoi(env) != 0;
+        plat_log("vertices: %s", sIndexed ? "shared, drawn by index" : "one for each triangle corner (DKR_INDEXED=0)");
+    }
+    return sIndexed;
+}
+
+/* Writes the vertices in format fmt at out, stride apart, or if indices is given the vertices they name in order. */
+static void write_vertices(int fmt, u8 *out, const GfxVertex *verts, int count, const u16 *indices, int flat, float su0,
+                           float sv0, float su1, float sv1) {
+    int i;
+    // Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
+    if (fmt == VFMT_SHORT) {
+        C3DVertex *o = (C3DVertex *) out;
+        for (i = 0; i < count; i++) {
+            const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
+            place(v, o[i].pos, flat);
+            o[i].tc0[0] = v->u0 * su0;
+            o[i].tc0[1] = 1.0f - v->v0 * sv0;
+            memcpy(o[i].color, &v->r, 4);
+        }
+    } else if (fmt == VFMT_LONG) {
+        C3DVertex2 *o = (C3DVertex2 *) out;
+        for (i = 0; i < count; i++) {
+            const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
+            place(v, o[i].pos, flat);
+            o[i].tc0[0] = v->u0 * su0;
+            o[i].tc0[1] = 1.0f - v->v0 * sv0;
+            memcpy(o[i].color, &v->r, 4);
+            o[i].tc1[0] = v->u1 * su1;
+            o[i].tc1[1] = 1.0f - v->v1 * sv1;
+        }
+    } else {
+        C3DVertexOld *o = (C3DVertexOld *) out;
+        for (i = 0; i < count; i++) {
+            const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
+            place(v, o[i].pos, flat);
+            o[i].tc0[0] = v->u0 * su0;
+            o[i].tc0[1] = 1.0f - v->v0 * sv0;
+            o[i].tc1[0] = v->u1 * su1;
+            o[i].tc1[1] = 1.0f - v->v1 * sv1;
+            o[i].color[0] = v->r;
+            o[i].color[1] = v->g;
+            o[i].color[2] = v->b;
+            o[i].color[3] = v->a;
+        }
+    }
+}
+
+void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts, const u16 *indices,
+                       int numTriangles) {
     HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
-    int i, first, vertex, count, fmt, flat = state->flat;
+    int first, vertex, count, fmt, flat = state->flat, indexed = indexed_enabled();
+    int vertBytes, written;
+    u16 *ibo = NULL;
+    // Timed in parts while the profiler is on (prof_part); a tick read costs a system call.
+    int timed = prof_enabled();
+    unsigned long long t0 = 0, t1 = 0, t2 = 0, t3;
 
-    verts = clip_to_guard_band(verts, &numTriangles);
+    if (timed) {
+        t0 = plat_time_ns();
+    }
+    clip_to_guard_band(&verts, &numVerts, &indices, &numTriangles);
+    if (timed) {
+        t1 = plat_time_ns();
+        prof_part(PROF_PART_CLIP, t1 - t0);
+    }
     if (numTriangles == 0) {
+        if (timed) {
+            prof_part(PROF_PART_BACKEND, t1 - t0);
+        }
         return;
     }
     count = numTriangles * 3;
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
     fmt = sVfmtOld ? VFMT_OLD : state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
+    written = indexed ? numVerts : count; // Vertices written to the buffer
+    vertBytes = written * sVfmtStride[fmt];
 
-    if (sVboUsed + 15 + count * sVfmtStride[fmt] > VBO_BYTES || gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+    if (sVboUsed + 15 + vertBytes > VBO_BYTES || (indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16)) ||
+        gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         // Out of room in the frame's vertex buffer or command list (a full command list stops the program, and
         // nothing of the frame reaches the GPU before it ends, so splitting it would not make room): leave the rest
         // of the frame's triangles out. Races use under a fifth of either.
         if (sDrawsLeftOut++ < 5) {
-            plat_log("frame %d: %s full (%d bytes of vertices, %lu command words), triangles left out", sFrameCount,
-                     sVboUsed + 15 + count * sVfmtStride[fmt] > VBO_BYTES ? "vertex buffer" : "command list", sVboUsed,
-                     (unsigned long) cmd_position());
+            plat_log("frame %d: %s full (%d bytes of vertices, %d indices, %lu command words), triangles left out",
+                     sFrameCount,
+                     sVboUsed + 15 + vertBytes > VBO_BYTES ? "vertex buffer"
+                     : indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16) ? "index buffer"
+                                                                                       : "command list",
+                     sVboUsed, sIboUsed, (unsigned long) cmd_position());
         }
         return;
     }
@@ -3135,16 +3408,18 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         }
         const GfxTexture *tex = state->textures[0];
         const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
-        plat_log("draw %d tris blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d cyc %d "
-                 "tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d "
-                 "cmd %lu",
-                 numTriangles, state->blend, state->alphaTest, state->alphaRef, state->depthTest, state->depthWrite,
-                 state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b, c->rgb[0].c, c->rgb[0].d,
-                 c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles, (void *) tex,
-                 tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0, t != NULL ? t->tex.width : 0,
-                 t != NULL ? t->tex.height : 0, t != NULL ? t->tex.data : NULL,
-                 (unsigned long) (t != NULL ? t->tex.param : 0), verts[0].x, verts[0].y, verts[0].z, verts[0].w, verts[0].u0,
-                 verts[0].v0, verts[0].r, verts[0].g, verts[0].b, verts[0].a, (unsigned long) gpuCmdBufOffset);
+        plat_log("draw %d tris %d verts blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d "
+                 "cyc %d tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d "
+                 "%d cmd %lu",
+                 numTriangles, numVerts, state->blend, state->alphaTest, state->alphaRef, state->depthTest,
+                 state->depthWrite, state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b,
+                 c->rgb[0].c, c->rgb[0].d, c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles,
+                 (void *) tex, tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0,
+                 t != NULL ? t->tex.width : 0, t != NULL ? t->tex.height : 0, t != NULL ? t->tex.data : NULL,
+                 (unsigned long) (t != NULL ? t->tex.param : 0), verts[indices[0]].x, verts[indices[0]].y,
+                 verts[indices[0]].z, verts[indices[0]].w, verts[indices[0]].u0, verts[indices[0]].v0,
+                 verts[indices[0]].r, verts[indices[0]].g, verts[indices[0]].b, verts[indices[0]].a,
+                 (unsigned long) gpuCmdBufOffset);
     }
     hangDraw = hang_draw_start(state, numTriangles);
     first = drain_before_draw(state, numTriangles);
@@ -3159,49 +3434,53 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         set_all_state(state, &su0, &sv0, &su1, &sv1);
     }
 
-    vertex = use_vertex_format(fmt);
-    // Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
-    if (fmt == VFMT_SHORT) {
-        C3DVertex *out = (C3DVertex *) (sVbo + sVboUsed);
-        for (i = 0; i < count; i++) {
-            const GfxVertex *v = &verts[i];
-            place(v, out[i].pos, flat);
-            out[i].tc0[0] = v->u0 * su0;
-            out[i].tc0[1] = 1.0f - v->v0 * sv0;
-            memcpy(out[i].color, &v->r, 4);
-        }
-    } else if (fmt == VFMT_LONG) {
-        C3DVertex2 *out = (C3DVertex2 *) (sVbo + sVboUsed);
-        for (i = 0; i < count; i++) {
-            const GfxVertex *v = &verts[i];
-            place(v, out[i].pos, flat);
-            out[i].tc0[0] = v->u0 * su0;
-            out[i].tc0[1] = 1.0f - v->v0 * sv0;
-            memcpy(out[i].color, &v->r, 4);
-            out[i].tc1[0] = v->u1 * su1;
-            out[i].tc1[1] = 1.0f - v->v1 * sv1;
-        }
-    } else {
-        C3DVertexOld *out = (C3DVertexOld *) (sVbo + sVboUsed);
-        for (i = 0; i < count; i++) {
-            const GfxVertex *v = &verts[i];
-            place(v, out[i].pos, flat);
-            out[i].tc0[0] = v->u0 * su0;
-            out[i].tc0[1] = 1.0f - v->v0 * sv0;
-            out[i].tc1[0] = v->u1 * su1;
-            out[i].tc1[1] = 1.0f - v->v1 * sv1;
-            out[i].color[0] = v->r;
-            out[i].color[1] = v->g;
-            out[i].color[2] = v->b;
-            out[i].color[3] = v->a;
-        }
+    if (timed) {
+        t2 = plat_time_ns();
+        prof_part(PROF_PART_STATE, t2 - t1);
     }
-    draw_arrays(vertex, count);
+    vertex = use_vertex_format(fmt);
+    if (indexed && vertex + numVerts > 0xFFFF) {
+        // The indices are 16 bits from the start of the buffer setting: start a new one here.
+        sVfmtBound = -1;
+        vertex = use_vertex_format(fmt);
+    }
+    write_vertices(fmt, sVbo + sVboUsed, verts, written, indexed ? NULL : indices, flat, su0, sv0, su1, sv1);
+    if (indexed) {
+        int i;
+        ibo = sIbo + sIboUsed;
+        for (i = 0; i < count; i++) {
+            ibo[i] = (u16) (vertex + indices[i]);
+        }
+        sIboUsed += count;
+    }
+    if (timed) {
+        t3 = plat_time_ns();
+        prof_part(PROF_PART_WRITE, t3 - t2);
+    }
+    draw_prims(vertex, count, ibo);
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
     }
-    sVboUsed += count * sVfmtStride[fmt];
+    sVboUsed += vertBytes;
     sFrameTriangles += numTriangles;
+    if (timed) {
+        prof_part(PROF_PART_BACKEND, plat_time_ns() - t0);
+    }
+}
+
+/* A triangle list: each corner its own vertex. */
+void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
+    static u16 sIdentity[GFX_MAX_BATCH_VERTICES];
+    int i;
+    if (numTriangles * 3 > GFX_MAX_BATCH_VERTICES) {
+        numTriangles = GFX_MAX_BATCH_VERTICES / 3;
+    }
+    if (sIdentity[1] == 0) {
+        for (i = 0; i < GFX_MAX_BATCH_VERTICES; i++) {
+            sIdentity[i] = (u16) i;
+        }
+    }
+    gfxb_draw_indexed(state, verts, numTriangles * 3, sIdentity, numTriangles);
 }
 
 /* Draws a screen rectangle with a flat colour, optionally only writing depth. */

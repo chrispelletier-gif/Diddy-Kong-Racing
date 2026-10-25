@@ -139,6 +139,15 @@ void gfxb_end_frame(void);
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a);
 void gfxb_clear_depth(const short rect[4]);
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
+/*
+ * The same with the triangles' corners as indices into verts, three a triangle, so that a vertex several triangles
+ * share is handed over (and transformed) once. The frontend batches at most GFX_MAX_BATCH_TRIANGLES triangles with
+ * GFX_MAX_BATCH_VERTICES vertices in one call.
+ */
+void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts, const unsigned short *indices,
+                       int numTriangles);
+#define GFX_MAX_BATCH_TRIANGLES 256
+#define GFX_MAX_BATCH_VERTICES (GFX_MAX_BATCH_TRIANGLES * 3)
 void gfxb_texture_upload(GfxTexture *tex);
 void gfxb_texture_free(GfxTexture *tex);
 /* Makes dst (a copy of src with another filter) draw from src's GPU copy instead of uploading its own. Both are freed

@@ -370,6 +370,8 @@ static OSMesgQueue *volatile sBlockedOn[MAX_THREADS];
 static volatile u8 sBlockedSending[MAX_THREADS];
 
 static void wait_on_queue_inner(OSMesgQueue *mq, int forSpace);
+/* Queue waits that woke on their timeout with the queue already ready (see wait_on_queue_inner). */
+volatile u32 gPortMissedWakeups;
 
 /*
  * On the N64 a thread with interrupts disabled cannot be switched away from until it blocks: nothing can wake a
@@ -418,12 +420,25 @@ void port_describe_threads(char *buffer, s32 size) {
                                   (int) sThreads[i]->id);
         }
     }
+    if (used < size - 1) {
+        plat_snprintf(buffer + used, size - used, ", %u missed wake-ups", (unsigned) gPortMissedWakeups);
+    }
 }
+
+/*
+ * Queue waits are bounded: a thread that sleeps past a message (a wake-up the 3DS condition variable lost, as in
+ * #107 and #114, where the scheduler slept on a full interrupt queue and the game stopped) looks again on its own.
+ * Those found with the queue ready on waking are counted, and the watchdog's thread line reports them.
+ */
+#define QUEUE_WAIT_NS 4000000ULL
 
 static void wait_on_queue_inner(OSMesgQueue *mq, int forSpace) {
     s32 i = port_lockstep_enabled() ? thread_index((OSThread *) plat_get_current_os_thread()) : -1;
     if (i < 0) {
-        plat_kwait();
+        if (plat_kwait_timeout(QUEUE_WAIT_NS) &&
+            (forSpace ? mq->validCount < mq->msgCount : mq->validCount > 0)) {
+            gPortMissedWakeups++;
+        }
         return;
     }
     // In lockstep the CPU goes to the next thread, and comes back once this one is ready and has the highest priority.

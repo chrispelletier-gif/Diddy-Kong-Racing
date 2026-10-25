@@ -143,13 +143,13 @@ extern volatile int gPlatSnapshotSaved;
 /* What the player's kart is doing (lap, boost, item, ...), set by the game thread each frame (port_autorun.c) for bug
  * reports to show next to the renderer's frame timing. Kept as raw numbers; only a bug report formats them. */
 typedef struct PlatGameNote {
-    short racing, lap, checkpoint, boost, itemType, itemCount, shield, magnet, hit;
+    short racing, lap, checkpoint, bananas, boost, itemType, itemCount, shield, magnet, hit;
 } PlatGameNote;
 void plat_set_game_note(const PlatGameNote *note);
 /* Copies the latest note from another thread. Returns 0 (and leaves out alone) if the game thread was halfway through
  * setting it each time it looked, so a note is never half of one frame and half of the next. */
 int plat_get_game_note(PlatGameNote *out);
-/* "lap 2 cp 5 boost 0 item 1/3 shield 0 magnet 0 hit 0", or "not racing". */
+/* "lap 2 cp 5 bananas 3 boost 0 item 1/3 shield 0 magnet 0 hit 0", or "not racing". */
 void plat_format_game_note(const PlatGameNote *note, char *out, int size);
 
 /* Copies the most recent log lines, oldest first, into out (3DS only; empty elsewhere). Returns the length. */
@@ -220,6 +220,14 @@ enum PlatCounter {
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
+
+/*
+ * Frames the game may run ahead of the renderer: 1 (the N64's: the game builds a frame while the renderer draws the
+ * one before, and waits for it) or 2 (one more, so a slow frame in the renderer is absorbed instead of missed, at the
+ * cost of one frame of input lag). Saved as renderahead= in settings.txt; DKR_RENDER_AHEAD in env.txt for a test.
+ */
+int plat_render_ahead(void);
+void plat_set_render_ahead(int frames);
 /* What the renderer thread is doing right now. */
 extern const char *volatile gPlatGfxStage;
 

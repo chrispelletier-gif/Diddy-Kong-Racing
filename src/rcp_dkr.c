@@ -151,7 +151,13 @@ u8 gChequerBGColourA2;
 s32 gChequerBGWidth;
 s32 gChequerBGHeight;
 
+#ifdef TARGET_PORT
+DKR_OSTask gGfxTaskBuf[PORT_DL_BUFFERS];
+/* Tasks handed to the scheduler whose finished message has not been received yet (see gfxtask_wait_ahead). */
+s32 gGfxTasksOutstanding = 0;
+#else
 DKR_OSTask gGfxTaskBuf[2];
+#endif
 DKR_OSTask gGfxTaskBuf2[2];
 
 OSMesgQueue *osScInterruptQ;
@@ -169,7 +175,12 @@ s32 gfxtask_run_xbus(Gfx *dlBegin, Gfx *dlEnd, UNUSED s32 recvMesg) {
     gGfxTaskIsRunning = TRUE;
     dkrtask = &gGfxTaskBuf[gGfxBufCounter];
     gGfxBufCounter++;
+#ifdef TARGET_PORT
+    gGfxTasksOutstanding++;
+    if (gGfxBufCounter == PORT_DL_BUFFERS) {
+#else
     if (gGfxBufCounter == 2) {
+#endif
         gGfxBufCounter = 0;
     }
     dkrtask->flags = OS_SC_LAST_TASK | OS_SC_NEEDS_RDP | OS_SC_NEEDS_RSP;
@@ -370,10 +381,41 @@ s32 gfxtask_wait(void) {
     if (gGfxTaskIsRunning == FALSE) {
         return 0;
     }
+#ifdef TARGET_PORT
+    // Every task handed over so far, so that whatever is freed afterwards is no longer being drawn.
+    while (gGfxTasksOutstanding > 0) {
+        osRecvMesg(&gGfxTaskMesgQueue, (OSMesg) &mesg, OS_MESG_BLOCK);
+        gGfxTasksOutstanding--;
+    }
+#else
     osRecvMesg(&gGfxTaskMesgQueue, (OSMesg) &mesg, OS_MESG_BLOCK);
+#endif
     gGfxTaskIsRunning = FALSE;
     return (s32) mesg[1];
 }
+
+#ifdef TARGET_PORT
+/**
+ * The main loop's wait at the end of a frame: for the task just handed over, like gfxtask_wait, or with the render
+ * ahead setting at 2 only for the one before it, so that the game builds the next frame while two are drawn and a
+ * slow one costs no frame. Returns 0 (the message's screen status) when nothing had to be waited for.
+ */
+s32 gfxtask_wait_ahead(void) {
+    OSMesg *mesg = NULL;
+    s32 allowed = port_render_ahead() - 1;
+    if (gGfxTaskIsRunning == FALSE) {
+        return 0;
+    }
+    while (gGfxTasksOutstanding > allowed) {
+        osRecvMesg(&gGfxTaskMesgQueue, (OSMesg) &mesg, OS_MESG_BLOCK);
+        gGfxTasksOutstanding--;
+    }
+    if (gGfxTasksOutstanding == 0) {
+        gGfxTaskIsRunning = FALSE;
+    }
+    return mesg != NULL ? (s32) mesg[1] : 0;
+}
+#endif
 
 /**
  * Write Data Cache back into RAM and then execute an RDP task with a given command buffer.
