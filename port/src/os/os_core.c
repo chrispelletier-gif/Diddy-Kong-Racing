@@ -454,17 +454,25 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag) {
 }
 
 /* Used by emulated hardware to post a message, like an interrupt handler would. Never blocks. */
-void port_post_mesg(OSMesgQueue *mq, OSMesg msg) {
+/* Returns FALSE if the queue was full, like an interrupt's message on the N64, which is then lost. */
+static s32 post_mesg(OSMesgQueue *mq, OSMesg msg) {
+    s32 posted = FALSE;
     if (mq == NULL) {
-        return;
+        return TRUE;
     }
     plat_klock();
     if (mq->validCount < mq->msgCount) {
         mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
         mq->validCount++;
         plat_kbroadcast();
+        posted = TRUE;
     }
     plat_kunlock();
+    return posted;
+}
+
+void port_post_mesg(OSMesgQueue *mq, OSMesg msg) {
+    post_mesg(mq, msg);
 }
 
 /******************************** Events ********************************/
@@ -482,13 +490,38 @@ void osSetEventMesg(OSEvent event, OSMesgQueue *mq, OSMesg msg) {
 }
 
 /* Raises an emulated hardware event. Waits for any thread that has interrupts disabled. */
+/* Event messages lost to a full queue (logged by the 3DS watchdog with a hang). */
+volatile u32 gPortEventsDropped;
+
 void port_raise_event(OSEvent event) {
+    static u32 sWaits;
+    s32 posted, waited = FALSE;
     if (event >= OS_NUM_EVENTS) {
         return;
     }
-    plat_intlock_lock();
-    port_post_mesg(sEventTable[event].queue, sEventTable[event].msg);
-    plat_intlock_unlock();
+    for (;;) {
+        plat_intlock_lock();
+        posted = post_mesg(sEventTable[event].queue, sEventTable[event].msg);
+        plat_intlock_unlock();
+        // A lost task-done message leaves the scheduler waiting for it forever: the game and the sound both stop
+        // (issues #91 and #93, at 60 fps, where the scheduler's 8-message queue holds less time). The RCP workers are
+        // threads, not interrupts, so the done message waits for room instead.
+        if (posted) {
+            break;
+        }
+        if (event != OS_EVENT_SP && event != OS_EVENT_DP) {
+            gPortEventsDropped++;
+            break;
+        }
+        if (!waited) {
+            waited = TRUE;
+            if (sWaits++ % 64 == 0) {
+                port_log("event queue full: %s done message waits for the scheduler (%u times)",
+                         event == OS_EVENT_SP ? "SP" : "DP", (unsigned) sWaits);
+            }
+        }
+        plat_sleep_ns(500000ULL);
+    }
 }
 
 /******************************** Time ********************************/

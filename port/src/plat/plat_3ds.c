@@ -708,6 +708,7 @@ static void status_lines(const char *first, const char *second) {
  */
 long port_autorun_enabled(void);
 void port_describe_game_state(char *buffer, long size);
+extern volatile unsigned long gPortEventsDropped;
 
 /*
  * A renderer that has drawn nothing for 20 seconds (outside the HOME menu) is taken as a hang: the recent log is saved
@@ -736,6 +737,8 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written) {
         {
             char state[160];
             port_describe_game_state(state, sizeof(state));
+            log_line("watchdog: ", state);
+            snprintf(state, sizeof(state), "%lu event messages lost to a full queue", gPortEventsDropped);
             log_line("watchdog: ", state);
         }
         *written = 1;
