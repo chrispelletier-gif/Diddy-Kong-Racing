@@ -909,15 +909,15 @@ static char sCapturePath[256];
 #define RECENT_SLOTS 8
 #define RECENT_EVERY 4
 #define RECENT_KEEP 2
-#define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8)
+#define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8, 2 in 16-bit)
 static u8 *sRecent[RECENT_SLOTS];
-static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS];
+static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS], sRecentBpp[RECENT_SLOTS];
 static int sRecentCount, sRecentNext, sRecentFrozen;
 
 /* Called before C3D_FrameEnd with the screen buffer the frame's display transfer will write (the back buffer until
  * citro3d swaps it in once the GPU is done), and after it to queue the copy. */
 static u8 *sRecentScreen;
-static int sRecentScreenRows;
+static int sRecentScreenRows, sRecentScreenBpp; // Bytes per pixel: 3 (BGR8) or 2 (RGB565, with 16-bit buffers)
 
 static u8 *sRecentRight; // The right eye's, in 3D (then 400 rows each, so both fit a slot)
 
@@ -937,8 +937,10 @@ static u64 sLastEndTick;
 
 static void find_recent_screen(void) {
     u16 w = 0, h = 0;
+    GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
     sRecentScreen = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
-    sRecentScreenRows = (w == TOP_HEIGHT && gfxGetScreenFormat(GFX_TOP) == GSP_BGR8_OES) ? h : 0;
+    sRecentScreenBpp = format == GSP_BGR8_OES ? 3 : format == GSP_RGB565_OES ? 2 : 0;
+    sRecentScreenRows = (w == TOP_HEIGHT && sRecentScreenBpp != 0) ? h : 0;
     sRecentRight = sStereo && h == TOP_WIDTH ? gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, NULL, NULL) : NULL;
 }
 
@@ -995,19 +997,27 @@ static void allocate_recent_frames(void) {
 void bugreport_request(void);
 static int sLineWatch = -1, sLineReported, sLineLogged, sLineBest, sLineBestColumn;
 
-static int line_watch_score(const u8 *pixels, int rows, int *where) {
-    int r, x, best = 0;
+/* How much a picture looks like it holds a bright vertical line: the most pixels in one screen column (a row here)
+ * that are clearly brighter than the columns 3 to each side, checking every step-th pixel down it. */
+static inline int pixel_luma(const u8 *p, int bpp) {
+    if (bpp == 2) {
+        int c = p[0] | (p[1] << 8); // RGB565
+        return ((c >> 11) << 3) + (((c >> 5) & 0x3F) << 3) + ((c & 0x1F) << 3); // 0..1020
+    }
+    return p[0] + p[1] * 2 + p[2]; // 0..1020
+}
+
+static int line_score(const u8 *pixels, int rows, int bpp, int step, int *where) {
+    int r, x, best = 0, stride = TOP_HEIGHT * bpp;
     *where = -1;
     for (r = 3; r < rows - 3; r++) {
-        const u8 *row = pixels + r * TOP_HEIGHT * 3, *left = row - 9 * TOP_HEIGHT, *right = row + 9 * TOP_HEIGHT;
+        const u8 *row = pixels + r * stride, *left = row - 3 * stride, *right = row + 3 * stride;
         int count = 0;
-        for (x = 0; x < TOP_HEIGHT; x += 4) {
-#define LUMA(p) ((p)[0] + (p)[1] * 2 + (p)[2])
-            int c = LUMA(row + x * 3);
-            if (c > LUMA(left + x * 3) + 80 && c > LUMA(right + x * 3) + 80) {
+        for (x = 0; x < TOP_HEIGHT; x += step) {
+            int c = pixel_luma(row + x * bpp, bpp);
+            if (c > pixel_luma(left + x * bpp, bpp) + 80 && c > pixel_luma(right + x * bpp, bpp) + 80) {
                 count++;
             }
-#undef LUMA
         }
         if (count > best) {
             best = count;
@@ -1031,12 +1041,12 @@ static void watch_for_line(void) {
         if (eyes[e] == NULL) {
             continue;
         }
-        GSPGPU_InvalidateDataCache(eyes[e], sRecentScreenRows * TOP_HEIGHT * 3);
+        GSPGPU_InvalidateDataCache(eyes[e], sRecentScreenRows * TOP_HEIGHT * sRecentScreenBpp);
         if (sLineWatch == 2 && sFrameCount >= 1800 && sFrameCount < 1830) {
             // DKR_LINE_WATCH=2 tests it: a white line down the middle of the old picture a minute in.
-            memset(eyes[e] + sRecentScreenRows / 2 * TOP_HEIGHT * 3, 255, TOP_HEIGHT * 3);
+            memset(eyes[e] + sRecentScreenRows / 2 * TOP_HEIGHT * sRecentScreenBpp, 255, TOP_HEIGHT * sRecentScreenBpp);
         }
-        score = line_watch_score(eyes[e], sRecentScreenRows, &where);
+        score = line_score(eyes[e], sRecentScreenRows, sRecentScreenBpp, 4, &where);
         if (score > sLineBest) {
             sLineBest = score;
             sLineBestColumn = where * TOP_WIDTH / sRecentScreenRows;
@@ -1060,7 +1070,7 @@ static void watch_for_line(void) {
 }
 
 static void record_recent_frame(void) {
-    u32 bytes = sRecentScreenRows * TOP_HEIGHT * 3;
+    u32 bytes = sRecentScreenRows * TOP_HEIGHT * sRecentScreenBpp;
     u8 *slot;
 
     record_timing();
@@ -1074,36 +1084,13 @@ static void record_recent_frame(void) {
     GX_TextureCopy((u32 *) sRecentScreen, 0, (u32 *) slot, 0, bytes, GX_TRANSFER_RAW_COPY(1));
     sRecentFrame[sRecentNext] = sFrameCount - 1; // The frame just ended (sFrameCount already counts it).
     sRecentRows[sRecentNext] = sRecentScreenRows;
+    sRecentBpp[sRecentNext] = sRecentScreenBpp;
     if (sRecentRight != NULL && bytes * 2 <= RECENT_MAX_BYTES) {
         // In 3D the right eye goes after the left, so the saved picture shows the two side by side.
         GX_TextureCopy((u32 *) sRecentRight, 0, (u32 *) (slot + bytes), 0, bytes, GX_TRANSFER_RAW_COPY(1));
         sRecentRows[sRecentNext] *= 2;
     }
     sRecentNext = (sRecentNext + 1) % sRecentCount;
-}
-
-/* How much a frame looks like it holds a bright vertical line: the most pixels in one screen column (a row here)
- * that are clearly brighter than the columns 3 to each side. */
-static int line_score(const u8 *pixels, int rows, int *where) {
-    int r, x, best = 0;
-    *where = -1;
-    for (r = 3; r < rows - 3; r++) {
-        const u8 *row = pixels + r * TOP_HEIGHT * 3, *left = row - 9 * TOP_HEIGHT, *right = row + 9 * TOP_HEIGHT;
-        int count = 0;
-        for (x = 0; x < TOP_HEIGHT; x++) {
-#define LUMA(p) ((p)[0] + (p)[1] * 2 + (p)[2]) // 0..1020
-            int c = LUMA(row + x * 3);
-            if (c > LUMA(left + x * 3) + 80 && c > LUMA(right + x * 3) + 80) {
-                count++;
-            }
-#undef LUMA
-        }
-        if (count > best) {
-            best = count;
-            *where = r;
-        }
-    }
-    return best;
 }
 
 /* Saves the recent frames most likely to show a line as diff_NNNNN_recentK.bin (width, height, then BGR8), and
@@ -1116,8 +1103,8 @@ static void save_recent_frames(int snapshotFrame) {
     for (i = 0; i < sRecentCount; i++) {
         score[i] = -1;
         if (sRecentFrame[i] >= 0) {
-            GSPGPU_InvalidateDataCache(sRecent[i], sRecentRows[i] * TOP_HEIGHT * 3);
-            score[i] = line_score(sRecent[i], sRecentRows[i], &where[i]);
+            GSPGPU_InvalidateDataCache(sRecent[i], sRecentRows[i] * TOP_HEIGHT * sRecentBpp[i]);
+            score[i] = line_score(sRecent[i], sRecentRows[i], sRecentBpp[i], 1, &where[i]);
             plat_log("recent frame %d: line score %d at column %d", sRecentFrame[i], score[i],
                      where[i] < 0 ? -1 : where[i] * TOP_WIDTH / sRecentRows[i]);
         }
@@ -1131,12 +1118,22 @@ static void save_recent_frames(int snapshotFrame) {
         }
         if (pick >= 0) {
             u32 header[2] = { TOP_HEIGHT, (u32) sRecentRows[pick] };
-            u32 bytes = sRecentRows[pick] * TOP_HEIGHT * 3;
+            u32 pixels = sRecentRows[pick] * TOP_HEIGHT, bytes = pixels * 3, p;
             u8 *file = malloc(8 + bytes);
             score[pick] = -1;
             if (file != NULL) {
                 memcpy(file, header, 8);
-                memcpy(file + 8, sRecent[pick], bytes);
+                if (sRecentBpp[pick] == 3) {
+                    memcpy(file + 8, sRecent[pick], bytes);
+                } else {
+                    // 16-bit buffers: saved as BGR8 all the same.
+                    for (p = 0; p < pixels; p++) {
+                        int c = sRecent[pick][p * 2] | (sRecent[pick][p * 2 + 1] << 8);
+                        file[8 + p * 3] = (c & 0x1F) << 3;
+                        file[8 + p * 3 + 1] = ((c >> 5) & 0x3F) << 2;
+                        file[8 + p * 3 + 2] = (c >> 11) << 3;
+                    }
+                }
                 plat_snprintf(path, sizeof(path), "%s/diff_%05d_recent%d.bin", plat_data_dir(), snapshotFrame, k + 1);
                 plat_save_file(path, file, 8 + bytes);
                 free(file);

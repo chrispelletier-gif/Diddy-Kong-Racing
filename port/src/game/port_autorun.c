@@ -1344,9 +1344,10 @@ void port_autorun_frame(s32 updateRate) {
         // What the player is doing, for bug reports (gPlatGameNote).
         char note[sizeof(gPlatGameNote)];
         if (racer != NULL) {
-            plat_snprintf(note, sizeof(note), "lap %d cp %d boost %d item %d/%d shield %d magnet %d hit %d",
-                          racer->lap + 1, racer->nextCheckpoint, racer->boostTimer, racer->balloon_type,
-                          racer->balloon_quantity, racer->shieldTimer, racer->magnetTimer, racer->attackType);
+            plat_snprintf(note, sizeof(note), "lap %d cp %d bananas %d boost %d item %d/%d sh %d mag %d hit %d",
+                          racer->lap + 1, racer->nextCheckpoint, racer->bananas, racer->boostTimer,
+                          racer->balloon_type, racer->balloon_quantity, racer->shieldTimer, racer->magnetTimer,
+                          racer->attackType);
         } else {
             plat_snprintf(note, sizeof(note), "not racing");
         }
