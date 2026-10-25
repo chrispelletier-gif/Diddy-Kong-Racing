@@ -3697,8 +3697,8 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
             (baseFloat2 - gCameraObject->boomLength) * MODERN_BOOM_RATE(baseFloat2, gCameraObject->boomLength);
     } else
 #endif
-    gCameraObject->boomLength += (baseFloat2 - gCameraObject->boomLength) * 0.125;
-    gCameraObject->cam_unk_20 += (baseFloat1 - gCameraObject->cam_unk_20) * 0.125;
+    gCameraObject->boomLength += (baseFloat2 - gCameraObject->boomLength) * PORT_LERP(0.125);
+    gCameraObject->cam_unk_20 += (baseFloat1 - gCameraObject->cam_unk_20) * PORT_LERP(0.125);
     var_f14 = sins_f(gCameraObject->trans.rotation.x_rotation - 0x400);
     xOffset = coss_f(gCameraObject->trans.rotation.x_rotation - 0x400);
     var_f16 = (gCameraObject->boomLength * xOffset) - (gCameraObject->cam_unk_20 * var_f14);
@@ -8112,9 +8112,9 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
             (baseDistance - gCameraObject->boomLength) * MODERN_BOOM_RATE(baseDistance, gCameraObject->boomLength);
     } else
 #endif
-    gCameraObject->boomLength += (baseDistance - gCameraObject->boomLength) * 0.125;
+    gCameraObject->boomLength += (baseDistance - gCameraObject->boomLength) * PORT_LERP(0.125);
     brakeVar = gCameraObject->cam_unk_20;
-    gCameraObject->cam_unk_20 += (yVel - brakeVar) * 0.125;
+    gCameraObject->cam_unk_20 += (yVel - brakeVar) * PORT_LERP(0.125);
     sp38 = sins_f(gCameraObject->trans.rotation.x_rotation - baseAngle);
     sineOffset = coss_f(gCameraObject->trans.rotation.x_rotation - baseAngle);
     tempVel = (gCameraObject->boomLength * sineOffset) - (gCameraObject->cam_unk_20 * sp38);
@@ -8145,11 +8145,11 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
         lateralOffset *= 0.5f;
     }
 #endif
-    racer->unkC8 += (lateralOffset - racer->unkC8) * 0.125;
+    racer->unkC8 += (lateralOffset - racer->unkC8) * PORT_LERP(0.125);
     if (racer->spinout_timer) {
-        racer->camera_zoom -= racer->camera_zoom * 0.25;
+        racer->camera_zoom -= racer->camera_zoom * PORT_LERP(0.25);
     } else {
-        racer->camera_zoom += (10.0 - racer->camera_zoom) * 0.25;
+        racer->camera_zoom += (10.0 - racer->camera_zoom) * PORT_LERP(0.25);
     }
     xOffset = obj->trans.x_position - (racer->ox1 * racer->camera_zoom);
     yOffset = obj->trans.y_position - (racer->oy1 * racer->camera_zoom);
@@ -8161,14 +8161,19 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
     if (sp38 < -2.0) {
         gCameraObject->trans.y_position -= sp38 + 2.0;
     }
+#ifdef TARGET_PORT
+    // sp38 is a quarter of the gap, so this closes a 16th of it a frame.
+    gCameraObject->trans.y_position -= gPortHalfStep ? sp38 * 4.0f * PORT_LERP(0.0625f) : sp38 * 0.25;
+#else
     gCameraObject->trans.y_position -= sp38 * 0.25;
+#endif
     if (sp38 > 0.0f || gRaceStartTimer) {
         gCameraObject->trans.y_position = lateralOffset;
     }
 #ifdef TARGET_PORT
     if (port_modern_camera() && gCameraObject->trans.y_position < lateralOffset) {
         // Modern: climbs after the kart in a few frames instead of trailing it up hills and jumps.
-        gCameraObject->trans.y_position += (lateralOffset - gCameraObject->trans.y_position) * 0.5f;
+        gCameraObject->trans.y_position += (lateralOffset - gCameraObject->trans.y_position) * PORT_LERP(0.5f);
     }
 #endif
     tempVel = (-coss_f(racer->cameraYaw + 0x4000) * racer->unkC8);
