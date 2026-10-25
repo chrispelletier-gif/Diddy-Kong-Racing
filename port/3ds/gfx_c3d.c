@@ -957,6 +957,33 @@ __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool has
     __real_gfxScreenSwapBuffers(scr, hasStereo);
 }
 
+/*
+ * citro3d picks the screen buffer a frame's picture is copied into when the frame ends: the one libctru's last swap
+ * made the back buffer. But a swap only reaches the screen at the next VBlank, so a frame ending before that (one
+ * finished quickly after a slow one, as when a banana or balloon is picked up, or "LAP 2" appears) would have its
+ * picture copied into the buffer still on screen, while the screen reads it: a tear down the screen, the white line.
+ * So a frame waits, only then, for the last swap to be shown (the GPU carries on drawing it meanwhile).
+ * DKR_PRESENT_WAIT=0 = old.
+ */
+static int sPresentWait = -1;
+static unsigned int sPresentWaits;
+
+static void wait_for_present(void) {
+    int i;
+    if (sPresentWait < 0) {
+        const char *env = plat_getenv("DKR_PRESENT_WAIT");
+        sPresentWait = env == NULL || atoi(env) != 0;
+    }
+    if (!sPresentWait || !gspIsPresentPending(GSP_SCREEN_TOP)) {
+        return;
+    }
+    sPresentWaits++;
+    // Polled, at most two refreshes: the next VBlank shows it.
+    for (i = 0; i < 70 && gspIsPresentPending(GSP_SCREEN_TOP); i++) {
+        svcSleepThread(500 * 1000);
+    }
+}
+
 static void find_recent_screen(void) {
     u16 w = 0, h = 0;
     GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
@@ -1120,8 +1147,9 @@ static void watch_for_line(void) {
         }
     }
     if (sFrameCount % 150 == 0) {
-        plat_log("line watch: best %d of %d at column %d in the last 5 s", sLineBest, LINE_WATCH_SAMPLES,
-                 sLineBestColumn);
+        plat_log("line watch: best %d of %d at column %d in the last 5 s; %u frames waited for the screen", sLineBest,
+                 LINE_WATCH_SAMPLES, sLineBestColumn, sPresentWaits);
+        sPresentWaits = 0;
         sLineBest = 0;
     }
 }
@@ -1981,6 +2009,7 @@ void gfxb_end_frame(void) {
         sDrainSplits = 0;
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
+        wait_for_present();
         find_recent_screen();
         watch_for_line();
         if (full_flush()) {
