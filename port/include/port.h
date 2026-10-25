@@ -180,6 +180,31 @@ void port_set_modern_camera(s32 on);
 s32 port_look_back_held(void);
 void port_set_look_back_held(s32 held);
 
+/*
+ * 60 fps physics (src/objects.c sets these in obj_update). Much of the racer code takes one fixed step per logic frame
+ * (the decomp marks these lines //!@Delta), tuned for 30 fps, where a frame is 2 retraces. At 60 fps a frame is 1
+ * retrace, so those steps would happen twice as often: karts would speed up, slow down, steer and spin out twice as
+ * fast. While the logic runs at 1 retrace a frame, gPortHalfStep is set and the PORT_* macros below halve the steps:
+ * PORT_STEP halves an amount added each frame, PORT_DECAY takes the square root of a factor applied each frame,
+ * PORT_LERP gives the per-retrace version of "move this fraction of the way there", and PORT_TICK is false every
+ * other frame so a whole-number counter or shift steps at 30 fps. At 2 retraces or more they change nothing, so
+ * 30 fps runs as before. DKR_RATE_FIX=0 in env.txt (or the environment on PC) turns them off for a comparison.
+ */
+extern s32 gPortHalfStep;
+extern s32 gPortSkipTick;
+#define PORT_STEP(x) (gPortHalfStep ? (x) * 0.5f : (x))
+#define PORT_DECAY(k) (gPortHalfStep ? sqrtf(k) : (k))
+#define PORT_LERP(k) (gPortHalfStep ? 1.0f - sqrtf(1.0f - (k)) : (k))
+#define PORT_TICK() (!gPortSkipTick)
+void port_set_logic_rate(s32 updateRate);
+
+/*
+ * What the game thread is doing (src/thread3_main.c sets it at each step of the main loop), and a line describing the
+ * game's state (port_test.c), which the 3DS watchdog logs when no frame has been drawn for a while.
+ */
+extern const char *volatile gPortGameStage;
+void port_describe_game_state(char *buffer, s32 size);
+
 /* Logging. */
 void port_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void port_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));

@@ -36,6 +36,10 @@ unsigned long long plat_idle_ns(void) {
     return 0;
 }
 
+unsigned long long plat_render_idle_ns(void) {
+    return 0;
+}
+
 void plat_shutdown(void) {
 }
 

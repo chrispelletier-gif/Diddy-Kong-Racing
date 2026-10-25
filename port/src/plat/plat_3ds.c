@@ -102,19 +102,31 @@ void plat_init(void) {
 
 /*
  * With DKR_PROFILE set, a lowest priority thread on the application core measures how much time is left over.
- * It spins in short slices and counts how long each slice took.
+ * It spins in short slices and counts how long each slice took. On a New 3DS a second one does the same on the
+ * renderer's core: the game core is nearly always idle there, since the renderer and the sound run elsewhere.
  */
-static volatile unsigned long long sIdleNs;
+static volatile unsigned long long sIdleNs, sRenderIdleNs;
 
 static void idle_meter(void *arg) {
-    (void) arg;
+    volatile unsigned long long *counter = arg;
     for (;;) {
         unsigned long long start = plat_time_ns(), now;
         do {
             now = plat_time_ns();
         } while (now - start < 200000ULL);
         // A slice that took much longer than 0.2ms means higher priority threads ran in between.
-        sIdleNs += 200000ULL;
+        *counter += 200000ULL;
+    }
+}
+
+static void start_idle_meters(void) {
+    static int sStarted;
+    if (!sStarted) {
+        sStarted = 1;
+        threadCreate(idle_meter, (void *) &sIdleNs, 4096, 0x3F, 0, true);
+        if (sRcpCore != 0) {
+            threadCreate(idle_meter, (void *) &sRenderIdleNs, 4096, 0x3F, sRcpCore, true);
+        }
     }
 }
 
@@ -124,12 +136,13 @@ int plat_3ds_audio_on_system_core(void) {
 }
 
 unsigned long long plat_idle_ns(void) {
-    static int sStarted;
-    if (!sStarted) {
-        sStarted = 1;
-        threadCreate(idle_meter, NULL, 4096, 0x3F, 0, true);
-    }
+    start_idle_meters();
     return sIdleNs;
+}
+
+unsigned long long plat_render_idle_ns(void) {
+    start_idle_meters();
+    return sRcpCore != 0 ? sRenderIdleNs : sIdleNs;
 }
 
 void plat_shutdown(void) {
@@ -694,6 +707,7 @@ static void status_lines(const char *first, const char *second) {
  * the GPU).
  */
 long port_autorun_enabled(void);
+void port_describe_game_state(char *buffer, long size);
 
 /*
  * A renderer that has drawn nothing for 20 seconds (outside the HOME menu) is taken as a hang: the recent log is saved
@@ -719,6 +733,11 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written) {
                  gPlatGfxStage != NULL ? gPlatGfxStage : "-", gPlatCounters[PLAT_COUNTER_GFX_QUEUED],
                  gPlatCounters[PLAT_COUNTER_GFX_DONE], gPlatCounters[PLAT_COUNTER_VI]);
         log_line("watchdog: ", text);
+        {
+            char state[160];
+            port_describe_game_state(state, sizeof(state));
+            log_line("watchdog: ", state);
+        }
         *written = 1;
         if (port_autorun_enabled()) {
             plat_save_file(path, text, strlen(text));

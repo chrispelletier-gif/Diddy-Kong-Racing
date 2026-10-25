@@ -1381,6 +1381,23 @@ void port_autorun_frame(s32 updateRate) {
             sLastPosition[1] = obj->trans.y_position;
             sLastPosition[2] = obj->trans.z_position;
             progress = racer->courseCheckpoint;
+            {
+                // DKR_LOG_RACER: logs the kart's checkpoint, speed and place at each checkpoint and every half second,
+                // to compare two runs (30 and 60 fps physics, say).
+                static s32 sLogRacer = -1, sLastCp = -999, sLastHalf = -1;
+                if (sLogRacer < 0) {
+                    sLogRacer = plat_getenv("DKR_LOG_RACER") != NULL;
+                }
+                if (sLogRacer && (progress != sLastCp || sRaceRetraces / 30 != sLastHalf)) {
+                    port_log("racer t=%.3f cp=%d v=%.3f lv=%.3f yv=%.3f pos=%.1f,%.1f,%.1f boost=%d bananas=%d",
+                             sRaceRetraces / 60.0,
+                             (int) progress, racer->velocity, racer->lateral_velocity, obj->y_velocity,
+                             obj->trans.x_position, obj->trans.y_position, obj->trans.z_position,
+                             (int) racer->boostTimer, (int) racer->bananas);
+                    sLastCp = progress;
+                    sLastHalf = sRaceRetraces / 30;
+                }
+            }
             if (!sDriving && (racer->velocity > 1.0f || racer->velocity < -1.0f)) {
                 sDriving = TRUE;
                 sRaceLevel = level_id();

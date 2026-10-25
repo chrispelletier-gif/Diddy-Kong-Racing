@@ -36,8 +36,13 @@ void plat_thread_park(void) __attribute__((noreturn));
 void plat_set_current_os_thread(void *thread);
 void *plat_get_current_os_thread(void);
 
-/* Time the application core has spent idle (only measured on the 3DS; 0 elsewhere). */
+/*
+ * Time the application core (the game's own threads) has spent idle, and the same for the renderer's core (core 2 on
+ * a New 3DS, where the renderer and the sound run; the application core again elsewhere). Only measured on the 3DS;
+ * 0 elsewhere.
+ */
 unsigned long long plat_idle_ns(void);
+unsigned long long plat_render_idle_ns(void);
 
 /* Monotonic time. */
 unsigned long long plat_time_ns(void);
