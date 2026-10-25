@@ -885,7 +885,7 @@ static char sCapturePath[256];
 #define RECENT_KEEP 2
 #define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8)
 static u8 *sRecent[RECENT_SLOTS];
-static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS];
+static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS], sRecentEyes[RECENT_SLOTS];
 static int sRecentCount = -1, sRecentNext, sRecentFrozen;
 
 /* Called before C3D_FrameEnd with the screen buffer the frame's display transfer will write (the back buffer until
@@ -896,18 +896,40 @@ static int sRecentScreenRows;
 static u8 *sRecentRight; // The right eye's, in 3D (then 400 rows each, so both fit a slot)
 
 /*
- * Every frame's timing and what the player's kart was doing (gPlatGameNote), so a report shows what happened around
- * the glitch: the time between frame ends (two ends in one 16.7 ms screen refresh could replace the picture while the
- * screen shows it) and how long the GPU took.
+ * Every frame's timing and what the player's kart was doing (plat_get_game_note), so a report shows what happened
+ * around the glitch: the CPU time between frame ends, how long the GPU took, and when the top screen's pictures were
+ * actually handed to the display. Two pictures handed over in one 16.7 ms screen refresh replace each other (the
+ * first is never shown), which is what "replaced" counts.
  */
 #define TIMING_FRAMES 64
 static struct {
     int frame;
     unsigned int gapUs, gpuUs;
-    char note[sizeof(gPlatGameNote)];
+    unsigned int swaps, replaced, swapGapUs; // Since the previous frame end; swapGapUs is between the last two swaps.
+    int haveNote;
+    PlatGameNote note;
 } sTiming[TIMING_FRAMES];
 static int sTimingNext;
 static u64 sLastEndTick;
+
+/* Top screen swaps, counted as they happen. citro3d swaps once the GPU has finished a frame (from the GSP event
+ * thread), so the swap is wrapped (-Wl,--wrap=gfxScreenSwapBuffers) to see when, not when the CPU ended the frame. */
+static volatile unsigned int sSwapCount, sSwapReplaced, sSwapGapUs;
+static u64 sLastSwapTick;
+void __real_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
+__attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo) {
+    if (scr == GFX_TOP) {
+        u64 now = svcGetSystemTick();
+        // Still pending: the previous picture has not reached the screen yet, and this one replaces it.
+        if (gspIsPresentPending(GSP_SCREEN_TOP)) {
+            sSwapReplaced++;
+        }
+        sSwapGapUs = sLastSwapTick != 0 ? (unsigned int) ((now - sLastSwapTick) / (SYSCLOCK_ARM11 / 1000000)) : 0;
+        sLastSwapTick = now;
+        sSwapCount++;
+    }
+    __real_gfxScreenSwapBuffers(scr, hasStereo);
+}
 
 static void find_recent_screen(void) {
     u16 w = 0, h = 0;
@@ -917,27 +939,52 @@ static void find_recent_screen(void) {
 }
 
 static void record_timing(void) {
+    static unsigned int lastSwaps, lastReplaced;
+    static int cleared;
     u64 now = svcGetSystemTick();
+    unsigned int swaps = sSwapCount, replaced = sSwapReplaced;
+    int i;
+    if (!cleared) {
+        for (i = 0; i < TIMING_FRAMES; i++) {
+            sTiming[i].frame = -1; // Empty (frame 0 is a real frame).
+        }
+        cleared = 1;
+    }
     if (!sRecentFrozen) {
         sTiming[sTimingNext].frame = sFrameCount - 1;
         sTiming[sTimingNext].gapUs = sLastEndTick != 0 ? (unsigned int) ((now - sLastEndTick) / (SYSCLOCK_ARM11 / 1000000)) : 0;
         sTiming[sTimingNext].gpuUs = (unsigned int) (C3D_GetDrawingTime() * 1000.0f);
-        memcpy(sTiming[sTimingNext].note, (const char *) gPlatGameNote, sizeof(sTiming[0].note));
-        sTiming[sTimingNext].note[sizeof(sTiming[0].note) - 1] = '\0';
+        sTiming[sTimingNext].swaps = swaps - lastSwaps;
+        sTiming[sTimingNext].replaced = replaced - lastReplaced;
+        sTiming[sTimingNext].swapGapUs = sSwapGapUs;
+        sTiming[sTimingNext].haveNote = plat_get_game_note(&sTiming[sTimingNext].note);
         sTimingNext = (sTimingNext + 1) % TIMING_FRAMES;
     }
+    lastSwaps = swaps;
+    lastReplaced = replaced;
     sLastEndTick = now;
 }
 
 static void log_timing(void) {
     int i;
-    plat_log("last %d frames (time since the previous frame ended, GPU time of the one before, player):", TIMING_FRAMES);
+    plat_log("last %d frames (CPU time since the previous frame ended, GPU time of the one before, top screen swaps "
+             "since then and the time between the last two, player):", TIMING_FRAMES);
     for (i = 0; i < TIMING_FRAMES; i++) {
         int k = (sTimingNext + i) % TIMING_FRAMES;
-        if (sTiming[k].frame > 0) {
-            plat_log("  frame %d: +%u.%u ms, gpu %u.%u ms, %s", sTiming[k].frame, sTiming[k].gapUs / 1000,
-                     sTiming[k].gapUs / 100 % 10, sTiming[k].gpuUs / 1000, sTiming[k].gpuUs / 100 % 10, sTiming[k].note);
+        char note[80];
+        if (sTiming[k].frame < 0) {
+            continue;
         }
+        if (sTiming[k].haveNote) {
+            plat_format_game_note(&sTiming[k].note, note, sizeof(note));
+        } else {
+            plat_snprintf(note, sizeof(note), "(player note busy)");
+        }
+        plat_log("  frame %d: +%u.%u ms, gpu %u.%u ms, %u swap%s +%u.%u ms%s, %s", sTiming[k].frame,
+                 sTiming[k].gapUs / 1000, sTiming[k].gapUs / 100 % 10, sTiming[k].gpuUs / 1000,
+                 sTiming[k].gpuUs / 100 % 10, sTiming[k].swaps, sTiming[k].swaps == 1 ? "" : "s",
+                 sTiming[k].swapGapUs / 1000, sTiming[k].swapGapUs / 100 % 10,
+                 sTiming[k].replaced != 0 ? " (REPLACED one before it was shown)" : "", note);
     }
 }
 
@@ -972,20 +1019,27 @@ static void record_recent_frame(void) {
     GX_TextureCopy((u32 *) sRecentScreen, 0, (u32 *) slot, 0, bytes, GX_TRANSFER_RAW_COPY(1));
     sRecentFrame[sRecentNext] = sFrameCount - 1; // The frame just ended (sFrameCount already counts it).
     sRecentRows[sRecentNext] = sRecentScreenRows;
-    if (sRecentRight != NULL && bytes * 2 <= RECENT_MAX_BYTES) {
-        // In 3D the right eye goes after the left, so the saved picture shows the two side by side.
+    sRecentEyes[sRecentNext] = 1;
+    if (sRecentRight != NULL) {
+        // In 3D the right eye goes after the left, so the saved picture shows the two side by side. Each eye is 400
+        // rows then (find_recent_screen), so both always fit a slot.
         GX_TextureCopy((u32 *) sRecentRight, 0, (u32 *) (slot + bytes), 0, bytes, GX_TRANSFER_RAW_COPY(1));
         sRecentRows[sRecentNext] *= 2;
+        sRecentEyes[sRecentNext] = 2;
     }
     sRecentNext = (sRecentNext + 1) % sRecentCount;
 }
 
 /* How much a frame looks like it holds a bright vertical line: the most pixels in one screen column (a row here)
- * that are clearly brighter than the columns 3 to each side. */
-static int line_score(const u8 *pixels, int rows, int *where) {
-    int r, x, best = 0;
+ * that are clearly brighter than the columns 3 to each side. In 3D each eye is scored on its own, so rows at the
+ * edge of one eye are never compared with the other eye's. */
+static int line_score(const u8 *pixels, int rows, int eyes, int *where) {
+    int r, x, best = 0, eyeRows = rows / eyes;
     *where = -1;
     for (r = 3; r < rows - 3; r++) {
+        if (r % eyeRows < 3 || r % eyeRows >= eyeRows - 3) {
+            continue;
+        }
         const u8 *row = pixels + r * TOP_HEIGHT * 3, *left = row - 9 * TOP_HEIGHT, *right = row + 9 * TOP_HEIGHT;
         int count = 0;
         for (x = 0; x < TOP_HEIGHT; x++) {
@@ -1014,10 +1068,13 @@ static void save_recent_frames(int snapshotFrame) {
     for (i = 0; i < sRecentCount; i++) {
         score[i] = -1;
         if (sRecentFrame[i] >= 0) {
+            int eyeRows = sRecentRows[i] / sRecentEyes[i];
             GSPGPU_InvalidateDataCache(sRecent[i], sRecentRows[i] * TOP_HEIGHT * 3);
-            score[i] = line_score(sRecent[i], sRecentRows[i], &where[i]);
-            plat_log("recent frame %d: line score %d at column %d", sRecentFrame[i], score[i],
-                     where[i] < 0 ? -1 : where[i] * TOP_WIDTH / sRecentRows[i]);
+            score[i] = line_score(sRecent[i], sRecentRows[i], sRecentEyes[i], &where[i]);
+            // Columns are counted in the 400-pixel screen, whatever the render width.
+            plat_log("recent frame %d: line score %d at %scolumn %d", sRecentFrame[i], score[i],
+                     sRecentEyes[i] == 1 || where[i] < 0 ? "" : (where[i] < eyeRows ? "left eye, " : "right eye, "),
+                     where[i] < 0 ? -1 : (where[i] % eyeRows) * TOP_WIDTH / eyeRows);
         }
     }
     for (k = 0; k < RECENT_KEEP; k++) {
