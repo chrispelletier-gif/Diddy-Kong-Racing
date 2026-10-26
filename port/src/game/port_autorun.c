@@ -765,6 +765,11 @@ s32 port_autorun_active(void) {
     return sEnabled && sPhase != PHASE_OFF;
 }
 
+/* The switch bench's switches: 0 when it has nothing to test (the Test run menu says so). */
+s32 port_autorun_switch_count(void) {
+    return SWITCH_CONFIGS - 1;
+}
+
 /*
  * From any thread (the bottom screen's buttons): start the test run (1), the GPU benchmark (2), the quick test (3), the
  * boss fights (4) or the switch bench (5), or stop whichever is going (0), at the next game frame.
