@@ -3186,7 +3186,9 @@ void C3Di_UpdateContext(void);
  * lap, are cut down to a band twice the screen's size before they reach the GPU, as the N64 does (its guard band).
  * The 3DS's GPU can draw such triangles with stray lines of pixels, here a white line down the middle of the screen.
  * Flat draws are cut before gfx_flat_x widens them, which moves the texture a little only on what crosses the band.
- * Settings > Screen > Edge trimming Off (or DKR_GUARD_BAND=0) = old. */
+ * Off by default: the white line turned out to be the banana counter's sprite overrunning its display list (PR #136),
+ * and on hardware the trimmed triangles lost the hub's grass in Wide and Balanced (#147), though the cut is exact on
+ * the PC. Settings > Screen > Edge trimming On (or DKR_GUARD_BAND=1) turns it on. */
 #define GUARD_BAND 2.0f
 
 static volatile int sGuardBand = -1; // Settings > Screen > Edge trimming (settings.txt "guardband"), else DKR_GUARD_BAND
@@ -3250,7 +3252,7 @@ void plat_3ds_set_guard_band_setting(int on) {
 int plat_3ds_guard_band_setting(void) {
     if (sGuardBand < 0) {
         const char *env = plat_getenv("DKR_GUARD_BAND");
-        sGuardBand = settings_get("guardband", env == NULL || atoi(env) != 0) != 0;
+        sGuardBand = settings_get("guardband", env != NULL && atoi(env) != 0) != 0;
     }
     return sGuardBand;
 }
