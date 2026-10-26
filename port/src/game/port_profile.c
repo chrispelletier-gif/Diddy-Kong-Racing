@@ -2,8 +2,9 @@
  * Per-stage frame profiler (see plat/profile.h for the stages).
  *
  *   DKR_PROFILE=1   Shows the profiler on the bottom screen (updated every second) and logs a summary line every
- *                   few seconds. The unattended test run (DKR_AUTORUN) turns it on as well, and so does the
- *                   Settings menu's Profiler row on the bottom screen, which is remembered in profiler.txt in the data directory.
+ *                   few seconds. The Settings menu's Profiler row on the bottom screen does the same, and is
+ *                   remembered in profiler.txt in the data directory. The unattended test run (DKR_AUTORUN) profiles
+ *                   and logs too, but only shows the readout if one of those is on.
  * While it is off, every hook returns after one check.
  *
  * Each stage has exactly one writer thread, which keeps a running total in microseconds; readers take the difference
@@ -61,6 +62,7 @@ typedef struct Window {
 
 static Window sWindows[PROF_WINDOW_COUNT];
 static char sStatus[96];
+static s32 sOverlayShown; // The readout is on the bottom screen.
 static s32 sLogCounter;
 
 static void user_file_path(char *path, s32 size) {
@@ -310,7 +312,15 @@ static void show_overlay(void) {
                   s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                   s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0, s.counters[PROF_TEXTURE_UPLOADS],
                   sStatus);
-    plat_overlay_show(text);
+    if (sEnabled || sUserOn) {
+        sOverlayShown = TRUE;
+        plat_overlay_show(text);
+    } else if (sOverlayShown) {
+        // Only a test run is profiling: it still measures and logs, but the readout stays off (as the Settings menu
+        // says), so the bottom screen keeps the race HUD.
+        sOverlayShown = FALSE;
+        plat_overlay_show("");
+    }
     if (++sLogCounter % 4 == 0) {
         port_log("profile: %.1f fps (30fps %d%%), worst %u ms, logic %.2f scene %.2f rdp %.2f tex %.2f gpu %.2f "
                  "audio %.2f ms, limit %s, idle game core %d%% render core %d%%",
@@ -374,6 +384,7 @@ void prof_game_mark(int mark, int updateRate) {
             sGameThreadOn = FALSE;
             sWindows[PROF_WINDOW_OVERLAY].startNs = 0;
             sLastFrameEndNs = 0;
+            sOverlayShown = FALSE;
             plat_overlay_show("");
         }
         return;
