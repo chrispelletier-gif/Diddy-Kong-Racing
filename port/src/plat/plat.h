@@ -14,8 +14,9 @@ extern "C" {
 #endif
 
 /*
- * Whether the Settings menus offer the debug tools (profiler, test runs, bug reports, updates) and the performance
- * switches. A player's build (make RELEASE=1) leaves them out and the switches keep their defaults; the code stays in.
+ * Whether the build has the debug tools (profiler, test runs, bug reports, updates, the reference renderer) and its
+ * Settings menus the performance switches. A player's build (make RELEASE=1) leaves the tools out altogether (see the
+ * Makefile and src/release/) and the switches keep their defaults.
  */
 #ifdef PORT_RELEASE
 #define PLAT_DEBUG_TOOLS 0
@@ -239,6 +240,8 @@ int plat_60fps_setting(void);
 void plat_set_60fps_setting(int on);
 /* The build's version (git describe), as bug reports show it; "host" for a host build without one. */
 const char *plat_build_version(void);
+/* The version players see, from the newest version tag (port/Makefile): "0.1.0-beta", "0.1.0-beta+3" or "dev". */
+const char *plat_version(void);
 /* How the sound is being made, for the test runs' results (e.g. "sys/22k/smooth"; "host" on the host). */
 const char *plat_audio_setup(void);
 

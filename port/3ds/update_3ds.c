@@ -8,18 +8,23 @@
  * the running one, checked against its size and sha256, and then replaces it; the new build runs the next time the
  * game starts. For a private repository the token in sdmc:/3ds/dkr/bugreport.txt (the bug report one) is used; it
  * needs read access to the repository's contents.
+ *
+ * The rest of the bottom screen's panel lives here too. A player's build (plat.h PLAT_DEBUG_TOOLS) has the panel but
+ * no updater, and so neither curl nor mbedtls.
  */
 #include <3ds.h>
-#include <curl/curl.h>
-#include <mbedtls/sha256.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "menu_3ds.h"
-#include "net_3ds.h"
 #include "plat/plat.h"
+#if PLAT_DEBUG_TOOLS
+#include <curl/curl.h>
+#include <mbedtls/sha256.h>
+#include "net_3ds.h"
+#endif
 
 #ifndef PORT_BUILD_VERSION
 #define PORT_BUILD_VERSION "unknown"
@@ -164,6 +169,7 @@ static void show_busy(const char *fmt, ...) {
     plat_3ds_panel_text(text);
 }
 
+#if PLAT_DEBUG_TOOLS
 static void load_config(Config *config) {
     unsigned int size;
     char *text = plat_load_file(CONFIG_PATH, &size), *line, *next;
@@ -581,6 +587,20 @@ static int install(Channel *channel) {
     plat_status("It runs the next time the game starts.");
     return 1;
 }
+
+#else
+static int check(void) {
+    return 0;
+}
+
+static void draw_choices(void) {
+}
+
+static int install(Channel *channel) {
+    (void) channel;
+    return 0;
+}
+#endif
 
 /* The touch screen, from the game's controller polling (input_3ds.c). Returns nonzero if the touch was a button. */
 int update_3ds_touch(int x, int y) {
