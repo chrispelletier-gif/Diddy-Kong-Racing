@@ -96,6 +96,9 @@ tested. The N64 decompilation this is built on is described in [doc/decompilatio
 - The Diddy Kong Racing decompilation project and its contributors, whose work this port is built on.
 - [devkitPro](https://devkitpro.org/), libctru and citro3d, and the other libraries listed in [NOTICE.md](NOTICE.md).
 
+Much of the 3DS port's code was written with AI assistance ([Claude Code](https://claude.com/claude-code)), and
+every build is tested on a real New 3DS.
+
 This project is not affiliated with or endorsed by Nintendo or Rare. Diddy Kong Racing and its characters are
 trademarks of their respective owners. No game assets are distributed here; you need your own legally obtained copy
 of the game. The 3DS port is under the MIT License and the decompilation under CC0 (see [LICENSE.md](LICENSE.md)); the libraries
