@@ -213,6 +213,13 @@ float plat_camera_fov(float fovy);
 /* What the style multiplies tan(fovy / 2) by: 1 for Wide, below 1 for the narrower ones (plat_camera_fov). */
 float plat_fov_tan_scale(void);
 /*
+ * The camera's near plane (src/camera.h CAMERA_NEAR): the N64's 10, or 2.5 in widescreen, whose wider picture shows
+ * rock faces right beside the camera that 4:3 never reached. With 16-bit buffers widescreen keeps 10: a 16-bit depth
+ * buffer has 4 times too little precision at a distance with 2.5, and distant doors and signs flickered against the
+ * walls behind them (Dragon Forest hub). Decal pulls and billboards' depth offsets scale with it.
+ */
+float plat_camera_near(void);
+/*
  * Widescreen HUD placement (Settings > Screen > HUD, settings.txt "hudedges", else DKR_HUD_EDGES, on by default): 1
  * moves the race HUD's left and right pieces out to the wide screen's edges (src/game_ui.c), 0 keeps it in the 4:3
  * middle.

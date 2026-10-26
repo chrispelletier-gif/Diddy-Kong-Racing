@@ -127,7 +127,12 @@ int plat_antialias(void) {
 }
 
 int plat_fb16(void) {
-    return sFb16;
+    // DKR_FB16=1 previews the 3DS's 16-bit buffers where the game cares (the near plane, plat_camera_near).
+    static int sEnv = -1;
+    if (sEnv < 0) {
+        sEnv = getenv("DKR_FB16") != NULL && atoi(getenv("DKR_FB16")) != 0;
+    }
+    return sFb16 || sEnv;
 }
 
 static void *thread_entry(void *arg) {

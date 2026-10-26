@@ -881,16 +881,18 @@ void viewport_scissor(Gfx **dList) {
 
 #ifdef TARGET_PORT
 /**
- * Widescreen in the port: rebuilds the perspective matrix when the camera's aspect ratio or field of view setting
- * changes.
+ * Widescreen in the port: rebuilds the perspective matrix when the camera's aspect ratio, field of view setting or
+ * near plane (which 16-bit buffers change) changes.
  */
 static void cam_port_update_aspect(void) {
-    static f32 sAspect = 1.0f, sFov = -1.0f;
+    static f32 sAspect = 1.0f, sFov = -1.0f, sNear = 10.0f;
     f32 aspect = plat_aspect_scale();
     f32 fov = CAMERA_FOV(gCurCamFOV);
-    if (aspect != sAspect || fov != sFov) {
+    f32 near = CAMERA_NEAR;
+    if (aspect != sAspect || fov != sFov || near != sNear) {
         sAspect = aspect;
         sFov = fov;
+        sNear = near;
         guPerspectiveF(gPerspectiveMatrixF, &perspNorm, fov, CAMERA_ASPECT, CAMERA_NEAR, CAMERA_FAR,
                        CAMERA_SCALE);
         mtxf_to_mtx(&gPerspectiveMatrixF, &gPerspectiveMatrix);

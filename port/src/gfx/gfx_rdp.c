@@ -1018,15 +1018,15 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     // or a menu's orthographic matrix (the Save Options balloons, the banana counter), the flat 4:3 picture, where
     // they never stretch to a wide screen's edge as they pass the N64 one (GFX_FLAT_PLACED).
     // Their depth offsets too are sized for the N64's camera, whose near plane is at 10: widescreen's nearer one (2.5,
-    // CAMERA_NEAR in src/camera.h) maps the same clip-space offset to 4 times the depth, which stood Player Select's
-    // bushes in front of the log they grow behind. So in widescreen the offset past the anchor's depth (the depth
-    // offset less the matrix's z scale, about 1, that comes with the vertex's extra w of 1) is scaled by 2.5 / 10.
+    // plat_camera_near) maps the same clip-space offset to 4 times the depth, which stood Player Select's bushes in
+    // front of the log they grow behind. So the offset past the anchor's depth (the depth offset less the matrix's z
+    // scale, about 1, that comes with the vertex's extra w of 1) is scaled by the near plane / 10.
     float bbScaleY = 1.0f, bbScaleX = 1.0f, bbScaleZ = 1.0f;
     u8 bbFlat = g.verts[0].flat ? GFX_FLAT_PLACED : 0;
     if (g.billboard && !bbFlat) {
         bbScaleY = 1.0f / plat_fov_tan_scale();
         bbScaleX = bbScaleY / plat_aspect_scale();
-        bbScaleZ = plat_aspect_scale() > 1.0f ? 2.5f / 10.0f : 1.0f;
+        bbScaleZ = plat_camera_near() / 10.0f;
     }
 
     if (gGfxSweep) {
