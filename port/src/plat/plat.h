@@ -206,6 +206,13 @@ float plat_fov_tan_scale(void);
  */
 void plat_set_zoomed_view(int on);
 int plat_zoomed_view(void);
+/*
+ * Widescreen HUD placement (Settings > Screen > HUD, settings.txt "hudedges", else DKR_HUD_EDGES, on by default): 1
+ * moves the race HUD's left and right pieces out to the wide screen's edges (src/game_ui.c), 0 keeps it in the 4:3
+ * middle.
+ */
+int plat_hud_edges(void);
+void plat_set_hud_edges(int on);
 int plat_fb16(void);
 /*
  * The frame rate cap (roadmap G6): the scheduler hands the game each finished frame after 2 retraces (30 fps, the

@@ -28,6 +28,14 @@
 
 UNUSED s32 D_800E1E60 = 0;
 
+#ifdef TARGET_PORT
+static s32 hud_edge_shift(f32 screenX);
+// Widescreen: how far a HUD piece at screenX moves out to the screen's edge (hud_edge_shift).
+#define HUD_EDGE_SHIFT(screenX) hud_edge_shift(screenX)
+#else
+#define HUD_EDGE_SHIFT(screenX) 0
+#endif
+
 // clang-format off
 // Base positions of all onscreen hud elements
 HudElement gHudElementBase[HUD_ELEMENT_COUNT] = {
@@ -2567,14 +2575,14 @@ void hud_finish_position(Object_Racer *racer) {
             set_text_font(FONT_COLOURFUL);
             if (racerCount != racer->finishPosition) {
                 set_text_colour(255, 255, 255, 0, 255);
-                draw_text(&gHudDL, gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.x - FINISH_TEXT_OFFSET,
+                draw_text(&gHudDL, gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.x - FINISH_TEXT_OFFSET + HUD_EDGE_SHIFT(gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.x),
                           gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.y, "RACE", ALIGN_TOP_LEFT);
                 hud_timer_render(gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.x + FINISH_TIME_OFFSET,
                                  gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.y,
                                  gCurrentHud->entry[HUD_RACE_TIME_NUMBER].timer.minutes,
                                  gCurrentHud->entry[HUD_RACE_TIME_NUMBER].timer.seconds,
                                  gCurrentHud->entry[HUD_RACE_TIME_NUMBER].timer.hundredths, 1);
-                draw_text(&gHudDL, gCurrentHud->entry[HUD_LAP_TIME_TEXT].pos.x - FINISH_TEXT_OFFSET,
+                draw_text(&gHudDL, gCurrentHud->entry[HUD_LAP_TIME_TEXT].pos.x - FINISH_TEXT_OFFSET + HUD_EDGE_SHIFT(gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.x),
                           gCurrentHud->entry[HUD_LAP_TIME_TEXT].pos.y, "LAP", ALIGN_TOP_LEFT);
                 hud_timer_render(gCurrentHud->entry[HUD_LAP_TIME_TEXT].pos.x + FINISH_TIME_OFFSET,
                                  gCurrentHud->entry[HUD_LAP_TIME_TEXT].pos.y,
@@ -2582,7 +2590,7 @@ void hud_finish_position(Object_Racer *racer) {
                                  gCurrentHud->entry[HUD_LAP_TIME_TEXT].timer.seconds,
                                  gCurrentHud->entry[HUD_LAP_TIME_TEXT].timer.hundredths, 1);
             } else {
-                draw_text(&gHudDL, gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.x - 35,
+                draw_text(&gHudDL, gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.x - 35 + HUD_EDGE_SHIFT(gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.x),
                           gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.y, DID_NOT_FINISH, ALIGN_TOP_LEFT);
             }
         }
@@ -3228,6 +3236,74 @@ void hud_race_time(Object_Racer *racer, s32 updateRate) {
  * Render a time in minutes, seconds and hundredths of a second.
  * Supports a smaller font for multiplayer.
  */
+#ifdef TARGET_PORT
+int plat_hud_edges(void);
+
+/**
+ * Widescreen's "HUD: Screen edges" setting: with one or two players (whose views are the screen's width), the HUD
+ * pieces on the left half of the N64's picture move out by the wide screen's margin to its left edge, and those on the
+ * right half to its right edge. Each moves whole, so nothing is stretched. screenX is the piece's place on the 320
+ * pixel screen.
+ */
+static s32 hud_edge_shift(f32 screenX) {
+    s32 margin;
+    if (gHUDNumPlayers > TWO_PLAYERS || !plat_hud_edges()) {
+        return 0;
+    }
+    margin = (s32) ((SCREEN_WIDTH / 2) * (plat_aspect_scale() - 1.0f) + 0.5f);
+    return screenX < SCREEN_WIDTH / 2 ? -margin : margin;
+}
+
+/**
+ * hud_edge_shift for one of the current HUD's elements: by where it sits, but none for the pieces that sweep across
+ * the middle (GET READY, the lap and finish banners) or follow the world (the magnet's reticle). The minimap's dots go
+ * with the map, and one player's banana count, in the middle, stays.
+ */
+static s32 hud_element_edge_shift(HudElement *hud) {
+    s32 id;
+    f32 x;
+    if (hud < &gCurrentHud->entry[0] || hud >= &gCurrentHud->entry[HUD_ELEMENT_COUNT]) {
+        return 0; // The timer's digits (hud_timer_render) and other one-off pieces move on their own.
+    }
+    id = hud - &gCurrentHud->entry[0];
+    switch (id) {
+        case HUD_RACE_START_GO:
+        case HUD_RACE_START_READY:
+        case HUD_RACE_END_FINISH:
+        case HUD_MAGNET_RETICLE:
+        case HUD_LAP_TEXT_FINAL:
+        case HUD_LAP_TEXT_LAP:
+        case HUD_LAP_TEXT_TWO:
+        case HUD_WRONGWAY_1:
+        case HUD_WRONGWAY_2:
+        case HUD_PRO_AM_LOGO:
+        case HUD_CHALLENGE_FINISH_POS_1:
+        case HUD_CHALLENGE_FINISH_POS_2:
+        case HUD_RACE_FINISH_POS_1:
+        case HUD_RACE_FINISH_POS_2:
+            return 0;
+        case HUD_MINIMAP_MARKER:
+            return hud_edge_shift(gMinimapScreenX + SCREEN_WIDTH / 2);
+        case HUD_BANANA_COUNT_ICON_SPIN:
+        case HUD_BANANA_COUNT_ICON_STATIC:
+        case HUD_BANANA_COUNT_SPARKLE:
+        case HUD_BANANA_COUNT_X:
+        case HUD_BANANA_COUNT_NUMBER_1:
+        case HUD_BANANA_COUNT_NUMBER_2:
+            if (gHUDNumPlayers == ONE_PLAYER) {
+                return 0;
+            }
+            break;
+    }
+    // Texture rectangles are placed by their left edge on the screen; sprites and models from its middle.
+    x = hud->pos.x;
+    if ((gAssetHudElementIds[hud->spriteID] & ASSET_MASK_TEXTURE) != ASSET_MASK_TEXTURE) {
+        x += SCREEN_WIDTH / 2;
+    }
+    return hud_edge_shift(x);
+}
+#endif
+
 void hud_timer_render(s32 x, s32 y, s32 minutes, s32 seconds, s32 hundredths, s32 smallFont) {
     UNUSED s32 pad;
     HudElementBase entry;
@@ -3260,6 +3336,9 @@ void hud_timer_render(s32 x, s32 y, s32 minutes, s32 seconds, s32 hundredths, s3
         numbers = HUD_ASSET_NUMBERS_SMALL;
         seperator = HUD_ASSET_SEPERATOR_SMALL; // :
     }
+#ifdef TARGET_PORT
+    entry.x += hud_edge_shift(x);
+#endif
     entry.spriteID = numbers;
     entry.spriteOffset = minutes / 10;
     hud_element_render(&gHudDL, &gHudMtx, &gHudVtx, (HudElement *) &entry);
@@ -3644,6 +3723,9 @@ void hud_render_general(Gfx **dList, Mtx **mtx, Vertex **vtx, s32 updateRate) {
     }
     sprite_opaque(FALSE);
     hudElem.pos.x = gMinimapScreenX + gHudOffsetX + gHudBounceX;
+#ifdef TARGET_PORT
+    hudElem.pos.x += hud_edge_shift(gMinimapScreenX + SCREEN_WIDTH / 2);
+#endif
     hudElem.pos.y = gMinimapScreenY;
     if (osTvType == OS_TV_TYPE_PAL) {
         hudElem.pos.x -= 4.0f;
@@ -3828,6 +3910,9 @@ void hud_element_render(Gfx **dList, Mtx **mtx, Vertex **vtxList, HudElement *hu
     HudDrawTexture sp58;
     UNUSED s32 pad3;
     HudDrawTexture sp48;
+#ifdef TARGET_PORT
+    s32 edgeShift;
+#endif
     Sprite *sprite;
     UNUSED s32 pad4[2];
     s32 spriteElementId;
@@ -3868,6 +3953,10 @@ void hud_element_render(Gfx **dList, Mtx **mtx, Vertex **vtxList, HudElement *hu
     gHudDL = *dList;
     gHudMtx = *mtx;
     gHudVtx = *vtxList;
+#ifdef TARGET_PORT
+    edgeShift = hud_element_edge_shift(hud);
+    hud->pos.x += edgeShift;
+#endif
     spriteID = hud->spriteID;
     if (spriteID != HUD_SPEEDOMETRE_30) {
         if (spriteID != HUD_RACE_END_FINISH && spriteID != HUD_BANANA_COUNT_ICON_STATIC &&
@@ -3988,6 +4077,9 @@ void hud_element_render(Gfx **dList, Mtx **mtx, Vertex **vtxList, HudElement *hu
         }
         hud->pos.x -= gHudOffsetX + gHudBounceX;
     }
+#ifdef TARGET_PORT
+    hud->pos.x -= edgeShift;
+#endif
     *dList = gHudDL;
     *mtx = gHudMtx;
     *vtxList = gHudVtx;

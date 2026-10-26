@@ -337,6 +337,21 @@ int plat_60fps_setting(void) {
     return sFps60Setting;
 }
 
+static int sHudEdges = -1;
+
+int plat_hud_edges(void) {
+    if (sHudEdges < 0) {
+        const char *env = plat_getenv("DKR_HUD_EDGES");
+        sHudEdges = settings_get("hudedges", env != NULL ? atoi(env) != 0 : 1) != 0;
+    }
+    return sHudEdges;
+}
+
+void plat_set_hud_edges(int on) {
+    sHudEdges = on != 0;
+    settings_set("hudedges", sHudEdges);
+}
+
 static int sZoomedView;
 
 void plat_set_zoomed_view(int on) {

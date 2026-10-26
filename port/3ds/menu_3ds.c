@@ -190,16 +190,17 @@ static void main_change(int i, int step) {
 
 static const MenuPage sMainPage = { "Settings", main_count, main_label, main_value, main_change, main_hint, NULL };
 
-/* The top screen (roadmap phase 6, gfx_c3d.c): widescreen, the 800 pixel mode and stereo 3D, each on or off, and
- * edge trimming (the guard band clip, a test toggle for the blue patches in widescreen, issue #147). */
-enum { SCREEN_GUARD_BAND = 3 };
+/* The top screen (roadmap phase 6, gfx_c3d.c): widescreen, the 800 pixel mode and stereo 3D, each on or off, where
+ * widescreen puts the race HUD (plat_hud_edges), and edge trimming (the guard band clip, a test toggle for the blue
+ * patches in widescreen, issue #147). */
+enum { SCREEN_HUD = 3, SCREEN_GUARD_BAND = 4 };
 
 static int screen_count(void) {
-    return 4;
+    return 5;
 }
 
 static const char *screen_label(int i) {
-    static const char *const sLabels[4] = { "Widescreen", "800 pixels", "Stereo 3D", "Edge trimming" };
+    static const char *const sLabels[5] = { "Widescreen", "800 pixels", "Stereo 3D", "HUD", "Edge trimming" };
     return sLabels[i];
 }
 
@@ -208,6 +209,8 @@ static const char *const sWideStyles[4] = { "Off", "Wide", "Balanced", "Zoomed" 
 static void screen_value(int i, char *out, int size) {
     if (i == 0) {
         snprintf(out, size, "%s", sWideStyles[plat_3ds_screen_setting(0)]);
+    } else if (i == SCREEN_HUD) {
+        snprintf(out, size, "%s", plat_hud_edges() ? "Screen edges" : "4:3");
     } else if (i == SCREEN_GUARD_BAND) {
         snprintf(out, size, "%s", plat_3ds_guard_band_setting() ? "On" : "Off");
     } else {
@@ -222,6 +225,8 @@ static const char *screen_hint(int i) {
         return sHints[plat_3ds_screen_setting(0)];
     } else if (i == 1) {
         return plat_3ds_wide800_supported() ? "Sharper picture while 3D is off" : "Not on this console (2DS)";
+    } else if (i == SCREEN_HUD) {
+        return plat_hud_edges() ? "Widescreen HUD out at the sides" : "Widescreen HUD in the 4:3 middle";
     } else if (i == SCREEN_GUARD_BAND) {
         return "Cuts triangles far off screen (test)";
     }
@@ -231,6 +236,8 @@ static const char *screen_hint(int i) {
 static void screen_change(int i, int step) {
     if (i == 0) {
         plat_3ds_set_screen_setting(0, (plat_3ds_screen_setting(0) + step + 4) % 4);
+    } else if (i == SCREEN_HUD) {
+        plat_set_hud_edges(!plat_hud_edges());
     } else if (i == SCREEN_GUARD_BAND) {
         plat_3ds_set_guard_band_setting(!plat_3ds_guard_band_setting());
     } else {
