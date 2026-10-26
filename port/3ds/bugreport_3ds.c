@@ -21,6 +21,7 @@
 #include "plat/bugreport.h"
 #include "plat/plat.h"
 #include "net_3ds.h"
+#include "audio/voices.h"
 
 #ifndef PORT_BUILD_VERSION
 #define PORT_BUILD_VERSION "unknown"
@@ -313,6 +314,9 @@ static void build_body(Report *report, const char *crashText, const char *recent
             gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]);
         ADD("**Free memory:** gpu %lu KB, heap %lu KB\n", (unsigned long) (linearSpaceFree() / 1024),
             (unsigned long) ((info.fordblks + (__ctru_heap_size - info.arena)) / 1024));
+        if (pv_active()) {
+            ADD("**Voices:** %s\n", pv_status());
+        }
     }
     if (report->extra != NULL) {
         ADD("\n### Test run\n\n%s\n", report->extra);
