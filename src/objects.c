@@ -43,6 +43,7 @@
 #ifdef TARGET_PORT
 #include "port.h"
 #endif
+#include "port_step.h"
 
 #define OBJECT_MAP_SIZE 0x3000
 #define MAX_CHECKPOINTS 60
@@ -3631,9 +3632,9 @@ void render_3d_model(Object *obj) {
                     vtxX = obj->curVertData[objModel->attachPoints[index]].x;
                     vtxY = obj->curVertData[objModel->attachPoints[index]].y;
                     vtxZ = obj->curVertData[objModel->attachPoints[index]].z;
-                    loopObj->trans.x_position += (vtxX - loopObj->trans.x_position) * 0.25;
-                    loopObj->trans.y_position += (vtxY - loopObj->trans.y_position) * 0.25;
-                    loopObj->trans.z_position += (vtxZ - loopObj->trans.z_position) * 0.25;
+                    loopObj->trans.x_position += (vtxX - loopObj->trans.x_position) * PORT_LERP(0.25); //!@Delta
+                    loopObj->trans.y_position += (vtxY - loopObj->trans.y_position) * PORT_LERP(0.25);
+                    loopObj->trans.z_position += (vtxZ - loopObj->trans.z_position) * PORT_LERP(0.25);
                     if (loopObj->header->modelType == OBJECT_MODEL_TYPE_SPRITE_BILLBOARD) {
                         render_sprite_billboard(&gObjectCurrDisplayList, &gObjectCurrMatrix, &gObjectCurrVertexList,
                                                 loopObj, something, flags);
