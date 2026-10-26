@@ -148,7 +148,7 @@ typedef struct BenchSwitch {
  * the picture. The white-line diagnostics (P28) were measured once (about 1 ms of GPU time a frame) and are off for
  * good. */
 static const BenchSwitch sSwitches[] = {
-    { "command list splits off (P19)", { "DKR_GPU_SPLIT", NULL }, 1, 0 },
+    { "command list splits on (old default, P19)", { "DKR_GPU_SPLIT", NULL }, 0, 1 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches) + 1) // The usual settings, then each switch flipped
 #define MAX_CONFIGS 16
