@@ -11,11 +11,11 @@ in-game models, for the bottom screen.
    | Subject | Command |
    |---|---|
    | Tricky  | `cap.sh boss38 180 70 90 DKR_PORTRAIT=boss DKR_AUTORUN=1 DKR_AUTORUN_BOSS=1 DKR_AUTORUN_BOSS_TRACKS=38` |
-   | Bluey   | `cap.sh bluey7 150 68 180 ... DKR_AUTORUN_BOSS_TRACKS=1 DKR_DUMP_EVERY=25` (frame 1350, three-quarter view) |
+   | Bluey   | `cap.sh blueyA 170 95 145 ... DKR_AUTORUN_BOSS_TRACKS=1 DKR_PORTRAIT_PITCH=12 DKR_DUMP_EVERY=25` (frame 1575, semi-angled) |
    | Bubbler | `cap.sh bubbler3 220 50 270 ... DKR_AUTORUN_BOSS_TRACKS=40` |
-   | Smokey  | `cap.sh smokey3 110 65 0 ... DKR_AUTORUN_BOSS_TRACKS=41` |
-   | Wizpig  | `cap.sh wizpig 130 105 90 ... DKR_AUTORUN_BOSS_TRACKS=37` |
-   | Taj     | `cap.sh taj4 85 75 180 DKR_PORTRAIT=taj DKR_WARP=0 DKR_WARP_SECONDS=60` |
+   | Smokey  | `cap.sh smokeyC 120 70 345 ... DKR_AUTORUN_BOSS_TRACKS=41 DKR_PORTRAIT_PITCH=8 DKR_DUMP_EVERY=25` (frame 1475) |
+   | Wizpig  | `cap.sh wizpig2 130 105 90 ... DKR_AUTORUN_BOSS_TRACKS=37` (frame 1400) |
+   | Taj     | `cap.sh tajB 170 45 225 DKR_PORTRAIT=taj DKR_WARP=0 DKR_WARP_SECONDS=60 DKR_DUMP_EVERY=25` (frame 1575, full body) |
 
 3. `portraits.py OUT` keys out the background (key.py), keeps the largest shape, crops each head (boxes in
    `SUBJECTS`) and frames it like the ROM's portraits.

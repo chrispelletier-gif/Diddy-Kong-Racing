@@ -8,6 +8,7 @@
  *   DKR_PORTRAIT_YAW=n                 Turns the camera around it, in degrees (default 0; the bosses face it at
  *                                      about 90, see port/tools/portraits).
  *   DKR_PORTRAIT_LOOK=n                Which way the camera looks, in degrees from its own direction (default 180).
+ *   DKR_PORTRAIT_PITCH=n               Tilts the camera up or down, in degrees (default 0, level).
  *
  * While it is on, the track, the sky and every other object are left out, so the frame (DKR_DUMP_EVERY) is the model
  * alone on the clear colour, which the portrait script keys out.
@@ -23,7 +24,7 @@
 #include "plat/plat.h"
 
 static s32 sMode = -1; // 0 off, 1 boss, 2 Taj, 3 player.
-static s32 sDist = 80, sHeight = 30, sYaw = 0, sLook = 0x8000;
+static s32 sDist = 80, sHeight = 30, sYaw = 0, sLook = 0x8000, sPitch = 0;
 
 static s32 setting(const char *name, s32 fallback) {
     const char *value = plat_getenv(name);
@@ -38,6 +39,7 @@ static s32 mode(void) {
         sHeight = setting("DKR_PORTRAIT_HEIGHT", 30);
         sYaw = setting("DKR_PORTRAIT_YAW", 0) * 0x10000 / 360;
         sLook = setting("DKR_PORTRAIT_LOOK", 180) * 0x10000 / 360;
+        sPitch = setting("DKR_PORTRAIT_PITCH", 0) * 0x10000 / 360;
     }
     return sMode;
 }
@@ -90,7 +92,7 @@ void port_portrait_camera(Camera *cam) {
     cam->trans.z_position = obj->trans.z_position + coss_f(-yaw) * sDist;
     cam->trans.y_position = obj->trans.y_position + sHeight;
     cam->trans.rotation.y_rotation = yaw + sLook;
-    cam->trans.rotation.x_rotation = 0;
+    cam->trans.rotation.x_rotation = sPitch;
     cam->trans.rotation.z_rotation = 0;
     cam->pitch = 0;
 }

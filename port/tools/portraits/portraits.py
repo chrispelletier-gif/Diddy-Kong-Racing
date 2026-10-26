@@ -4,15 +4,15 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from key import key
-from PIL import Image, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 H = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../assets/.vanilla/us.v77/textures/2d/hud/')
 SUBJECTS = {
-    'tricky': ('boss38/frame_01400.png', (80, 114, 170, 204)),
-    'bluey': ('bluey7/frame_01350.png', (78, 114, 163, 199)),
-    'bubbler': ('bubbler3/frame_01250.png', (110, 96, 220, 206)),
-    'smokey': ('smokey3/frame_01250.png', (140, 38, 250, 148)),
-    'wizpig': ('wizpig/frame_01400.png', (105, 52, 225, 172)),
-    'taj': ('taj4/frame_01250.png', (126, 90, 200, 164)),
+    'tricky': ('boss38/frame_01400.png', (66, 98, 184, 216)),
+    'bluey': ('blueyA/frame_01575.png', (86, 68, 181, 163)),
+    'bubbler': ('bubbler3/frame_01250.png', (92, 60, 242, 210)),
+    'smokey': ('smokeyC/frame_01475.png', (105, 8, 215, 118)),
+    'wizpig': ('wizpig2/frame_01400.png', (95, 45, 225, 175)),
+    'taj': ('tajB/frame_01575.png', (97, 56, 223, 182)),
 }
 
 
@@ -46,6 +46,27 @@ def largest(k):
     return out
 
 
+def retouch(crop):
+    """Toward the ROM portraits' look: brighter fill light, richer colour, crisp edges and a dark outline."""
+    big = crop.resize((144, 144), Image.LANCZOS)
+    a = big.getchannel('A')
+    rgb = big.convert('RGB').filter(ImageFilter.MedianFilter(3))
+    rgb = ImageOps.autocontrast(rgb, cutoff=1, preserve_tone=True)
+    rgb = ImageEnhance.Color(rgb).enhance(1.35)
+    rgb = rgb.point(lambda v: int(255 * ((v / 255) ** 0.8)))
+    # Ink where the shading changes sharply (horn edges, eyes), as drawn art has.
+    edges = rgb.convert('L').filter(ImageFilter.FIND_EDGES).point(lambda v: 0 if v < 40 else min(160, v))
+    ink = Image.new('RGB', rgb.size, (30, 12, 20))
+    rgb = Image.composite(ink, rgb, edges)
+    rgb = rgb.filter(ImageFilter.UnsharpMask(radius=2, percent=90, threshold=3))
+    out = rgb.convert('RGBA')
+    out.putalpha(a)
+    rim = Image.new('RGBA', out.size, (20, 10, 40, 0))
+    rim.putalpha(a.filter(ImageFilter.MaxFilter(9)).point(lambda v: 255 if v > 128 else 0))
+    rim.alpha_composite(out)
+    return rim
+
+
 def frame_like_original(subject):
     base = Image.open(H + 'diddy_icon.png').convert('RGBA')
     out = base.copy()
@@ -70,6 +91,6 @@ if __name__ == '__main__':
     for name, (path, box) in SUBJECTS.items():
         k = largest(key(path))
         crop = k.crop(box)
-        frame_like_original(crop).save(out + '/' + name + '_icon.png')
-        crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS).save(out + '/' + name + '_large.png')
+        frame_like_original(crop).save(out + '/' + name + '_plain.png')
+        frame_like_original(retouch(crop)).save(out + '/' + name + '_icon.png')
     print('ok')

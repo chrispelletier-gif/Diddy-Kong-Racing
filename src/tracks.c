@@ -412,7 +412,11 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         initialise_player_viewport_vars(updateRate);
         weather_clip_planes(-1, -512);
         // Show weather effects in single player.
-        if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2) {
+        if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2
+#ifdef TARGET_PORT
+            && !port_portrait_active()
+#endif
+        ) {
             weather_update(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, &gTrackTriPtr, tempUpdateRate);
         }
         lensflare_override(cam_get_active_camera());
