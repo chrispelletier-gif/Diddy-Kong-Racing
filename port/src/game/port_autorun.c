@@ -146,13 +146,15 @@ typedef struct BenchSwitch {
 
 /* Command list splits (P19) were measured and are off by default (#153), early depth (P20) was tried and dropped
  * (#155), and the white-line diagnostics (P28) are off for good. Now: textures in VRAM (P17), the depth clear as a
- * memory fill (P18), cache flushes as a system call (P24) and VFP vector vertex transforms (P27). The list ends with
- * an empty entry, so it may be otherwise empty (the bench then says there is nothing to test). */
+ * memory fill (P18), cache flushes as a system call (P24), VFP vector vertex transforms (P27) and the old per-draw
+ * settings path against the cheaper one (P23). The list ends with an empty entry, so it may be otherwise empty (the
+ * bench then says there is nothing to test). */
 static const BenchSwitch sSwitches[] = {
     { "textures in VRAM (P17)", { "DKR_TEX_VRAM", NULL }, 0, 1 },
     { "depth clear as a memory fill (P18)", { "DKR_DEPTH_FILL", NULL }, 0, 1 },
     { "cache flush as a system call (P24)", { "DKR_SVC_FLUSH", NULL }, 0, 1 },
     { "VFP vector vertex transforms (P27)", { "DKR_VFP_VECTORS", NULL }, 0, 1 },
+    { "per-draw settings the old way (P23 off)", { "DKR_FAST_STATE", NULL }, 1, 0 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

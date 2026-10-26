@@ -190,25 +190,7 @@ static void walk_begin(void) {
     if (!sWalkTimed) {
         return;
     }
-    if (sWalkReadCost == 0) {
-        // The fastest of a few tries, so a thread switch in one doesn't count.
-        s32 attempt;
-        for (attempt = 0; attempt < 8; attempt++) {
-            unsigned long long start = plat_ticks(), cost;
-            for (i = 0; i < 32; i++) {
-                (void) plat_ticks();
-            }
-            cost = (plat_ticks() - start) * 256 / 33;
-            if (attempt == 0 || cost < sWalkReadCost) {
-                sWalkReadCost = cost;
-            }
-        }
-        if (sWalkReadCost == 0) {
-            sWalkReadCost = 1;
-        }
-        plat_log("profiler: a clock read takes %llu ns",
-                 (sWalkReadCost * 1000000000ULL / 256) / plat_ticks_per_second());
-    }
+    sWalkReadCost = prof_clock_read_cost();
     for (i = 0; i < WALK_PART_COUNT; i++) {
         sWalkTicks[i] = 0;
         sWalkSpans[i] = 0;

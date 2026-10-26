@@ -7,6 +7,7 @@
 #include <3ds.h>
 #include <citro3d.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,8 +36,12 @@ typedef struct C3DContextStart {
     gxCmdQueue_s gxQueue;
     u32 *cmdBuf;
     size_t cmdBufSize;
+    float cmdBufUsage;
+    u32 flags; // Which groups of settings C3Di_UpdateContext writes next (citro3d's C3DiF_ bits, below)
 } C3DContextStart;
 extern C3DContextStart __C3D_Context;
+// Where citro3d's own code (C3D_TexBind) finds the flags.
+_Static_assert(offsetof(C3DContextStart, flags) == 32, "citro3d's context changed");
 /* Bytes of vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most
  * about 3000 triangles, 9000 vertices, a frame, which is 48K of the largest vertices. */
 #define VBO_BYTES (48 * 1024 * 48)
@@ -488,6 +493,9 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
 static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
 static void write_eye(float mul, float add);
+static void hand_over_draw_parts(void);
+/* citro3d's own function that writes the changed settings to the command list (not in its public header). */
+void C3Di_UpdateContext(void);
 
 static int sGpuTestStep;
 
@@ -2040,6 +2048,7 @@ static void wait_for_gpu(int measure) {
  */
 static int sSwitchEpoch = -1;
 static int sSplitMode, sEarlyDepth, sDepthFill;
+static int sFastState = 1; // DKR_FAST_STATE (roadmap P23): the cheaper per-draw settings path
 
 static void read_switches(void) {
     int recent, i;
@@ -2052,6 +2061,7 @@ static void read_switches(void) {
     sEarlyDepth = plat_switch("DKR_EARLY_DEPTH", 0) != 0;
     sSvcFlush = plat_switch("DKR_SVC_FLUSH", 0) != 0;
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 0) != 0;
+    sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -2062,9 +2072,10 @@ static void read_switches(void) {
         }
         sRecentOn = recent;
     }
-    plat_log("switches: command list split %s, line watch %d, recent frames %s (%d slots), early depth test %s",
+    plat_log("switches: command list split %s, line watch %d, recent frames %s (%d slots), early depth test %s, "
+             "settings path %s",
              sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes", sLineWatch,
-             sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off");
+             sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off", sFastState ? "short" : "full");
     plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s",
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
              plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off");
@@ -2221,6 +2232,7 @@ void gfxb_end_frame(void) {
     if (sFrameCount == sLogFrame && sSnapshotFrame >= 0) {
         save_command_list();
     }
+    hand_over_draw_parts();
     {
         static float sMaxUsage;
         FrameSlot *slot = &sSlots[sRec];
@@ -3443,6 +3455,23 @@ static void set_draw_state(const GfxDrawState *state) {
  * DKR_STATE_CACHE=2 leaves that out, for testing.
  */
 
+/*
+ * More than half of a race frame's draws differ from the draw before only in their textures (PC count, P23). For
+ * those the combiner, fog and draw settings below would only find again that nothing changed, so with DKR_FAST_STATE
+ * (the default) they are skipped: the draw is compared with the last one whose settings were all checked, which is
+ * kept here. The comparison leaves out the padding byte after fogEnabled. What else the settings depend on (colour
+ * boost, wide screen, 3D, early depth) only changes between frames, when the settings are forgotten anyway; the depth
+ * clear's sDepthOnly is compared too.
+ */
+static GfxDrawState sCheckedState;
+static int sCheckedDepthOnly;
+
+static int same_but_textures(const GfxDrawState *a, const GfxDrawState *b) {
+    return memcmp(a, b, offsetof(GfxDrawState, fogEnabled) + 1) == 0 && a->fogMul == b->fogMul &&
+           a->fogOffset == b->fogOffset && a->cullMode == b->cullMode && a->flat == b->flat &&
+           memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
+}
+
 /* Sets every GPU setting a draw uses. */
 static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
     static int sCache = -1;
@@ -3454,6 +3483,14 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
         plat_log("GPU settings: %s", sCache == 0   ? "all set for every draw"
                                      : sCache == 2 ? "only changes are set"
                                                    : "only changes are set, all draw settings with a new texture");
+    }
+    if (sFastState && sGpu.known && sDepthOnly == sCheckedDepthOnly && same_but_textures(state, &sCheckedState)) {
+        newTexture = bind_texture(0, state->textures[0], su0, sv0);
+        newTexture |= bind_texture(1, state->textures[1], su1, sv1);
+        if (newTexture && sCache == 1) {
+            C3D_CullFace((GPU_CULLMODE) sGpu.cull); // As below
+        }
+        return;
     }
     newTexture = bind_texture(0, state->textures[0], su0, sv0);
     newTexture |= bind_texture(1, state->textures[1], su1, sv1);
@@ -3468,10 +3505,34 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
         // It wrote the combiner stages itself.
         forget_gpu_state();
     }
+    sCheckedState = *state;
+    sCheckedDepthOnly = sDepthOnly;
 }
 
-/* citro3d's own function that writes the changed settings to the command list (not in its public header). */
-void C3Di_UpdateContext(void);
+/*
+ * citro3d's flags for the groups of settings that set_all_state sets when nothing is known (sGpu forgotten): the
+ * effect (blending, depth, culling), the scissor, the combiner buffer and fog, the texture units and the combiner
+ * stages. From citro3d's internal.h (C3DiF_Effect, _Scissor, _TexEnvBuf, _TexAll, _TexEnvAll).
+ */
+#define C3D_SETTINGS_FLAGS ((1u << 4) | (1u << 7) | (1u << 9) | (7u << 23) | (0x3Fu << 26))
+
+/*
+ * Writes all of a draw's settings now, and leaves them all marked for the draw to write a second time
+ * (drain_before_draw says why). The settings were all just set with nothing known. The full way sets them all again
+ * after the first write; the short way (DKR_FAST_STATE) puts back the flags the first write cleared, which marks the
+ * same groups with the same values, so the command list comes out the same for less work.
+ */
+static void write_settings_twice(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
+    if (sFastState) {
+        u32 again = __C3D_Context.flags & C3D_SETTINGS_FLAGS;
+        C3Di_UpdateContext();
+        __C3D_Context.flags |= again;
+        return;
+    }
+    C3Di_UpdateContext();
+    forget_gpu_state();
+    set_all_state(state, su0, sv0, su1, sv1);
+}
 
 /* Triangles reaching far off the screen, such as the "LAP 2" letters flying in from well past the right edge at each
  * lap, are cut down to a band twice the screen's size before they reach the GPU, as the N64 does (its guard band).
@@ -3627,6 +3688,43 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
 }
 
 /*
+ * The draws' parts (profile.h PROF_PART_BACKEND to _WRITE), timed while the profiler is on. They are kept in clock
+ * ticks and handed over at the end of the frame: converting a reading to nanoseconds takes three 64-bit divisions,
+ * which cost more than some of the parts (P23). As in the display list walk, each span between two readings holds
+ * about one reading's cost, which is taken back out of its part and, through PROF_PART_WALK_TIMER, of the renderer's.
+ */
+enum { DRAW_PART_BACKEND, DRAW_PART_CLIP, DRAW_PART_STATE, DRAW_PART_TWICE, DRAW_PART_WRITE, DRAW_PART_COUNT };
+static const int sDrawPartProf[DRAW_PART_COUNT] = { PROF_PART_BACKEND, PROF_PART_CLIP, PROF_PART_STATE,
+                                                     PROF_PART_STATE_TWICE, PROF_PART_WRITE };
+static unsigned long long sDrawPartTicks[DRAW_PART_COUNT];
+static unsigned int sDrawPartSpanReads[DRAW_PART_COUNT]; // Readings within each part's spans
+static unsigned int sDrawPartReads;                      // All the readings taken
+
+static inline void draw_part(int part, unsigned long long ticks, int reads) {
+    sDrawPartTicks[part] += ticks;
+    sDrawPartSpanReads[part] += reads;
+}
+
+static void hand_over_draw_parts(void) {
+    unsigned long long cost, perSecond;
+    int i;
+    if (sDrawPartReads == 0) {
+        return;
+    }
+    cost = prof_clock_read_cost();
+    perSecond = plat_ticks_per_second();
+    for (i = 0; i < DRAW_PART_COUNT; i++) {
+        unsigned long long reads = sDrawPartSpanReads[i] * cost / 256;
+        unsigned long long ticks = sDrawPartTicks[i] > reads ? sDrawPartTicks[i] - reads : 0;
+        prof_part(sDrawPartProf[i], ticks * 1000000000ULL / perSecond);
+        sDrawPartTicks[i] = 0;
+        sDrawPartSpanReads[i] = 0;
+    }
+    prof_part(PROF_PART_WALK_TIMER, sDrawPartReads * cost / 256 * 1000000000ULL / perSecond);
+    sDrawPartReads = 0;
+}
+
+/*
  * Indexed drawing (roadmap item P16): the frontend hands each vertex over once, however many triangles share it, so
  * it is converted and the GPU transforms it once. DKR_INDEXED=0 writes the triangles' corners one by one as before.
  */
@@ -3690,21 +3788,22 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     int first, vertex, count, fmt, flat = gfx_flat_mode(state), indexed = indexed_enabled();
     int vertBytes, written;
     u16 *ibo = NULL;
-    // Timed in parts while the profiler is on (prof_part); a tick read costs a system call.
-    int timed = prof_enabled();
+    // Timed in parts while the profiler is on (draw_part).
+    int timed = prof_enabled(), twiceReads = 0;
     unsigned long long t0 = 0, t1 = 0, t2 = 0, t3;
 
     if (timed) {
-        t0 = plat_time_ns();
+        t0 = plat_ticks();
     }
     clip_to_guard_band(&verts, &numVerts, &indices, &numTriangles);
     if (timed) {
-        t1 = plat_time_ns();
-        prof_part(PROF_PART_CLIP, t1 - t0);
+        t1 = plat_ticks();
+        draw_part(DRAW_PART_CLIP, t1 - t0, 1);
     }
     if (numTriangles == 0) {
         if (timed) {
-            prof_part(PROF_PART_BACKEND, t1 - t0);
+            draw_part(DRAW_PART_BACKEND, t1 - t0, 1);
+            sDrawPartReads += 2;
         }
         return;
     }
@@ -3726,6 +3825,9 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
                      : indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16) ? "index buffer"
                                                                                        : "command list",
                      sVboUsed, sIboUsed, (unsigned long) cmd_position());
+        }
+        if (timed) {
+            sDrawPartReads += 2;
         }
         return;
     }
@@ -3763,15 +3865,17 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     }
     set_all_state(state, &su0, &sv0, &su1, &sv1);
     if (first) {
-        // Write all the settings now, then mark them changed so that the draw writes them a second time.
-        C3Di_UpdateContext();
-        forget_gpu_state();
-        set_all_state(state, &su0, &sv0, &su1, &sv1);
+        unsigned long long tw = timed ? plat_ticks() : 0;
+        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+        if (timed) {
+            draw_part(DRAW_PART_TWICE, plat_ticks() - tw, 1);
+            twiceReads = 2;
+        }
     }
 
     if (timed) {
-        t2 = plat_time_ns();
-        prof_part(PROF_PART_STATE, t2 - t1);
+        t2 = plat_ticks();
+        draw_part(DRAW_PART_STATE, t2 - t1, 1 + twiceReads);
     }
     vertex = use_vertex_format(fmt);
     if (indexed && vertex + numVerts > 0xFFFF) {
@@ -3789,8 +3893,8 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         sIboUsed += count;
     }
     if (timed) {
-        t3 = plat_time_ns();
-        prof_part(PROF_PART_WRITE, t3 - t2);
+        t3 = plat_ticks();
+        draw_part(DRAW_PART_WRITE, t3 - t2, 1);
     }
     draw_prims(vertex, count, ibo);
     if (hangDraw != NULL) {
@@ -3799,7 +3903,8 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     sVboUsed += vertBytes;
     sFrameTriangles += numTriangles;
     if (timed) {
-        prof_part(PROF_PART_BACKEND, plat_time_ns() - t0);
+        draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 4 + twiceReads);
+        sDrawPartReads += 5 + twiceReads;
     }
 }
 
