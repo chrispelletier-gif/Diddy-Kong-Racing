@@ -106,7 +106,7 @@ ifeq ($(TARGET),3ds)
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include -Iinclude -Isrc \
                 -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\" -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
-  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers
+  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers -Wl,--wrap=GX_DisplayTransfer
   # curl and mbedtls (devkitPro's 3ds-curl) send bug reports and download updates.
   LIBS      := -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru -lm
   EXE       := $(BUILD_DIR)/dkr.elf

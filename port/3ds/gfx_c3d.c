@@ -102,6 +102,16 @@ static volatile int sWantedAa = PLAT_AA_4X;      // plat_set_gpu_config, applied
 static int sDefaultFb16;
 static volatile int sWantedFb16;
 static int sTargetFb16;
+/*
+ * The early depth test (P20) needs the render target in 32x32 blocks instead of the usual 8x8 tiles: the GPU keeps one
+ * early depth value per 32x32 block, and with 8x8 tiles one tile's depth stood for its whole block, so the parts of a
+ * block behind it were thrown away (squares of 32 pixels missing on a New 3DS, #150). A 32x32 block target needs a
+ * width that is a whole number of blocks: 240 becomes 256, and the display transfer crops it back (see
+ * __wrap_GX_DisplayTransfer). Only for targets 800 pixels long (the 800 pixel mode or 4x anti-aliasing): 400 is not a
+ * whole number of blocks either, and cropping that way is untried. Not in 3D, where early depth is off.
+ */
+static int sTargetBlock32;
+static int sEarlyDepth; // DKR_EARLY_DEPTH (see read_switches)
 /* A memory fill of the colour buffer takes a pixel in the buffer's format: black either way. */
 #define CLEAR_BLACK (sTargetFb16 ? 0 : 0x000000FF)
 static DVLB_s *sShaderDvlb;
@@ -566,10 +576,18 @@ static const char *aa_name(int aa) {
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
 }
 
-/* A render target in the current buffer formats (sTargetFb16). */
-static C3D_RenderTarget *new_target(int width, int height) {
-    return C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
-                                  sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+/* A render target in the current buffer formats (sTargetFb16), in 32x32 blocks (block32) or 8x8 tiles. */
+static C3D_RenderTarget *new_target(int width, int height, int block32) {
+    C3D_RenderTarget *target;
+    if (block32) {
+        width = (width + 31) & ~31;
+    }
+    target = C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
+                                    sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+    if (target != NULL && block32) {
+        C3D_FrameBufAttrib(&target->frameBuf, width, height, true);
+    }
+    return target;
 }
 
 /*
@@ -577,19 +595,20 @@ static C3D_RenderTarget *new_target(int width, int height) {
  * 4x anti-aliasing or the 800 pixel mode (across), with 16-bit buffers or not. The doubled one needs 3MB of VRAM
  * (half that with 16-bit buffers), so fall back if it does not fit.
  */
-static void create_target(int scale, int across, int fb16) {
+static void create_target(int scale, int across, int fb16, int block32) {
     sTargetFb16 = fb16;
     sTarget = NULL;
     if (scale == 2 || across == 2) {
-        sTarget = new_target(TOP_HEIGHT * scale, TOP_WIDTH * across);
+        sTarget = new_target(TOP_HEIGHT * scale, TOP_WIDTH * across, block32 && across == 2);
         sRenderScale = scale;
         sScaleX = across;
     }
     if (sTarget == NULL) {
-        sTarget = new_target(TOP_HEIGHT, TOP_WIDTH);
+        sTarget = new_target(TOP_HEIGHT, TOP_WIDTH, 0);
         sRenderScale = 1;
         sScaleX = 1;
     }
+    sTargetBlock32 = sTarget != NULL && sTarget->frameBuf.block32;
 }
 
 /*
@@ -614,6 +633,29 @@ static void link_target(void) {
     } else {
         C3D_RenderTargetSetOutput(NULL, GFX_TOP, GFX_RIGHT, 0);
     }
+}
+
+/*
+ * Every display transfer goes through here (-Wl,--wrap=GX_DisplayTransfer): citro3d's copy of the target to the screen
+ * at the end of a frame, and the bug report's capture. One from a target in 32x32 blocks (sTargetBlock32) says so, and
+ * reads the target's whole width (256 for the screen's 240) while writing only the picture's, cropping the rest of each
+ * line. citro3d passes the target's width for both.
+ */
+Result __real_GX_DisplayTransfer(u32 *inadr, u32 indim, u32 *outadr, u32 outdim, u32 flags);
+__attribute__((used)) Result __wrap_GX_DisplayTransfer(u32 *inadr, u32 indim, u32 *outadr, u32 outdim, u32 flags) {
+    const C3D_RenderTarget *target = sTarget;
+    if (target != NULL && target->frameBuf.block32 && inadr == (u32 *) target->frameBuf.colorBuf) {
+        u32 width = target->frameBuf.width, shown = TOP_HEIGHT * sRenderScale;
+        indim = (indim & 0xFFFF0000u) | width;
+        if ((outdim & 0xFFFF) == width) {
+            outdim = (outdim & 0xFFFF0000u) | shown;
+        }
+        if ((outdim & 0xFFFF) < width) {
+            flags |= BIT(2); // Crop the input lines to the output's width.
+        }
+        flags |= BIT(16); // Input in 32x32 blocks.
+    }
+    return __real_GX_DisplayTransfer(inadr, indim, outadr, outdim, flags);
 }
 
 /* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) and 16-bit buffers for the frames from the next
@@ -730,6 +772,8 @@ static float stereo_max_sep(void) {
  * slider down. A new render target, or a new screen mode, needs the GPU idle, so this waits for it (an empty frame)
  * first; a new target is cleared like the very first one.
  */
+static void read_switches(void);
+
 static void apply_screen_mode(void) {
     float slider = osGet3DSliderState();
     int stereo = sStereoSetting && slider > 0.0f && __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
@@ -737,8 +781,10 @@ static void apply_screen_mode(void) {
     int aa = stereo ? PLAT_AA_OFF : sWantedAa, fb16 = sWantedFb16;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
-    int newTarget;
+    int block32, newTarget;
 
+    read_switches(); // Early depth (DKR_EARLY_DEPTH) wants a target in 32x32 blocks: see sTargetBlock32.
+    block32 = sEarlyDepth && !stereo && across == 2;
     if ((sWideSetting != 0) != sWide && sTarget != NULL) {
         // The game only clears its 4:3 part of the screen: clear the sides of the last wide picture.
         sFrameStarted = 0;
@@ -747,7 +793,8 @@ static void apply_screen_mode(void) {
     sScale3D = sWide ? 1.0f : NARROW;
     sEyeSep = stereo ? slider * stereo_max_sep() : 0.0f;
     if (sTarget == NULL ||
-        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX && fb16 == sTargetFb16)) {
+        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX && fb16 == sTargetFb16 &&
+         block32 == sTargetBlock32)) {
         return;
     }
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
@@ -755,14 +802,14 @@ static void apply_screen_mode(void) {
         plat_sleep_ns(250000);
     }
     C3D_FrameEnd(0);
-    newTarget = scale != sRenderScale || across != sScaleX || fb16 != sTargetFb16;
+    newTarget = scale != sRenderScale || across != sScaleX || fb16 != sTargetFb16 || block32 != sTargetBlock32;
     if (newTarget) {
         C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
         if (sTargetRight != NULL) {
             C3D_RenderTargetDelete(sTargetRight); // Made again below, in the new formats.
             sTargetRight = NULL;
         }
-        create_target(scale, across, fb16);
+        create_target(scale, across, fb16, block32);
         sFrameStarted = 0;
         if (wide800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target: don't try again every frame.
@@ -771,7 +818,7 @@ static void apply_screen_mode(void) {
     }
     if (stereo && sTargetRight == NULL) {
         // The right eye's target, the same size as the left one's (3D has anti-aliasing off).
-        sTargetRight = new_target(TOP_HEIGHT, TOP_WIDTH);
+        sTargetRight = new_target(TOP_HEIGHT, TOP_WIDTH, 0);
         if (sTargetRight == NULL) {
             plat_log("top screen: no VRAM for the right eye's target, 3D off");
             sStereoSetting = 0;
@@ -794,9 +841,9 @@ static void apply_screen_mode(void) {
     sStereo = stereo;
     s800 = wide800;
     link_target();
-    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s, %s buffers)",
+    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s, %s buffers%s)",
              sStereo ? "3D" : s800 ? "800 pixels" : "400 pixels", sScaleX, sRenderScale,
-             aa_name(plat_antialias()), sTargetFb16 ? "16-bit" : "32-bit");
+             aa_name(plat_antialias()), sTargetFb16 ? "16-bit" : "32-bit", sTargetBlock32 ? ", 32x32 blocks" : "");
     if (newTarget && scale == 2 && sRenderScale != 2) {
         sWantedAa = PLAT_AA_OFF; // Didn't fit: don't try again every frame.
     }
@@ -848,7 +895,7 @@ void gfxb_init(void) {
         sWantedFb16 = sDefaultFb16;
         read_screen_settings();
         s800 = s800Setting && !sWideUnsupported;
-        create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1, sDefaultFb16);
+        create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1, sDefaultFb16, 0);
         if (s800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target.
             s800 = 0;
@@ -1590,6 +1637,7 @@ static void bind_target(C3D_RenderTarget *target) {
     param[2] = 0x01000000 | (((u32) (fb->height - 1) & 0xFFF) << 12) | (fb->width & 0xFFF);
     GPUCMD_AddIncrementalWrites(GPUREG_DEPTHBUFFER_LOC, param, 3);
     GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_BLOCK32, fb->block32 ? 1 : 0);
 }
 
 /* Draws count vertices from vertex on, or the count vertices the indices name; once, or in 3D once for each eye. */
@@ -1853,7 +1901,7 @@ static void wait_for_gpu(int measure) {
  * early depth test, P20).
  */
 static int sSwitchEpoch = -1;
-static int sSplitMode = 1, sEarlyDepth;
+static int sSplitMode = 1;
 
 static void read_switches(void) {
     int recent, i;
@@ -1876,7 +1924,11 @@ static void read_switches(void) {
     }
     plat_log("switches: command list split %s, line watch %d, recent frames %s (%d slots), early depth test %s",
              sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes", sLineWatch,
-             sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off");
+             sRecentOn ? "on" : "off", sRecentCount,
+             !sEarlyDepth                                   ? "off"
+             : !sStereo && (s800 || plat_antialias() == PLAT_AA_4X) ? "on"
+                                                            : "asked for, but off (needs the 800 pixel mode or 4x "
+                                                              "anti-aliasing, and no 3D)");
 }
 
 void gfxb_start_frame(void) {
@@ -1923,8 +1975,12 @@ void gfxb_start_frame(void) {
     // What C3D_FrameDrawOn does, which needs a citro3d frame begun; the target is marked used when handed over.
     C3D_SetFrameBuf(&sTarget->frameBuf);
     bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
-    C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
+    // The picture's size: a target in 32x32 blocks is wider than that (see sTargetBlock32).
+    C3D_SetViewport(0, 0, TOP_HEIGHT * sRenderScale, sTarget->frameBuf.height);
     read_switches();
+    if (sEarlyDepth && sTargetBlock32) {
+        GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1); // Nothing of the last frame, or of another target, may hide this one.
+    }
     forget_gpu_state();
     sMipmapsUsed = sMipmapSetting != 0;
     sMipmapsShown = sMipmapSetting == 2;
@@ -3152,9 +3208,8 @@ static void set_draw_state(const GfxDrawState *state) {
     // without the test (the sky, the HUD) puts in front, and a cutout (alpha test: fences, trees) or blended draw
     // marks its whole triangles in the early depth buffer, gaps included, which left black blocks behind the fences
     // of Jungle Falls on a New 3DS. Not in 3D, where both eyes' draws share the one early depth buffer.
-    // Even so a New 3DS still lost random blocks all over the picture (stale early depth?), so it stays off by default
-    // and out of the switch bench until P20 sorts it out.
-    early = sEarlyDepth && !sStereo && !sDepthOnly && depthEnable && depthFunc == GPU_GEQUAL &&
+    // Only with the target in 32x32 blocks (sTargetBlock32): with 8x8 tiles a New 3DS lost squares all over the picture.
+    early = sEarlyDepth && sTargetBlock32 && !sStereo && !sDepthOnly && depthEnable && depthFunc == GPU_GEQUAL &&
             depthMask == GPU_WRITE_ALL && !state->alphaTest && !IS_BLENDED(state->blend);
     if (!sGpu.known || early != sGpu.earlyDepth) {
         C3D_EarlyDepthTest(early, GPU_EARLYDEPTH_GEQUAL, 0);
@@ -3602,7 +3657,7 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
     sDepthOnly = depthOnly;
     sClearing = 1;
     gfxb_draw_triangles(&state, v, 2);
-    if (depthOnly && sEarlyDepth && !sStereo) {
+    if (depthOnly && sEarlyDepth && sTargetBlock32 && !sStereo) {
         // The early depth buffer is cleared with the depth buffer, to the farthest depth (0, as in the depth buffer).
         GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
     }
