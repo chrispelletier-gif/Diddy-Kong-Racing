@@ -144,13 +144,13 @@ typedef struct BenchSwitch {
     s8 usual, test;
 } BenchSwitch;
 
-/* Early depth (P20, DKR_EARLY_DEPTH=1) is left out until it draws right: on a New 3DS it threw away random blocks of
- * the picture. The white-line diagnostics (P28) were measured once (about 1 ms of GPU time a frame) and are off for
- * good. */
+/* Nothing to compare right now: command list splits (P19) were measured and are off by default (#153), early depth
+ * (P20) was tried and dropped (#155), and the white-line diagnostics (P28) cost about 1 ms of GPU time a frame and are
+ * off for good. The bench says so instead of racing. The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
-    { "command list splits on (old default, P19)", { "DKR_GPU_SPLIT", NULL }, 0, 1 },
+    { NULL, { NULL, NULL }, 0, 0 },
 };
-#define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches) + 1) // The usual settings, then each switch flipped
+#define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
 #define MAX_CONFIGS 16
 
 static s32 sMode; // enum Mode
@@ -1345,6 +1345,10 @@ static void handle_request(void) {
     if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS ||
          request == REQUEST_SWITCH) &&
         !port_autorun_active()) {
+        if (request == REQUEST_SWITCH && SWITCH_CONFIGS == 1) {
+            plat_status("Switch bench: no switches to test right now");
+            return;
+        }
         sMode = request == REQUEST_SWITCH  ? MODE_SWITCH
                 : request == REQUEST_BENCH ? MODE_BENCH
                 : request == REQUEST_QUICK ? MODE_QUICK
