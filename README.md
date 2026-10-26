@@ -97,5 +97,5 @@ tested. The N64 decompilation this is built on is described in [doc/decompilatio
 
 This project is not affiliated with or endorsed by Nintendo or Rare. Diddy Kong Racing and its characters are
 trademarks of their respective owners. No game assets are distributed here; you need your own legally obtained copy
-of the game. The code is released under CC0 (see [LICENSE.md](LICENSE.md)); the libraries in the built game have their
-own licences, listed in [NOTICE.md](NOTICE.md).
+of the game. The 3DS port is under the MIT License and the decompilation under CC0 (see [LICENSE.md](LICENSE.md)); the libraries
+in the built game have their own licences, listed in [NOTICE.md](NOTICE.md).

@@ -1,6 +1,7 @@
 # Third-party notices
 
-The repository's own code is CC0 (see [LICENSE.md](LICENSE.md)). These parts are not, or are linked into the built
+The decompilation is CC0 and the 3DS port (`port/`) is MIT (see [LICENSE.md](LICENSE.md) and
+[port/LICENSE](port/LICENSE)). These parts are not, or are linked into the built
 3DS game (`dkr.3dsx`, `dkr.cia`) from devkitPro's packages. Their licences ask that the notices below go with the
 game when it is shared; the release notes link to this file.
 
@@ -33,7 +34,7 @@ libcurl and Mbed TLS are linked into the player build too, though only the debug
 | `port/src/plat/third_party/stb_image.h` | PNG loader (SD card portraits) | Public domain or MIT, your choice (see the end of the file) |
 | `port/3ds/github_ca.h` | Root certificates for GitHub (Sectigo/USERTrust, DigiCert, ISRG), from Mozilla's list | Public certificates |
 | `tools/n64crc.c` | N64 ROM checksum tool used by the decompilation's N64 build (not part of the 3DS game) | GPL 2.0 or later |
-| `port/tools/n64_compare/` | Test harness for the ares emulator (not part of the 3DS game) | CC0; ares itself is ISC and is downloaded, not included |
+| `port/tools/n64_compare/` | Test harness for the ares emulator (not part of the 3DS game) | MIT, like the rest of `port/`; ares itself is ISC and is downloaded, not included |
 
 ## App icon and banner
 
