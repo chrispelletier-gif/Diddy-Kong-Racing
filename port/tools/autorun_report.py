@@ -115,8 +115,7 @@ def main():
             configs = ["AA 4x", "AA 4x, 16-bit", "AA 2x", "AA 2x, 16-bit", "AA off", "AA off, 16-bit",
                        "60 fps, AA off, 16-bit", "60 fps, AA 2x, 16-bit"]
             if any("switch_bench" in path for path in args.csv):
-                configs = ["usual settings", "command list splits off (P19)", "white-line diagnostics on (P28)",
-                           "early depth test on (P20)"]
+                configs = ["usual settings", "command list splits off (P19)"]
             for row in finished:
                 index = int(row["config"]) if row["config"].isdigit() else -1
                 row["track and settings"] = f"{row['track']}, {configs[index] if 0 <= index < len(configs) else '?'}"

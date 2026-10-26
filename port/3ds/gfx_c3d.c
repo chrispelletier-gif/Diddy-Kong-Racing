@@ -3152,6 +3152,8 @@ static void set_draw_state(const GfxDrawState *state) {
     // without the test (the sky, the HUD) puts in front, and a cutout (alpha test: fences, trees) or blended draw
     // marks its whole triangles in the early depth buffer, gaps included, which left black blocks behind the fences
     // of Jungle Falls on a New 3DS. Not in 3D, where both eyes' draws share the one early depth buffer.
+    // Even so a New 3DS still lost random blocks all over the picture (stale early depth?), so it stays off by default
+    // and out of the switch bench until P20 sorts it out.
     early = sEarlyDepth && !sStereo && !sDepthOnly && depthEnable && depthFunc == GPU_GEQUAL &&
             depthMask == GPU_WRITE_ALL && !state->alphaTest && !IS_BLENDED(state->blend);
     if (!sGpu.known || early != sGpu.earlyDepth) {

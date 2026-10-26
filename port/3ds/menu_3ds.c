@@ -261,7 +261,7 @@ static void test_value(int i, char *out, int size) {
 static const char *test_hint(int i) {
     static const char *const sStart[5] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
                                            "All 10 boss races once, ~30 minutes", "3 heavy tracks x 8 GPU settings, ~50 min",
-                                           "3 heavy tracks x 4 switch sets, ~25 min" };
+                                           "3 heavy tracks x 2 switch sets, ~13 min" };
     return port_autorun_enabled() ? "The results so far go out as a report" : sStart[i];
 }
 

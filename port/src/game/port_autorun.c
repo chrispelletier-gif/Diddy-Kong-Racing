@@ -144,10 +144,11 @@ typedef struct BenchSwitch {
     s8 usual, test;
 } BenchSwitch;
 
+/* Early depth (P20, DKR_EARLY_DEPTH=1) is left out until it draws right: on a New 3DS it threw away random blocks of
+ * the picture. The white-line diagnostics (P28) were measured once (about 1 ms of GPU time a frame) and are off for
+ * good. */
 static const BenchSwitch sSwitches[] = {
     { "command list splits off (P19)", { "DKR_GPU_SPLIT", NULL }, 1, 0 },
-    { "white-line diagnostics on (P28)", { "DKR_LINE_WATCH", "DKR_RECENT_FRAMES" }, 0, 1 },
-    { "early depth test on (P20)", { "DKR_EARLY_DEPTH", NULL }, 0, 1 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches) + 1) // The usual settings, then each switch flipped
 #define MAX_CONFIGS 16
