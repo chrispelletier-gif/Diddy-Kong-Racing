@@ -1,14 +1,15 @@
 /*
  * The Settings menu on the bottom screen. The panel's "Settings" button (update_3ds.c) opens it over the top of the
- * screen (plat_3ds_menu_draw; plat/bottom_screen.c draws it in the game's style). A page is a list of rows, each a
+ * screen (plat_3ds_menu_draw; plat/bottom_screen.c draws it in the game's style). Its pages are tabs down the left:
+ * Picture, Screen, the added pages, then (in a debug build) Test run and Tools. A page is a list of rows, each a
  * label with its value between arrows (or the game's ON and OFF labels; or just an arrow for a row that does
- * something or opens a page), and a hint under it. Tapping the left half of a value steps it back, anywhere else on
- * the row steps it forward; taps sound like the game's menus. The panel shows Close (Back on another page), and
+ * something). Tapping the left half of a value steps it back, anywhere else on the row steps it forward; the row
+ * tapped is lit and its hint shown under the rows. Taps sound like the game's menus. The panel shows Close, and
  * Prev / Next when a page has more rows than fit.
  *
- * Other parts of the port add a page with menu_3ds_add_page; the main page gets a row that opens it. Settings are
- * saved in settings.txt (plat/settings.h) or a file of their owner's. Everything here runs on the bottom screen's
- * thread (update_3ds.c), so a page's functions are called from that thread.
+ * Other parts of the port add a page with menu_3ds_add_page; it gets a tab. Settings are saved in settings.txt
+ * (plat/settings.h) or a file of their owner's. Everything here runs on the bottom screen's thread (update_3ds.c), so
+ * a page's functions are called from that thread.
  */
 #include <3ds.h>
 #include <stdio.h>
@@ -56,26 +57,49 @@ typedef struct MenuPage {
 static MenuPage sPages[MAX_PAGES];
 static int sPageCount;
 
+/* The tabs, in order: Picture, Screen, the added pages, then the debug build's Test run and Tools. */
+static const MenuPage *sTabs[MAX_PAGES + 4];
+static int sTabCount;
+
 static const MenuPage *sPage;
+static const MenuPage *sLastPage; // The menu opens where it was left.
 static int sFirst;  // First row shown.
+static int sPicked = -1; // The row tapped last, of all the page's rows; -1 for none.
 static int sResult; // What a tap asked of the panel (MENU_*).
 static int sDrawnTestRun = -1;
 static unsigned int sDrawnChanges; // options_change_count() when drawn: the game's menus change the same values.
 
-static const MenuPage sMainPage, sTestRunPage, sScreenPage;
+static const MenuPage sPicturePage, sScreenPage, sTestRunPage, sToolsPage;
 
 static void draw(void);
 
 static void open_page(const MenuPage *page) {
     sPage = page;
+    sLastPage = page;
     sFirst = 0;
+    sPicked = -1;
     draw();
 }
 
-/* The main page: anti-aliasing, frame rate, 16-bit buffers, mipmaps, colour boost, the screen page, the profiler, the
- * added pages, then the test run, updates and bug report. A player's build (plat.h PLAT_DEBUG_TOOLS) shows only some
- * (main_hidden), so the page's own functions number the rows shown and the row_* ones every row. */
-enum { MAIN_AA, MAIN_FPS, MAIN_FB16, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_SCREEN, MAIN_AHEAD, MAIN_PROFILER, MAIN_PAGES };
+/*
+ * The settings of the first and last tabs, numbered as the old main page had them (the game's Video Options follow
+ * the same numbers): anti-aliasing, frame rate, 16-bit buffers, mipmaps, colour boost, the Screen page (a tab now),
+ * render ahead, the profiler, updates and the bug report. The Picture and Tools pages each show some of them, less
+ * the ones a player's build (plat.h PLAT_DEBUG_TOOLS) hides (main_hidden): the pages' own functions number the rows
+ * shown and the row_* ones these.
+ */
+enum {
+    MAIN_AA,
+    MAIN_FPS,
+    MAIN_FB16,
+    MAIN_MIPMAPS,
+    MAIN_COLOUR,
+    MAIN_SCREEN,
+    MAIN_AHEAD,
+    MAIN_PROFILER,
+    MAIN_UPDATES,
+    MAIN_BUGREPORT
+};
 
 /* Anti-aliasing in the order the row steps through (PLAT_AA_* values). */
 static const int sAaOrder[3] = { PLAT_AA_OFF, PLAT_AA_2X, PLAT_AA_4X };
@@ -84,19 +108,13 @@ static const char *const sAaNames[3] = { "Off", "4x", "2x" }; // By PLAT_AA_* va
 static const char *const sColourLevels[4] = { "Off", "Low", "Medium", "High" };
 static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
 
-static int main_row_count(void) {
-    return MAIN_PAGES + sPageCount + 3;
-}
-
-/* The performance switches and the debug tools: the test run, updates (which install test builds) and bug reports
+/* The performance switches and the debug tools: the profiler, updates (which install test builds) and bug reports
  * (which need a GitHub token). */
 static int main_hidden(int row) {
-    return !PLAT_DEBUG_TOOLS &&
-           (row == MAIN_FB16 || row == MAIN_AHEAD || row == MAIN_PROFILER || row >= MAIN_PAGES + sPageCount);
+    return !PLAT_DEBUG_TOOLS && (row == MAIN_FB16 || row == MAIN_AHEAD || row >= MAIN_PROFILER);
 }
 
 static const char *row_label(int i) {
-    static const char *const sLast[3] = { "Test run", "Check for updates", "Send a bug report" };
     if (i == MAIN_AA) {
         return "Anti-aliasing";
     } else if (i == MAIN_FPS) {
@@ -113,10 +131,10 @@ static const char *row_label(int i) {
         return "Render ahead";
     } else if (i == MAIN_PROFILER) {
         return "Profiler";
-    } else if (i < MAIN_PAGES + sPageCount) {
-        return sPages[i - MAIN_PAGES].title;
+    } else if (i == MAIN_UPDATES) {
+        return "Check for updates";
     }
-    return sLast[i - MAIN_PAGES - sPageCount];
+    return "Send a bug report";
 }
 
 static void row_value(int i, char *out, int size) {
@@ -140,8 +158,6 @@ static void row_value(int i, char *out, int size) {
 }
 
 static const char *row_hint(int i) {
-    static const char *const sLast[3] = { NULL, "Install a newer build from GitHub",
-                                          "Log and snapshot (also SELECT+touch)" };
     if (i == MAIN_AA) {
         return plat_3ds_antialias_setting() == PLAT_AA_2X ? "Smoother edges; the GPU draws 2x"
                                                            : "Smoother edges; the GPU draws 4x";
@@ -159,12 +175,10 @@ static const char *row_hint(int i) {
         return plat_render_ahead() == 2 ? "Fewer dropped frames, a frame more lag" : "The N64's timing";
     } else if (i == MAIN_PROFILER) {
         return "Frame times on this screen";
-    } else if (i < MAIN_PAGES + sPageCount) {
-        return NULL;
-    } else if (i == MAIN_PAGES + sPageCount) {
-        return port_autorun_enabled() ? "Running now: open to stop it" : "AI races that look for problems";
+    } else if (i == MAIN_UPDATES) {
+        return "Install a newer build from GitHub";
     }
-    return sLast[i - MAIN_PAGES - sPageCount];
+    return "Log and snapshot (also SELECT+touch)";
 }
 
 static void row_change(int i, int step) {
@@ -187,38 +201,69 @@ static void row_change(int i, int step) {
         plat_set_render_ahead(plat_render_ahead() == 1 ? 2 : 1);
     } else if (i == MAIN_PROFILER) {
         prof_set_user_enabled(!prof_user_enabled());
-    } else if (i < MAIN_PAGES + sPageCount) {
-        open_page(&sPages[i - MAIN_PAGES]);
-    } else if (i == MAIN_PAGES + sPageCount) {
-        open_page(&sTestRunPage);
-    } else if (i == MAIN_PAGES + sPageCount + 1) {
+    } else if (i == MAIN_UPDATES) {
         sResult = MENU_UPDATES;
     } else {
         sResult = MENU_BUGREPORT;
     }
 }
 
-static int main_count(void) {
-    return options_visible_count(main_row_count(), main_hidden);
+/* The Picture page: the players' settings first, then the performance switches. */
+static const int sPictureRows[6] = { MAIN_AA, MAIN_FPS, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_FB16, MAIN_AHEAD };
+
+static int picture_hidden(int row) {
+    return main_hidden(sPictureRows[row]);
 }
 
-static const char *main_label(int i) {
-    return row_label(options_visible_row(main_row_count(), main_hidden, i));
+static int picture_row(int i) {
+    return sPictureRows[options_visible_row(6, picture_hidden, i)];
 }
 
-static void main_value(int i, char *out, int size) {
-    row_value(options_visible_row(main_row_count(), main_hidden, i), out, size);
+static int picture_count(void) {
+    return options_visible_count(6, picture_hidden);
 }
 
-static const char *main_hint(int i) {
-    return row_hint(options_visible_row(main_row_count(), main_hidden, i));
+static const char *picture_label(int i) {
+    return row_label(picture_row(i));
 }
 
-static void main_change(int i, int step) {
-    row_change(options_visible_row(main_row_count(), main_hidden, i), step);
+static void picture_value(int i, char *out, int size) {
+    row_value(picture_row(i), out, size);
 }
 
-static const MenuPage sMainPage = { "Settings", main_count, main_label, main_value, main_change, main_hint, NULL };
+static const char *picture_hint(int i) {
+    return row_hint(picture_row(i));
+}
+
+static void picture_change(int i, int step) {
+    row_change(picture_row(i), step);
+}
+
+static const MenuPage sPicturePage = { "Picture", picture_count, picture_label, picture_value,
+                                       picture_change, picture_hint, NULL };
+
+/* The Tools page (a debug build's only): the profiler, updates and bug reports. */
+static int tools_count(void) {
+    return 3;
+}
+
+static const char *tools_label(int i) {
+    return row_label(MAIN_PROFILER + i);
+}
+
+static void tools_value(int i, char *out, int size) {
+    row_value(MAIN_PROFILER + i, out, size);
+}
+
+static const char *tools_hint(int i) {
+    return row_hint(MAIN_PROFILER + i);
+}
+
+static void tools_change(int i, int step) {
+    row_change(MAIN_PROFILER + i, step);
+}
+
+static const MenuPage sToolsPage = { "Tools", tools_count, tools_label, tools_value, tools_change, tools_hint, NULL };
 
 /* The top screen (roadmap phase 6, gfx_c3d.c): widescreen, the 800 pixel mode and stereo 3D, each on or off, where
  * widescreen puts the race HUD (plat_hud_edges), and edge trimming (the guard band clip, a test toggle for the blue
@@ -436,6 +481,14 @@ static void draw(void) {
     }
     memset(&menu, 0, sizeof(menu));
     snprintf(menu.title, sizeof(menu.title), "%s", sPage->title);
+    for (slot = 0; slot < sTabCount && slot < BS_MENU_TABS; slot++) {
+        snprintf(menu.tabs[slot], sizeof(menu.tabs[slot]), "%s", sTabs[slot]->title);
+        if (sTabs[slot] == sPage) {
+            menu.tab = slot;
+        }
+    }
+    menu.tabCount = slot;
+    menu.picked = sPicked >= sFirst && sPicked < sFirst + ROWS_PER_PAGE ? sPicked - sFirst : -1;
     if (count > ROWS_PER_PAGE) {
         snprintf(menu.pages, sizeof(menu.pages), "%d/%d", sFirst / ROWS_PER_PAGE + 1,
                  (count + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE);
@@ -451,8 +504,10 @@ static void draw(void) {
     }
     if (sPage->note != NULL) {
         snprintf(menu.note, sizeof(menu.note), "%s", sPage->note);
-    } else {
+    } else if (sPage == &sToolsPage) {
         snprintf(menu.note, sizeof(menu.note), "Build %.32s", plat_build_version());
+    } else {
+        snprintf(menu.note, sizeof(menu.note), "Tap a value's arrows to change it");
     }
     plat_3ds_menu_draw(&menu);
     sDrawnTestRun = port_autorun_enabled() != 0;
@@ -461,16 +516,33 @@ static void draw(void) {
 
 /* The panel's calls. */
 
-void menu_3ds_open(void) {
-    open_page(&sMainPage);
+static void make_tabs(void) {
+    int i;
+    sTabCount = 0;
+    sTabs[sTabCount++] = &sPicturePage;
+    sTabs[sTabCount++] = &sScreenPage;
+    for (i = 0; i < sPageCount; i++) {
+        sTabs[sTabCount++] = &sPages[i];
+    }
+    if (PLAT_DEBUG_TOOLS) {
+        sTabs[sTabCount++] = &sTestRunPage;
+        sTabs[sTabCount++] = &sToolsPage;
+    }
 }
 
-/* Opens the page added with this title (the panel's Controls button). Returns 0 if there is none. */
+/* Opens the page left last (the first, the first time). */
+void menu_3ds_open(void) {
+    make_tabs();
+    open_page(sLastPage != NULL ? sLastPage : sTabs[0]);
+}
+
+/* Opens the page with this title (the panel's Controls button). Returns 0 if there is none. */
 int menu_3ds_open_page(const char *title) {
     int i;
-    for (i = 0; i < sPageCount; i++) {
-        if (strcmp(sPages[i].title, title) == 0) {
-            open_page(&sPages[i]);
+    make_tabs();
+    for (i = 0; i < sTabCount; i++) {
+        if (strcmp(sTabs[i]->title, title) == 0) {
+            open_page(sTabs[i]);
             return 1;
         }
     }
@@ -482,19 +554,6 @@ void menu_3ds_close(void) {
     sPage = NULL;
 }
 
-int menu_3ds_on_main_page(void) {
-    return sPage == &sMainPage;
-}
-
-/* Back to the main page. Returns 0 if this was the main page already. */
-int menu_3ds_back(void) {
-    if (sPage == &sMainPage) {
-        return 0;
-    }
-    open_page(&sMainPage);
-    return 1;
-}
-
 /* Whether the page has rows before (direction -1) or after (+1) the ones shown. */
 int menu_3ds_can_scroll(int direction) {
     return direction < 0 ? sFirst > 0 : sFirst + ROWS_PER_PAGE < sPage->count();
@@ -503,6 +562,7 @@ int menu_3ds_can_scroll(int direction) {
 void menu_3ds_scroll(int direction) {
     if (menu_3ds_can_scroll(direction)) {
         sFirst += direction * ROWS_PER_PAGE;
+        sPicked = -1;
         draw();
     }
 }
@@ -512,7 +572,19 @@ int menu_3ds_tap(int x, int y) {
     int slot, i;
     char value[48];
 
-    if (sPage == NULL || y < BS_MENU_FIRST_Y) {
+    if (sPage == NULL) {
+        return MENU_STAY;
+    }
+    if (x < BS_MENU_TAB_X1) {
+        // A tab.
+        slot = (y - BS_MENU_TAB_Y0) / BS_MENU_TAB_HEIGHT(sTabCount);
+        if (y >= BS_MENU_TAB_Y0 && slot < sTabCount && sTabs[slot] != sPage) {
+            plat_request_ui_sound(PLAT_UI_SOUND_MOVE);
+            open_page(sTabs[slot]);
+        }
+        return MENU_STAY;
+    }
+    if (y < BS_MENU_FIRST_Y) {
         return MENU_STAY;
     }
     slot = (y - BS_MENU_FIRST_Y) / BS_MENU_ROW_HEIGHT;
@@ -521,13 +593,13 @@ int menu_3ds_tap(int x, int y) {
         return MENU_STAY;
     }
     sPage->value(i, value, sizeof(value));
+    sPicked = i;
     sResult = MENU_STAY;
     // A value changing, or a row that does something or opens a page.
     plat_request_ui_sound(value[0] != '\0' ? PLAT_UI_SOUND_MOVE : PLAT_UI_SOUND_SELECT);
     sPage->change(i, value[0] != '\0' && x >= BS_MENU_VALUE_X && x < BS_MENU_VALUE_SPLIT ? -1 : 1);
     if (sResult == MENU_STAY && sPage != NULL) {
-        // The page may have opened another one, which drew itself; this one redraws the changed row (all of them, as
-        // a change can add or remove rows).
+        // Redraws the changed row (all of them, as a change can add or remove rows, and the lit row moves).
         draw();
     }
     return sResult;

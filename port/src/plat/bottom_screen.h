@@ -21,13 +21,22 @@ enum { BS_AREA_TOP, BS_AREA_BUTTONS, BS_AREA_STATUS, BS_AREA_COUNT };
 #define BS_BUTTONS_Y 200
 #define BS_STATUS_Y 224
 
-/* The Settings menu page shown (menu_3ds.c). Taps are mapped back to rows with the geometry below. */
-#define BS_MENU_ROWS 6
-#define BS_MENU_FIRST_Y 32
-#define BS_MENU_ROW_HEIGHT 24
+/*
+ * The Settings menu (menu_3ds.c): its pages as tabs down the left, the chosen page's rows on the right, each value
+ * between arrows, and under the rows the tip of the row touched last. Taps are mapped back with this geometry.
+ */
+#define BS_MENU_TABS 10
+#define BS_MENU_TAB_X1 92 /* A tap left of this picks a tab. */
+#define BS_MENU_TAB_Y0 4
+#define BS_MENU_TAB_Y1 196
+/* The height of each of count tabs. */
+#define BS_MENU_TAB_HEIGHT(count) ((count) > 6 ? (BS_MENU_TAB_Y1 - BS_MENU_TAB_Y0) / (count) : 30)
+#define BS_MENU_ROWS 5
+#define BS_MENU_FIRST_Y 30
+#define BS_MENU_ROW_HEIGHT 27
 /* The value field of a row; a tap left of BS_MENU_VALUE_SPLIT steps the value back. */
-#define BS_MENU_VALUE_X 184
-#define BS_MENU_VALUE_SPLIT 248
+#define BS_MENU_VALUE_X 214
+#define BS_MENU_VALUE_SPLIT 261
 
 typedef struct BsMenuRow {
     char label[40];
@@ -38,9 +47,12 @@ typedef struct BsMenuRow {
 typedef struct BsMenu {
     char title[32];
     char pages[16]; /* "1/2", or empty. */
+    int tabCount, tab;
+    char tabs[BS_MENU_TABS][16];
     int rowCount;
     BsMenuRow rows[BS_MENU_ROWS];
-    char note[64];
+    int picked;    /* The row touched last, lit, with its hint as the tip; -1 for none. */
+    char note[64]; /* The tip while no row with a hint is picked. */
 } BsMenu;
 
 /* monoFont: an 8x8 font of 256 characters, 8 bytes each, the highest bit leftmost (libctru's), for dense text. */

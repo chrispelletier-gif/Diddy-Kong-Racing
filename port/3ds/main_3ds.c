@@ -37,6 +37,13 @@ const char *camera_option_label(int i);
 void camera_option_value(int i, char *out, int size);
 void camera_option_change(int i, int step);
 int port_modern_camera(void);
+/* The Start-up page (port_intro.c). */
+int intro_option_count(void);
+const char *intro_option_label(int i);
+void intro_option_value(int i, char *out, int size);
+void intro_option_change(int i, int step);
+const char *intro_option_hint(int i);
+int intro_option_in_race(int i);
 
 static volatile int sQuitRequested;
 
@@ -127,8 +134,11 @@ static void add_game_menu_options(void) {
                                               controls_option_change, NULL, NULL };
     static const OptionsSection sRaceHud = { race_hud_option_count, race_hud_option_label, race_hud_option_value,
                                              race_hud_option_change, race_hud_option_hint, NULL };
+    static const OptionsSection sIntro = { intro_option_count, intro_option_label, intro_option_value,
+                                           intro_option_change, intro_option_hint, intro_option_in_race };
     menu_3ds_add_options();
     options_add(OPTIONS_VIDEO, &sRaceHud);
+    options_add(OPTIONS_VIDEO, &sIntro);
     options_add(OPTIONS_CAMERA, &sCamera);
     options_add(OPTIONS_AUDIO, &sSound);
     options_add(OPTIONS_CONTROLS, &sControls);
@@ -166,6 +176,7 @@ int main(int argc, char **argv) {
     menu_3ds_add_page("Race HUD", race_hud_option_count, race_hud_option_label, race_hud_option_value,
                       race_hud_option_change);
     menu_3ds_add_page("Camera", camera_option_count, camera_option_label, camera_option_value, camera_option_change);
+    menu_3ds_add_page("Start-up", intro_option_count, intro_option_label, intro_option_value, intro_option_change);
     add_game_menu_options();
     bugreport_start();
     // The Homebrew Launcher passes the path of the .3dsx as argv[0].

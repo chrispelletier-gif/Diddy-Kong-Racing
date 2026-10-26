@@ -1978,6 +1978,12 @@ s16 D_800E1DC8[16] = { 1, 1, -1, 1, -1, 1, -1, -1, 1, -1, -1, -1, 1, 1, 1, -1 };
 // Fade transition from the logo screen to the title screen.
 FadeTransition gFadeLogoToTitleScreen =
     FADE_TRANSITION(FADE_FULLSCREEN, FADE_FLAG_NONE, FADE_COLOR_BLACK, 120, FADE_STAY);
+#ifdef TARGET_PORT
+// A press on the logo screen fades to the title screen in about a third of a second (roadmap Q10).
+FadeTransition sPortFadeLogoSkip = FADE_TRANSITION(FADE_FULLSCREEN, FADE_FLAG_NONE, FADE_COLOR_BLACK, 20, FADE_STAY);
+#define PORT_LOGO_SKIP_SECONDS 0.4f
+static s8 sPortLogosSkipped;
+#endif
 
 char gRareCopyrightString[24] = "(C) COPYRIGHT RARE 1997";
 
@@ -3178,6 +3184,9 @@ void menu_missing_controller(Gfx **dList, s32 updateRate) {
 void menu_logos_screen_init(void) {
     gMenuDelay = 0;
     sBootScreenTimer = 16.0f;
+#ifdef TARGET_PORT
+    sPortLogosSkipped = FALSE;
+#endif
     bgdraw_fillcolour(0, 0, 0);
     if (osTvType == OS_TV_TYPE_PAL) {
         viewport_menu_set(0, 0, 38, SCREEN_WIDTH, SCREEN_HEIGHT - 16);
@@ -3198,6 +3207,21 @@ s32 menu_logo_screen_loop(s32 updateRate) {
     s32 yOffset;
     s32 yOffsetShadow;
 
+#ifdef TARGET_PORT
+    // A, B or START cuts the logos short with a quick fade to the title screen.
+    if (gMenuDelay == 0 && sBootScreenTimer > PORT_LOGO_SKIP_SECONDS) {
+        s32 i, pressed = 0;
+        for (i = 0; i < MAXCONTROLLERS; i++) {
+            pressed |= input_pressed(i);
+        }
+        if (pressed & (A_BUTTON | B_BUTTON | START_BUTTON)) {
+            transition_begin(&sPortFadeLogoSkip);
+            gMenuDelay = 1;
+            sBootScreenTimer = PORT_LOGO_SKIP_SECONDS;
+            sPortLogosSkipped = TRUE;
+        }
+    }
+#endif
     if (osTvType == OS_TV_TYPE_PAL) {
         yOffset = 26;
         if (sBootScreenTimer < 2.6f && gMenuDelay == 0) {
@@ -3219,6 +3243,12 @@ s32 menu_logo_screen_loop(s32 updateRate) {
         init_title_screen_variables();
         menu_init(MENU_TITLE);
     }
+#ifdef TARGET_PORT
+    // Skipped: the copyright line would pop in as the logos fade.
+    if (sPortLogosSkipped) {
+        return MENU_RESULT_CONTINUE;
+    }
+#endif
     // This uses doubles instead of floats for precision in the counting.
     if (sBootScreenTimer < 8.5) {
         set_text_font(ASSET_FONTS_SMALLFONT);
@@ -3250,6 +3280,19 @@ s32 menu_logo_screen_loop(s32 updateRate) {
     }
     return MENU_RESULT_CONTINUE;
 }
+
+#ifdef TARGET_PORT
+/**
+ * The Intro logos setting (port_skip_intro): goes to the title screen as the logo screen does when it ends, without
+ * the logo screen. The title screen loads its own level.
+ */
+static void port_logos_to_title(void) {
+    bgdraw_fillcolour(0, 0, 0);
+    set_viewport_properties(0, VIEWPORT_AUTO, VIEWPORT_AUTO, VIEWPORT_AUTO, VIEWPORT_AUTO);
+    init_title_screen_variables();
+    menu_init(MENU_TITLE);
+}
+#endif
 
 /**
  * Sets some things needed after the title screen from the save buffer.
@@ -6504,6 +6547,12 @@ s32 menu_controller_pak_loop(s32 updateRate) {
         if (gMenuDelay >= 36) {
 
             pakmenu_free();
+#ifdef TARGET_PORT
+            if (port_skip_intro()) {
+                port_logos_to_title();
+                return 0;
+            }
+#endif
             menu_init(MENU_LOGOS);
             load_level_for_menu(ASSET_LEVEL_FRONTEND, ZERO_PLAYERS, CUTSCENE_NONE);
         }
@@ -14047,6 +14096,12 @@ s32 menu_credits_loop(s32 updateRate) {
         if (bgload_active() == FALSE && gMenuDelay > 30) {
             music_change_on();
             credits_free();
+#ifdef TARGET_PORT
+            if (port_skip_intro()) {
+                port_logos_to_title();
+                return 0;
+            }
+#endif
             load_level_for_menu(ASSET_LEVEL_FRONTEND, ZERO_PLAYERS, CUTSCENE_NONE);
             menu_init(MENU_LOGOS);
         }

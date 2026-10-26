@@ -855,45 +855,90 @@ static void arrow(int left, int x, int y) {
     }
 }
 
+/* The fun font's capitals (the game's headings, red edged in yellow), centred between x0 and x1 or from x0. */
+static void heading(int x0, int x1, int y, const char *s, int centred) {
+    char upper[40];
+    int i;
+    for (i = 0; s[i] != '\0' && i < (int) sizeof(upper) - 1; i++) {
+        upper[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
+    }
+    upper[i] = '\0';
+    if (centred) {
+        text_centred(FONT_FUN, x0, x1, y, upper, WHITE, 1);
+    } else {
+        text_clipped(FONT_FUN, x0, y, upper, WHITE, 1, x1);
+    }
+}
+
+static const Colour PICKED_FILL = { 255, 200, 40, 70 };
+static const Colour PICKED_EDGE = { 255, 214, 40, 255 };
+
+/* A value between the game's arrows in a chip from x0 to x1: its left half steps back, its right half forward. */
+static void stepper(int x0, int x1, int y, const char *value) {
+    int arrowWidth = sArrowLeft.rgba != NULL ? sArrowLeft.width : 8;
+    int arrowY = y + 10 - (sArrowLeft.rgba != NULL ? sArrowLeft.height : 8) / 2;
+    box(x0, y, x1, y + 20, (Colour){ 0, 0, 20, 110 }, (Colour){ 140, 180, 255, 110 });
+    arrow(1, x0 + 4, arrowY);
+    arrow(0, x1 - 4 - arrowWidth, arrowY);
+    text_centred(FONT_SMALL, x0 + arrowWidth + 6, x1 - arrowWidth - 6, y + 5, value, YELLOW, 1);
+}
+
+/*
+ * The menu's look, from the mockups (design B, "tabs"): the pages as tabs down the left in the game's heading font,
+ * the chosen one lit in the HUD's gold; on the right a panel with the page's title, its rows
+ * (each a label and a value: between arrows, the game's ON or OFF, or an arrow for a row that does something), the
+ * row touched last lit, and under the rows that row's tip.
+ */
+#define MENU_PANEL_X0 (BS_MENU_TAB_X1)
+#define MENU_PANEL_X1 (BS_WIDTH - 4)
+#define MENU_TIP_Y (BS_MENU_FIRST_Y + BS_MENU_ROWS * BS_MENU_ROW_HEIGHT)
+
 static void draw_menu(const State *s) {
     const BsMenu *m = &s->menu;
-    int i;
+    int i, tabHeight = BS_MENU_TAB_HEIGHT(m->tabCount);
+    const char *tip = m->note;
 
-    if (font_ready(FONT_BIG)) {
-        // The game's menu titles are capitals of the big font.
-        char title[32];
-        for (i = 0; m->title[i] != '\0' && i < (int) sizeof(title) - 1; i++) {
-            title[i] = (m->title[i] >= 'a' && m->title[i] <= 'z') ? m->title[i] - 32 : m->title[i];
+    box(MENU_PANEL_X0, BS_MENU_TAB_Y0, MENU_PANEL_X1, BS_MENU_TAB_Y1, BOX_FILL, BOX_EDGE);
+    for (i = 0; i < m->tabCount && i < BS_MENU_TABS; i++) {
+        int y = BS_MENU_TAB_Y0 + i * tabHeight;
+        if (i == m->tab) {
+            box(4, y, MENU_PANEL_X0 - 4, y + tabHeight - 2, (Colour){ 255, 200, 40, 90 }, PICKED_EDGE);
+        } else {
+            box(4, y, MENU_PANEL_X0 - 4, y + tabHeight - 2, (Colour){ 0, 8, 40, 70 }, (Colour){ 140, 180, 255, 80 });
         }
-        title[i] = '\0';
-        text_centred(FONT_BIG, 0, BS_WIDTH, 2, title, WHITE, 0);
-    } else {
-        text_centred(FONT_MONO, 0, BS_WIDTH, 10, m->title, YELLOW, 1);
+        if (font_ready(FONT_FUN)) {
+            heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8, m->tabs[i], 1);
+        } else {
+            text_clipped(FONT_SMALL, 10, y + tabHeight / 2 - 6, m->tabs[i], i == m->tab ? YELLOW : WHITE, 1,
+                         MENU_PANEL_X0 - 4);
+        }
     }
+    heading(MENU_PANEL_X0 + 12, MENU_PANEL_X1 - 40, 10, m->title, 0);
     if (m->pages[0] != '\0') {
-        text(FONT_SMALL, BS_WIDTH - 8 - text_width(FONT_SMALL, m->pages), 12, m->pages, HINT, 1);
+        text(FONT_SMALL, MENU_PANEL_X1 - 8 - text_width(FONT_SMALL, m->pages), 12, m->pages, HINT, 1);
     }
     for (i = 0; i < m->rowCount && i < BS_MENU_ROWS; i++) {
         const BsMenuRow *row = &m->rows[i];
-        int y = BS_MENU_FIRST_Y + i * BS_MENU_ROW_HEIGHT;
-        int onOff = strcmp(row->value, "On") == 0 || strcmp(row->value, "Off") == 0;
-        box(4, y + 1, BS_WIDTH - 4, y + BS_MENU_ROW_HEIGHT - 1, BOX_FILL, BOX_EDGE);
-        // The label, with its hint under it, or alone in the middle of the row.
-        text_clipped(FONT_SMALL, 12, row->hint[0] != '\0' ? y + 2 : y + 7, row->label, WHITE, 1, BS_MENU_VALUE_X);
-        text_clipped(FONT_SMALL, 12, y + 12, row->hint, HINT, 1,
-                     row->value[0] == '\0' ? BS_WIDTH - 24
-                     : onOff               ? BS_WIDTH - 52
-                                           : BS_MENU_VALUE_X + 4);
-        if (row->value[0] == '\0') {
-            arrow(0, BS_WIDTH - 22, y + 6);
-        } else if (!draw_on_off(row->value, BS_WIDTH - 12 - 36, y + 3)) {
-            arrow(1, BS_MENU_VALUE_X + 6, y + 6);
-            arrow(0, BS_WIDTH - 22, y + 6);
-            text_centred(FONT_SMALL, BS_MENU_VALUE_X + 16, BS_WIDTH - 24, y + 7, row->value, YELLOW, 1);
+        int y = BS_MENU_FIRST_Y + i * BS_MENU_ROW_HEIGHT, labelEnd = BS_MENU_VALUE_X - 4;
+        if (i == m->picked) {
+            box(MENU_PANEL_X0 + 6, y, MENU_PANEL_X1 - 4, y + BS_MENU_ROW_HEIGHT - 2, PICKED_FILL, PICKED_EDGE);
+            if (row->hint[0] != '\0') {
+                tip = row->hint;
+            }
+        } else {
+            fill(MENU_PANEL_X0 + 12, y + BS_MENU_ROW_HEIGHT - 2, MENU_PANEL_X1 - 10, y + BS_MENU_ROW_HEIGHT - 1,
+                 (Colour){ 140, 180, 255, 50 });
         }
+        if (row->value[0] == '\0') {
+            arrow(0, MENU_PANEL_X1 - 20, y + 8);
+            labelEnd = MENU_PANEL_X1 - 24;
+        } else if (!draw_on_off(row->value, MENU_PANEL_X1 - 48, y + 3)) {
+            stepper(BS_MENU_VALUE_X, MENU_PANEL_X1 - 8, y + 3, row->value);
+        }
+        text_clipped(FONT_SMALL, MENU_PANEL_X0 + 14, y + 7, row->label, WHITE, 1, labelEnd);
     }
-    text_clipped(FONT_SMALL, 8, 177, m->note, DIM, 1, BS_WIDTH - 8);
-    text_clipped(FONT_SMALL, 8, 188, newest_message(s), YELLOW, 1, BS_WIDTH - 8);
+    fill(MENU_PANEL_X0 + 8, MENU_TIP_Y - 1, MENU_PANEL_X1 - 6, MENU_TIP_Y, (Colour){ 140, 180, 255, 80 });
+    text_clipped(FONT_SMALL, MENU_PANEL_X0 + 12, MENU_TIP_Y + 6, tip, HINT, 1, MENU_PANEL_X1 - 6);
 }
 
 /* Buttons in the style of the game's blue arrows: blue, edged in yellow; grey if they can't be tapped, green if on. */

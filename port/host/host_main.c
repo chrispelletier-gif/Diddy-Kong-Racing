@@ -25,6 +25,12 @@ int camera_option_count(void);
 const char *camera_option_label(int i);
 void camera_option_value(int i, char *out, int size);
 void camera_option_change(int i, int step);
+int intro_option_count(void);
+const char *intro_option_label(int i);
+void intro_option_value(int i, char *out, int size);
+void intro_option_change(int i, int step);
+const char *intro_option_hint(int i);
+int intro_option_in_race(int i);
 
 /* The game menus' VIDEO OPTIONS on PC: the frame rate (the 3DS has its GPU's settings too, port/3ds/menu_3ds.c). */
 static int video_count(void) {
@@ -54,7 +60,10 @@ static void add_game_menu_options(void) {
                                             camera_option_change, NULL, NULL };
     static const OptionsSection sControls = { controls_option_count, controls_option_label, controls_option_value,
                                               controls_option_change, NULL, NULL };
+    static const OptionsSection sIntro = { intro_option_count, intro_option_label, intro_option_value,
+                                           intro_option_change, intro_option_hint, intro_option_in_race };
     options_add(OPTIONS_VIDEO, &sVideo);
+    options_add(OPTIONS_VIDEO, &sIntro);
     options_add(OPTIONS_CAMERA, &sCamera);
     options_add(OPTIONS_CONTROLS, &sControls);
 }

@@ -141,7 +141,7 @@ static void draw_home(void) {
 
 static void draw_menu_buttons(void) {
     const char *labels[3];
-    labels[0] = menu_3ds_on_main_page() ? "Close" : "Back";
+    labels[0] = "Close";
     labels[1] = menu_3ds_can_scroll(-1) ? "Prev" : "-Prev";
     labels[2] = menu_3ds_can_scroll(1) ? "Next" : "-Next";
     draw_buttons(labels, 3);
@@ -680,7 +680,7 @@ static void update_thread(void *arg) {
                     result = menu_3ds_tap(sTapX, sTapY);
                 } else if (button == 0) {
                     plat_request_ui_sound(PLAT_UI_SOUND_BACK);
-                    result = menu_3ds_back() ? MENU_STAY : MENU_CLOSE;
+                    result = MENU_CLOSE;
                 } else if (menu_3ds_can_scroll(button == 1 ? -1 : 1)) {
                     plat_request_ui_sound(PLAT_UI_SOUND_MOVE);
                     menu_3ds_scroll(button == 1 ? -1 : 1);
