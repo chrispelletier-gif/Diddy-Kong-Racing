@@ -46,6 +46,9 @@ unsigned long long plat_render_idle_ns(void);
 
 /* Monotonic time. */
 unsigned long long plat_time_ns(void);
+/* The raw clock behind plat_time_ns, without its conversion: for timing many short spans (the profiler's parts). */
+unsigned long long plat_ticks(void);
+unsigned long long plat_ticks_per_second(void);
 void plat_sleep_ns(unsigned long long ns);
 
 /* The global "kernel" lock and condition variable that protect every emulated message queue. */
