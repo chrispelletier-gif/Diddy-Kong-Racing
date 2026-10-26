@@ -44,6 +44,12 @@ void intro_option_value(int i, char *out, int size);
 void intro_option_change(int i, int step);
 const char *intro_option_hint(int i);
 int intro_option_in_race(int i);
+/* The Saves page (saves_3ds.c). */
+int saves_option_count(void);
+const char *saves_option_label(int i);
+void saves_option_value(int i, char *out, int size);
+void saves_option_change(int i, int step);
+const char *saves_option_hint(int i);
 
 static volatile int sQuitRequested;
 
@@ -177,6 +183,8 @@ int main(int argc, char **argv) {
                       race_hud_option_change);
     menu_3ds_add_page("Camera", camera_option_count, camera_option_label, camera_option_value, camera_option_change);
     menu_3ds_add_page("Start-up", intro_option_count, intro_option_label, intro_option_value, intro_option_change);
+    menu_3ds_add_page_hint("Saves", saves_option_count, saves_option_label, saves_option_value, saves_option_change,
+                           saves_option_hint, "Saved as N64 dkr.eep and dkr.mpk");
     add_game_menu_options();
     bugreport_start();
     // The Homebrew Launcher passes the path of the .3dsx as argv[0].

@@ -66,11 +66,18 @@ menu (VIDEO, CAMERA and CONTROL OPTIONS) and the pause menu. What you can change
 - **Camera:** Modern (calmer, the default) or the original N64 camera, and whether the camera stops in front of walls.
 - **Sound:** smooth resampling.
 - **Intro logos:** shown, or skipped straight to the title screen. A, B or START also skips them.
+- **Saves:** back up and restore your save (below).
 
 60 fps works best with anti-aliasing off or at 2x; a few heavy levels drop back to 30 fps with 2x on.
 
-Your saves are in `sdmc:/3ds/dkr/` (`eeprom.bin` is the game's save, `controllerpak.bin` holds ghosts), and your
-settings in `settings.txt` and `controls.txt` next to them. Back them up before trying a new build.
+Your saves are in `sdmc:/3ds/dkr/`: `dkr.eep` is the game's save and `dkr.mpk` the Controller Pak with your ghosts,
+and your settings are in `settings.txt` and `controls.txt` next to them. The save files are the same as an N64
+emulator's (ares, Project64, mupen64plus; US version), so you can bring a save over or take yours to an emulator by
+copying and renaming the file. **Settings > Saves** backs up your save and ghosts to a dated folder in
+`sdmc:/3ds/dkr/backup/` and restores one; to restore an emulator's save, put its `.eep` (and `.mpk`, if any) in a
+folder of its own there and pick it. A restore keeps a copy of the save it replaces and closes the game, which loads
+the restored save next time. Saves from earlier builds (`eeprom.bin`, `controllerpak.bin`) are converted the first
+time a newer build starts.
 
 The game is one player only: a 3DS has one set of controls.
 
