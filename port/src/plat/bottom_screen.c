@@ -956,44 +956,47 @@ static void load_banana(void) {
 
 /*
  * The ROM's colons are two short bars a single dark row apart (the small one's are 2x1 pixels), which read as "=" on
- * this screen. These are two square dots in the colon's own colours, each with its dark edge, with a clear gap.
+ * this screen. These are two dots shaded like the digits: each row takes the colours of the same row of the digit 1
+ * (its lit edge, middle and shaded edge), with the digits' dark edge and the two dark rows under them. top is the
+ * first lit row of each dot, so the pair sits around the middle of the digits.
  */
-static void load_colon(int id, Picture *out, int dot) {
-    Picture src;
-    unsigned char colours[8][4];
-    int count = 0, x, y, row, size = dot + 2, gap = 2;
-    if (!load_texture(id, &src)) {
-        return;
-    }
-    // The colours across the first lit row of the top dot.
-    for (y = 0; y < src.height && count == 0; y++) {
-        for (x = 0; x < src.width && count < 8; x++) {
-            const unsigned char *t = src.rgba + (y * src.width + x) * 4;
-            if (t[3] != 0 && t[0] + t[1] + t[2] > 60) {
-                memcpy(colours[count++], t, 4);
-            }
-        }
-    }
-    free(src.rgba);
-    if (count == 0) {
+static void load_colon(const Picture *digit, Picture *out, int dot, int top0, int top1) {
+    int x, y, d, size = dot + 2;
+    if (digit->rgba == NULL) {
         return;
     }
     out->width = size;
-    out->height = size * 2 + gap;
+    out->height = digit->height;
     out->rgba = calloc((unsigned long) out->width * out->height, 4);
-    for (y = 0; out->rgba != NULL && y < out->height; y++) {
-        row = y < size ? y : y - size - gap;
-        if (row < 0 || row >= size) {
-            continue;
-        }
-        for (x = 0; x < size; x++) {
-            unsigned char *o = out->rgba + (y * out->width + x) * 4;
-            if (row == 0 || row == size - 1 || x == 0 || x == size - 1) {
-                o[0] = o[1] = o[2] = 0;
-            } else {
-                memcpy(o, colours[(x - 1) * count / dot], 3);
+    for (d = 0; out->rgba != NULL && d < 2; d++) {
+        int top = d ? top1 : top0;
+        for (y = top - 1; y <= top + dot + 1 && y < out->height; y++) {
+            int first = -1, last = -1, i;
+            const unsigned char *row = digit->rgba + y * digit->width * 4;
+            // The lit run of the digit's row.
+            for (i = 0; i < digit->width; i++) {
+                if (row[i * 4 + 3] != 0 && row[i * 4] + row[i * 4 + 1] + row[i * 4 + 2] > 120) {
+                    if (first < 0) {
+                        first = i;
+                    }
+                    last = i;
+                }
             }
-            o[3] = 255;
+            for (x = 0; x < size; x++) {
+                unsigned char *o = out->rgba + (y * out->width + x) * 4;
+                int edgeX = x == 0 || x == size - 1, edgeY = y == top - 1 || y >= top + dot;
+                if (edgeX && edgeY) {
+                    // Rounded corners, like the digits'.
+                    continue;
+                }
+                if (edgeX || edgeY || first < 0) {
+                    o[0] = o[1] = o[2] = 0;
+                } else {
+                    int at = x == 1 ? first : x == dot ? last : (first + last) / 2;
+                    memcpy(o, row + at * 4, 3);
+                }
+                o[3] = 255;
+            }
         }
     }
 }
@@ -1019,8 +1022,8 @@ static void load_race_art(void) {
     for (i = 0; i < 4; i++) {
         load_texture_frame(ASSET_TEX2D_HUD_PLACENUMBERSUFFIXES, i, &sSuffixes[i], NULL, NULL);
     }
-    load_colon(ASSET_TEX2D_HUD_COLON, &sColon, 4);
-    load_colon(ASSET_TEX2D_HUD_COLONSMALL, &sSmallColon, 3);
+    load_colon(&sDigits[1], &sColon, 3, 2, 9);
+    load_colon(&sSmallDigits[1], &sSmallColon, 2, 2, 7);
     load_texture(ASSET_TEX2D_HUD_FORWARDSLASH, &sSlash);
     load_texture(ASSET_TEX2D_HUD_LAP, &sLapLabel);
     load_texture(ASSET_TEX2D_HUD_TIME, &sTimeLabel);
@@ -1109,7 +1112,7 @@ static int race_time(int x, int y, int frames, int small) {
     for (i = 0; i < 6; i++) {
         x = piece(&set[digits[i]], x, y, 1);
         if (i == 1 || i == 3) {
-            x = piece(colon, x, y + 1, 1);
+            x = piece(colon, x, y, 1);
         }
     }
     return x;
