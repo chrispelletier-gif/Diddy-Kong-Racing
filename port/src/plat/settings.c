@@ -75,9 +75,28 @@ static Setting *find(const char *key) {
     return NULL;
 }
 
+/*
+ * The performance switches only a debug build's menus show (plat.h PLAT_DEBUG_TOOLS). A player's build keeps them at
+ * their defaults, even if settings.txt was written by a debug build.
+ */
+static int is_debug_switch(const char *key) {
+    static const char *const sKeys[] = { "fb16",      "renderahead", "guardband",   "sound_dsp",
+                                         "sound_core", "sound_rate", "sound_buffer" };
+    size_t i;
+    for (i = 0; i < sizeof(sKeys) / sizeof(sKeys[0]); i++) {
+        if (strcmp(key, sKeys[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int settings_get(const char *key, int fallback) {
     Setting *setting;
     int value;
+    if (!PLAT_DEBUG_TOOLS && is_debug_switch(key)) {
+        return fallback;
+    }
     lock();
     setting = find(key);
     value = setting != NULL ? setting->value : fallback;

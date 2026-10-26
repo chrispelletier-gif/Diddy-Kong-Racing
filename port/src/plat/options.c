@@ -104,3 +104,21 @@ void options_change(int category, int inRace, int row, int step) {
 unsigned int options_change_count(void) {
     return sChanges;
 }
+
+int options_visible_count(int count, int (*hidden)(int row)) {
+    int row, shown = 0;
+    for (row = 0; row < count; row++) {
+        shown += !hidden(row);
+    }
+    return shown;
+}
+
+int options_visible_row(int count, int (*hidden)(int row), int i) {
+    int row;
+    for (row = 0; row < count; row++) {
+        if (!hidden(row) && i-- == 0) {
+            return row;
+        }
+    }
+    return -1;
+}

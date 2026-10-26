@@ -699,15 +699,16 @@ static void draw_controls(int y0, int y1) {
         { "L / ZL", "Use item" },    { "START", "Pause" },
         { "R / ZR", "Hop / drift" }, { "SELECT+touch", "Bug report" },
     };
-    int i, lineHeight = font_ready(FONT_SMALL) ? 12 : 10, keyWidth[2] = { 0, 0 };
+    // A player's build has no bug reports (plat.h PLAT_DEBUG_TOOLS).
+    int i, count = PLAT_DEBUG_TOOLS ? 10 : 9, lineHeight = font_ready(FONT_SMALL) ? 12 : 10, keyWidth[2] = { 0, 0 };
     box(4, y0, BS_WIDTH - 4, y1, BOX_FILL, BOX_EDGE);
-    for (i = 0; i < 10; i++) {
+    for (i = 0; i < count; i++) {
         int width = text_width(FONT_SMALL, sControls[i][0]) + 8;
         if (width > keyWidth[i % 2]) {
             keyWidth[i % 2] = width;
         }
     }
-    for (i = 0; i < 10; i++) {
+    for (i = 0; i < count; i++) {
         int x = (i % 2) ? 164 : 12, y = y0 + 4 + (i / 2) * lineHeight;
         if (!font_ready(FONT_SMALL) && (i % 2)) {
             continue; // The 8x8 font only fits one column; the second waits for the ROM.

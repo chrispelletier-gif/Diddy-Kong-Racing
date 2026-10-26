@@ -433,11 +433,21 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
         if (gCurrentLevelHeader->race_type == RACETYPE_HUBWORLD) {
             if (gCurrentLevelHeader->world > WORLD_CENTRAL_AREA && gCurrentLevelHeader->world < WORLD_FUTURE_FUN_LAND) {
                 var_s0 = gCurrentLevelHeader->world;
+#ifdef AVOID_UB
+                // << (var_s0 + 31): the N64 only uses the low 5 bits of a shift, so this is << (var_s0 - 1), the world's
+                // "key cutscene seen" flag. On ARM a shift of 32 or more gives 0, so the flag was never set or seen.
+                if (settings->keys & (1 << var_s0) &&
+                    !(settings->cutsceneFlags & (CUTSCENE_DINO_DOMAIN_KEY << ((var_s0 + 31) & 31)))) {
+                    // Trigger World Key unlocking Challenge Door cutscene.
+                    level_properties_push(levelId, entranceId, vehicleId, cutsceneId);
+                    settings->cutsceneFlags |= CUTSCENE_DINO_DOMAIN_KEY << ((var_s0 + 31) & 31);
+#else
                 if (settings->keys & (1 << var_s0) &&
                     !(settings->cutsceneFlags & (CUTSCENE_DINO_DOMAIN_KEY << (var_s0 + 31)))) {
                     // Trigger World Key unlocking Challenge Door cutscene.
                     level_properties_push(levelId, entranceId, vehicleId, cutsceneId);
                     settings->cutsceneFlags |= CUTSCENE_DINO_DOMAIN_KEY << (var_s0 + 31);
+#endif
                     someAsset = (s8 *) get_misc_asset(ASSET_MISC_68);
                     levelId = someAsset[var_s0 - 1];
                     entranceId = 0;
@@ -519,7 +529,13 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
     set_vehicle_id_for_menu(vehicleId);
     if (gCurrentLevelHeader->race_type == RACETYPE_HUBWORLD) {
         if (settings->worldId - 1 >= 0) {
+#ifdef AVOID_UB
+            // 8 << (worldId - 1) on the N64 (low 5 bits of the shift), the world's balloon door cutscene flags. On ARM it
+            // was 0, so the cutscene played on every visit to the hub once it had 4 (or 8) balloons.
+            var_s0 = 8 << ((settings->worldId + 31) & 31);
+#else
             var_s0 = 8 << (settings->worldId + 31);
+#endif
             if (settings->worldId == 5) {
                 if (settings->balloonsPtr[0] >= 47) {
                     if (settings->ttAmulet >= 4) {

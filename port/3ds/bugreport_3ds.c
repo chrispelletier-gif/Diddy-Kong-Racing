@@ -457,7 +457,8 @@ int bugreport_boot(void) {
     if (marker != NULL) {
         fclose(marker);
     }
-    if (!lastUnended || !load_config(&config)) {
+    // A player's build keeps the last run's files but does not offer to send them (plat.h PLAT_DEBUG_TOOLS).
+    if (!lastUnended || !PLAT_DEBUG_TOOLS || !load_config(&config)) {
         return 0;
     }
 
@@ -723,8 +724,10 @@ static void button_thread(void *arg) {
     bugreport_watch_thread("bug report");
     for (;;) {
         u32 keys = peek_keys();
-        // SELECT held and the touch just started, or the button on the bottom screen.
-        if ((((keys & KEY_SELECT) && (keys & KEY_TOUCH) && !(last & KEY_TOUCH)) || sReportRequested) && !sBusy) {
+        // SELECT held and the touch just started (not in a player's build, plat.h), or the Settings menu's row.
+        if (((PLAT_DEBUG_TOOLS && (keys & KEY_SELECT) && (keys & KEY_TOUCH) && !(last & KEY_TOUCH)) ||
+             sReportRequested) &&
+            !sBusy) {
             sBusy = 1;
             report_now();
             sReportRequested = 0;

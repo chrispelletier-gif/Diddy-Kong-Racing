@@ -1390,7 +1390,7 @@ static void handle_request(void) {
  * the kart is put before the one after it. Each time is noted in the results and in autorun_problems.txt, so the spot
  * is known.
  */
-static void unstick(Object *obj, Object_Racer *racer) {
+static void unstick(Object *obj, Object_Racer *racer, const char *why) {
     s32 checkpoint = racer->nextCheckpoint;
     CheckpointNode *node;
     Camera *camera;
@@ -1413,9 +1413,8 @@ static void unstick(Object *obj, Object_Racer *racer) {
     if (node == NULL) {
         return;
     }
-    plat_snprintf(what, sizeof(what), "note: put at checkpoint %d of lap %d after %d s without progress, from %.0f,%.0f,%.0f",
-                  (int) checkpoint, (int) racer->lap + 1, UNSTICK_SECONDS, obj->trans.x_position,
-                  obj->trans.y_position, obj->trans.z_position);
+    plat_snprintf(what, sizeof(what), "note: put at checkpoint %d of lap %d %s, from %.0f,%.0f,%.0f", (int) checkpoint,
+                  (int) racer->lap + 1, why, obj->trans.x_position, obj->trans.y_position, obj->trans.z_position);
     record_problem(what);
     length = strlen(sUnstuckAt);
     plat_snprintf(sUnstuckAt + length, sizeof(sUnstuckAt) - length, "%s%d:%d", length ? " " : "", (int) racer->lap + 1,
@@ -1455,6 +1454,27 @@ static void unstick(Object *obj, Object_Racer *racer) {
     camera->trans.x_position = obj->trans.x_position;
     camera->trans.y_position = obj->trans.y_position;
     camera->trans.z_position = obj->trans.z_position;
+}
+
+/*
+ * Tricky's race sends the player back to the hub once they fall 400 units below the highest point they reached
+ * (vehicle_tricky.c). The AI driving the kart, made for Tricky's own path, sometimes takes it off the side near the
+ * summit, so a kart falling well below its best height is put back on the course before the game gives up on it.
+ */
+extern f32 gTrickyRacerPeakHeight;
+static s32 falling_off_tricky(Object *obj) {
+    s32 i, count;
+    Object **racers;
+    if (obj->y_velocity >= 0.0f || obj->trans.y_position + 250.0f >= gTrickyRacerPeakHeight) {
+        return FALSE;
+    }
+    racers = get_racer_objects(&count);
+    for (i = 0; i < count; i++) {
+        if (racers[i]->racer->vehicleID == VEHICLE_TRICKY) {
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 /* Called once per game frame, with the number of retraces it took. */
@@ -1562,7 +1582,11 @@ void port_autorun_frame(s32 updateRate) {
                 end_race("stuck", racer->racePosition);
             } else if (sStuckRetraces >= UNSTICK_SECONDS * 60 &&
                        (sStuckRetraces - updateRate) / (UNSTICK_SECONDS * 60) < sStuckRetraces / (UNSTICK_SECONDS * 60)) {
-                unstick(obj, racer);
+                char why[48];
+                plat_snprintf(why, sizeof(why), "after %d s without progress", UNSTICK_SECONDS);
+                unstick(obj, racer, why);
+            } else if (falling_off_tricky(obj)) {
+                unstick(obj, racer, "as it fell off Tricky's mountain");
             } else if (sRaceRetraces >= sTimeoutSeconds * 60) {
                 end_race("timeout", racer->racePosition);
             }
@@ -1582,4 +1606,31 @@ void port_autorun_frame(s32 updateRate) {
     if (sStatusCounter++ % 30 == 0) {
         show_status();
     }
+}
+
+/* The level and the active camera, for the host renderer's clipping sweep (DKR_CLIP_SWEEP, host/gfx_soft.c). */
+void port_sweep_camera(int *level, float pos[3], int *segment) {
+    Camera *camera = cam_get_active_camera();
+    *level = level_id();
+    pos[0] = camera->trans.x_position;
+    pos[1] = camera->trans.y_position;
+    pos[2] = camera->trans.z_position;
+    *segment = camera->cameraSegmentID;
+}
+
+/* Whether the vertices are the level model's (track and scenery) rather than an object's, for the clipping sweep. */
+s32 port_sweep_level_vertex(const void *vertices) {
+    extern LevelModel *gCurrentLevelModel;
+    s32 i;
+    if (gCurrentLevelModel == NULL) {
+        return FALSE;
+    }
+    for (i = 0; i < gCurrentLevelModel->numberOfSegments; i++) {
+        LevelModelSegment *segment = &gCurrentLevelModel->segments[i];
+        if ((const Vertex *) vertices >= segment->vertices &&
+            (const Vertex *) vertices < segment->vertices + segment->numberOfVertices) {
+            return TRUE;
+        }
+    }
+    return FALSE;
 }

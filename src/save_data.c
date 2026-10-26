@@ -672,7 +672,12 @@ SIDeviceStatus get_file_extension(s32 controllerIndex, s32 fileType, char *fileE
             if (fileExtChar < fileExtensions[fileNum][0]) {
                 fileExtChar = fileExtensions[fileNum][0];
             }
+#ifdef AVOID_UB
+            // 'A' + 31 is 96: the N64 uses the low 5 bits of a shift, so 'A' is bit 0. On ARM the shift gave 0.
+            var_s1 |= (1 << ((fileExtensions[fileNum][0] + (BLANK_EXT_CHAR - 1)) & 31));
+#else
             var_s1 |= (1 << (fileExtensions[fileNum][0] + (BLANK_EXT_CHAR - 1)));
+#endif
         }
         if (fileExtChar == BLANK_EXT_CHAR) {
             fileExtChar = 'A';
