@@ -40,6 +40,7 @@
 #include "tracks.h"
 #include "types.h"
 #include "port_step.h"
+#include "port_loadtime.h"
 #include "video.h"
 
 /**
@@ -9057,6 +9058,7 @@ s32 menu_track_select_loop(s32 updateRate) {
 
     settings = get_settings();
     gOptionBlinkTimer = (gOptionBlinkTimer + updateRate) & 0x3F;
+    PORT_LOAD_MENU_HELD(bgload_active() && gMenuDelay != 0);
     if (bgload_active() == FALSE && gMenuDelay != 0) {
         if (gMenuDelay < 0) {
             gMenuDelay -= updateRate;
@@ -9622,6 +9624,7 @@ void trackmenu_input(s32 updateRate) {
         spaceWorldUnlocked = gFFLUnlocked == -1 ? 3 : 4;
         if (gMenuButtons[PLAYER_MENU] & (A_BUTTON | START_BUTTON)) {
             if (gTrackIdForPreview != -1) {
+                PORT_LOAD_PICK(0);
                 gMenuDelay = 1;
                 gTrackIdToLoad = gTrackIdForPreview;
                 gTrackSelectSound = TRUE;
@@ -10253,6 +10256,7 @@ void func_80092188(s32 updateRate) {
                         }
                     }
                 } else if (gMenuButtons[4] & (A_BUTTON | START_BUTTON)) {
+                    PORT_LOAD_PICK(1);
                     gMenuDelay = 1;
                     bgdraw_set_func(NULL);
                     gIsInTracksMenu = 0;

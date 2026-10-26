@@ -7,6 +7,7 @@
 #include <3ds.h>
 #include <citro3d.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,8 +36,12 @@ typedef struct C3DContextStart {
     gxCmdQueue_s gxQueue;
     u32 *cmdBuf;
     size_t cmdBufSize;
+    float cmdBufUsage;
+    u32 flags; // Which groups of settings C3Di_UpdateContext writes next (citro3d's C3DiF_ bits, below)
 } C3DContextStart;
 extern C3DContextStart __C3D_Context;
+// Where citro3d's own code (C3D_TexBind) finds the flags.
+_Static_assert(offsetof(C3DContextStart, flags) == 32, "citro3d's context changed");
 /* Bytes of vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most
  * about 3000 triangles, 9000 vertices, a frame, which is 48K of the largest vertices. */
 #define VBO_BYTES (48 * 1024 * 48)
@@ -86,6 +91,8 @@ typedef struct C3DTexture {
     int levels; // Mipmap levels after the first that tex holds (see mip_levels)
     int point;  // Point sampled, so the levels are never used
     int tinted; // The levels are tinted (the "Show" mipmap setting)
+    struct C3DTexture *prev, *next; // In sTextures (textures in VRAM, P17)
+    int toVram;                     // Waiting to be copied to VRAM (promote_textures)
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
@@ -118,6 +125,7 @@ static int sFrameStarted;
 static int sDepthOnly;
 static int sClearing; // draw_clear_rect is drawing
 static int sFrameFirstDraw; // No draw yet in this frame's command list
+static int sDepthFillPending; // The frame's depth clear is a memory fill (see gfxb_clear_depth)
 static int sFrameCount, sFrameTriangles;
 /* For the hang report: the size of the last frame handed to the GPU. */
 static int sLastFrameTriangles;
@@ -170,19 +178,184 @@ static int full_flush(void) {
     return sFull;
 }
 
+/*
+ * GSPGPU_FlushDataCache asks the GSP service to write a range of the CPU's data cache out to memory for the GPU: an
+ * IPC round trip to another process each time (the vertices and each command list part every frame, every texture
+ * upload). svcFlushProcessDataCache does the same cache maintenance as a plain system call (roadmap item P24).
+ * DKR_SVC_FLUSH=1 uses it. Switch bench #176 measured no difference (since P19 there are only a few a frame), so it
+ * stays off.
+ */
+static int sSvcFlush;
+
+static void gpu_flush(const void *data, u32 size) {
+    if (sSvcFlush) {
+        svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32) data, size);
+    } else {
+        GSPGPU_FlushDataCache(data, size);
+    }
+}
+
+/*
+ * Textures in VRAM (roadmap item P17). Every texture used to live in the linear heap in main memory, so the GPU
+ * fetched its texels over the bus the CPU uses too; VRAM is the GPU's own. The CPU may not write VRAM (a write there
+ * is a data abort, bug report #172), so with DKR_TEX_VRAM=1 a texture is still made and written in the linear heap,
+ * then copied to VRAM by the GPU at the start of a later frame (promote_textures, a few a frame so the GPU queue
+ * doesn't overflow), while that leaves VRAM_RESERVE free (room for the right eye's target when the 3D slider goes up).
+ * Its linear copy is freed once the frames that may have used it are drawn. A render target that later finds no room
+ * (anti-aliasing turned up, 3D) has every texture copied back to the linear heap and tries again
+ * (evict_vram_textures), so the settings get the VRAM they always did. A texture written again gets new linear
+ * memory first, as the CPU writes it (and the "Show" mipmap setting leaves the levels of one in VRAM as they were).
+ * Switch bench #176 measured no gain from it (the GPU's time isn't in texel fetches), so it stays off.
+ */
+#define VRAM_RESERVE (TOP_WIDTH * TOP_HEIGHT * 8)
+#define PROMOTE_PER_FRAME 16
+static void forget_gpu_state(void);
+static void defer_delete(C3DTexture *t);
+
+static int in_vram(const void *data) {
+    return (u32) data >= OS_VRAM_VADDR && (u32) data < OS_VRAM_VADDR + OS_VRAM_SIZE;
+}
+static C3DTexture *sTextures; // Every texture, those sharing another's memory included
+static int sToVram;           // How many wait to be copied to VRAM
+static u32 sVramTextureBytes;
+
+static void texture_link(C3DTexture *t) {
+    t->prev = NULL;
+    t->next = sTextures;
+    if (sTextures != NULL) {
+        sTextures->prev = t;
+    }
+    sTextures = t;
+}
+
+/* Called before a texture is deleted. */
+static void texture_unlink(C3DTexture *t) {
+    if (t->prev == NULL && sTextures != t) {
+        return; // Not in the list.
+    }
+    if (t->prev != NULL) {
+        t->prev->next = t->next;
+    } else {
+        sTextures = t->next;
+    }
+    if (t->next != NULL) {
+        t->next->prev = t->prev;
+    }
+    t->prev = t->next = NULL;
+    if (t->toVram) {
+        t->toVram = 0;
+        sToVram--;
+    }
+    if (!t->shared && in_vram(t->tex.data)) {
+        sVramTextureBytes -= C3D_TexCalcTotalSize(t->tex.size, t->levels);
+    }
+}
+
+/* Points the textures that share from's memory at to. */
+static void move_shares(const void *from, void *to) {
+    C3DTexture *t;
+    for (t = sTextures; t != NULL; t = t->next) {
+        if (t->shared && t->tex.data == from) {
+            t->tex.data = to;
+        }
+    }
+}
+
+/*
+ * Start of a frame: queues GPU copies of a few waiting textures to VRAM. The copies go in the GPU queue ahead of this
+ * frame's command list, which already uses the VRAM copy; the frame being drawn now may still read the linear one,
+ * which is freed with this frame's other deleted textures.
+ */
+static void promote_textures(void) {
+    C3DTexture *t;
+    int done = 0;
+    if (sToVram == 0) {
+        return;
+    }
+    for (t = sTextures; t != NULL && sToVram > 0 && done < PROMOTE_PER_FRAME; t = t->next) {
+        u32 total;
+        void *vram;
+        C3DTexture *old;
+        if (!t->toVram) {
+            continue;
+        }
+        t->toVram = 0;
+        sToVram--;
+        total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
+        if (vramSpaceFree() < total + VRAM_RESERVE || (old = calloc(1, sizeof(C3DTexture))) == NULL) {
+            continue;
+        }
+        if ((vram = vramAlloc(total)) == NULL) {
+            free(old);
+            continue;
+        }
+        GX_TextureCopy((u32 *) t->tex.data, 0, (u32 *) vram, 0, total, GX_TRANSFER_RAW_COPY(1));
+        old->tex.data = t->tex.data;
+        move_shares(t->tex.data, vram);
+        t->tex.data = vram;
+        sVramTextureBytes += total;
+        defer_delete(old);
+        done++;
+    }
+    if (done > 0) {
+        forget_gpu_state(); // The bound textures' addresses changed.
+    }
+}
+
+/* Moves one texture's memory from VRAM to the linear heap, with the GPU idle and outside a citro3d frame. */
+static int texture_to_linear(C3DTexture *t) {
+    u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
+    void *data = linearAlloc(total);
+    if (data == NULL) {
+        return 0;
+    }
+    gpu_flush(data, total); // No dirty cache lines left to land on the copy later.
+    C3D_SyncTextureCopy((u32 *) t->tex.data, 0, (u32 *) data, 0, total, GX_TRANSFER_RAW_COPY(1));
+    move_shares(t->tex.data, data);
+    vramFree(t->tex.data);
+    t->tex.data = data;
+    sVramTextureBytes -= total;
+    return 1;
+}
+
+/*
+ * With the GPU idle: moves every texture in VRAM to the linear heap, for a render target that needs the room.
+ * Returns how many moved.
+ */
+static int evict_vram_textures(void) {
+    C3DTexture *t;
+    int moved = 0, count = 0;
+    for (t = sTextures; t != NULL; t = t->next) {
+        if (t->toVram) {
+            t->toVram = 0; // They would only take the room back.
+            sToVram--;
+        }
+        if (!t->shared && in_vram(t->tex.data)) {
+            count++;
+            moved += texture_to_linear(t);
+        }
+    }
+    if (count > 0) {
+        plat_log("textures: moved %d of %d from VRAM to main memory for a render target (%lu KB left in VRAM)",
+                 moved, count, (unsigned long) (sVramTextureBytes / 1024));
+        forget_gpu_state();
+    }
+    return moved;
+}
+
 static void flush_new_vertices(void) {
     if (sVboFlushed > sVboUsed) {
         sVboFlushed = 0; // The buffer was started again.
     }
     if (sVboUsed > sVboFlushed) {
-        GSPGPU_FlushDataCache(sVbo + sVboFlushed, sVboUsed - sVboFlushed);
+        gpu_flush(sVbo + sVboFlushed, sVboUsed - sVboFlushed);
     }
     sVboFlushed = sVboUsed;
     if (sIboFlushed > sIboUsed) {
         sIboFlushed = 0;
     }
     if (sIboUsed > sIboFlushed && sIbo != NULL) {
-        GSPGPU_FlushDataCache(sIbo + sIboFlushed, (sIboUsed - sIboFlushed) * sizeof(u16));
+        gpu_flush(sIbo + sIboFlushed, (sIboUsed - sIboFlushed) * sizeof(u16));
     }
     sIboFlushed = sIboUsed;
 }
@@ -322,6 +495,9 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly);
 static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
 static void write_eye(float mul, float add);
+static void hand_over_draw_parts(void);
+/* citro3d's own function that writes the changed settings to the command list (not in its public header). */
+void C3Di_UpdateContext(void);
 
 static int sGpuTestStep;
 
@@ -552,7 +728,7 @@ static void gpu_self_test(void) {
         for (i = 0; i < 3; i++) {
             sIbo[i] = (u16) (first + sOrder[i]);
         }
-        GSPGPU_FlushDataCache(sIbo, 3 * sizeof(u16));
+        gpu_flush(sIbo, 3 * sizeof(u16));
         C3D_DrawElements(GPU_TRIANGLES, 3, C3D_UNSIGNED_SHORT, sIbo);
     }
     gpu_test_end(sNames[12]);
@@ -568,8 +744,17 @@ static const char *aa_name(int aa) {
 
 /* A render target in the current buffer formats (sTargetFb16). */
 static C3D_RenderTarget *new_target(int width, int height) {
-    return C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
-                                  sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+    C3D_RenderTarget *target = NULL;
+    int tries;
+    // Textures in VRAM (P17) give way to a target: the second try is with them moved out.
+    for (tries = 0; tries < 2 && target == NULL; tries++) {
+        if (tries == 1 && evict_vram_textures() == 0) {
+            break;
+        }
+        target = C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
+                                        sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+    }
+    return target;
 }
 
 /*
@@ -886,7 +1071,7 @@ void gfxb_init(void) {
     }
     C3D_TexInit(&sWhiteTex, 8, 8, GPU_RGBA8);
     C3D_TexUpload(&sWhiteTex, white);
-    GSPGPU_FlushDataCache(sWhiteTex.data, 8 * 8 * 4);
+    gpu_flush(sWhiteTex.data, 8 * 8 * 4);
 
     C3D_DepthMap(true, -1.0f, 0.0f);
     gpu_self_test();
@@ -1285,7 +1470,7 @@ static void capture_pending_frame(void) {
     }
     pixels = linearAlloc(w * h * 4);
     if (pixels != NULL) {
-        GSPGPU_FlushDataCache(pixels, w * h * 4);
+        gpu_flush(pixels, w * h * 4);
         C3D_SyncDisplayTransfer((u32 *) sTarget->frameBuf.colorBuf,
                                 GX_BUFFER_DIM(TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX), pixels,
                                 GX_BUFFER_DIM(w, h),
@@ -1780,6 +1965,7 @@ void gfxb_3ds_shutdown(void) {
 static void process_pending_frees(FrameSlot *slot) {
     int i;
     for (i = 0; i < slot->numFrees; i++) {
+        texture_unlink(slot->frees[i]);
         if (!slot->frees[i]->shared) {
             C3D_TexDelete(&slot->frees[i]->tex);
         }
@@ -1858,10 +2044,15 @@ static void wait_for_gpu(int measure) {
  * The experimental switches the switch bench (roadmap P29) flips between races, read again at the start of a frame
  * when one changes: DKR_GPU_SPLIT (command list splits before blended draws, P19; 0 off, the default, 1 before
  * blending, 2 on every state change; see drain_before_draw), DKR_LINE_WATCH and DKR_RECENT_FRAMES (the white-line
- * diagnostics, P28) and DKR_EARLY_DEPTH (the early depth test, P20).
+ * diagnostics, P28), DKR_EARLY_DEPTH (the early depth test, P20), DKR_SVC_FLUSH (cache flushes as a system call,
+ * P24, see gpu_flush) and DKR_DEPTH_FILL (the depth clear as a memory fill, P18, on by default, see
+ * gfxb_clear_depth). DKR_TEX_VRAM (P17) is read when a texture is made instead, as the switch bench sets it while a
+ * level loads its textures.
  */
 static int sSwitchEpoch = -1;
-static int sSplitMode, sEarlyDepth;
+static int sSplitMode, sEarlyDepth, sDepthFill;
+static int sFastState = 1; // DKR_FAST_STATE (roadmap P23): the cheaper per-draw settings path
+static int sFastClip = 1;  // DKR_FAST_CLIP (roadmap P22): triangles wholly beyond the band dropped, not clipped
 
 static void read_switches(void) {
     int recent, i;
@@ -1872,6 +2063,10 @@ static void read_switches(void) {
     sSplitMode = plat_switch("DKR_GPU_SPLIT", 0);
     sLineWatch = plat_switch("DKR_LINE_WATCH", 0);
     sEarlyDepth = plat_switch("DKR_EARLY_DEPTH", 0) != 0;
+    sSvcFlush = plat_switch("DKR_SVC_FLUSH", 0) != 0;
+    sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
+    sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
+    sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -1882,9 +2077,13 @@ static void read_switches(void) {
         }
         sRecentOn = recent;
     }
-    plat_log("switches: command list split %s, line watch %d, recent frames %s (%d slots), early depth test %s",
+    plat_log("switches: command list split %s, line watch %d, recent frames %s (%d slots), early depth test %s, "
+             "settings path %s",
              sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes", sLineWatch,
-             sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off");
+             sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off", sFastState ? "short" : "full");
+    plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s",
+             sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
+             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all");
 }
 
 void gfxb_start_frame(void) {
@@ -1933,14 +2132,16 @@ void gfxb_start_frame(void) {
     bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
     read_switches();
+    promote_textures();
     forget_gpu_state();
     sMipmapsUsed = sMipmapSetting != 0;
     sMipmapsShown = sMipmapSetting == 2;
     sColourBoost = sColourSetting;
     sFrameFirstDraw = 1;
+    sDepthFillPending = 0;
     if (sFrameStarted < 0) {
         static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
-        draw_clear_rect(sFullScreen, 0, 1);
+        gfxb_clear_depth(sFullScreen);
     }
     sFrameStarted = 1;
 }
@@ -2036,6 +2237,7 @@ void gfxb_end_frame(void) {
     if (sFrameCount == sLogFrame && sSnapshotFrame >= 0) {
         save_command_list();
     }
+    hand_over_draw_parts();
     {
         static float sMaxUsage;
         FrameSlot *slot = &sSlots[sRec];
@@ -2044,9 +2246,9 @@ void gfxb_end_frame(void) {
         int i;
 
         if (full_flush()) {
-            GSPGPU_FlushDataCache(sVbo, sVboUsed);
+            gpu_flush(sVbo, sVboUsed);
             if (sIboUsed > 0) {
-                GSPGPU_FlushDataCache(sIbo, sIboUsed * sizeof(u16));
+                gpu_flush(sIbo, sIboUsed * sizeof(u16));
             }
         } else {
             flush_new_vertices();
@@ -2061,6 +2263,14 @@ void gfxb_end_frame(void) {
                      "vertices, %d format changes", sFrameCount, sFrameTriangles, plat_time_ns() / 1000000ULL,
                      usage * 100.0f, sMaxUsage * 100.0f, sDrainSplits, sVboUsed / 1024, sVfmtSwitches);
         }
+        {
+            static u32 sLoggedVramBytes;
+            if (sVramTextureBytes != sLoggedVramBytes) {
+                sLoggedVramBytes = sVramTextureBytes;
+                plat_log("textures in VRAM: %lu KB, %lu KB of VRAM free", (unsigned long) (sVramTextureBytes / 1024),
+                         (unsigned long) (vramSpaceFree() / 1024));
+            }
+        }
         if (sOverlap) {
             // Built while the GPU drew the last frame: wait for it now, then hand this one over.
             unsigned long long start = prof_enabled() ? plat_time_ns() : 0;
@@ -2071,8 +2281,20 @@ void gfxb_end_frame(void) {
         }
         // C3D_FrameBegin set citro3d's own command buffer: carry on in the slot's, where the frame is.
         GPUCMD_SetBuffer(tail, tailSize, tailOffset);
+        if (sDepthFillPending) {
+            // With the GPU idle: the fill runs before the frame's command list in the GPU queue.
+            C3D_RenderTargetClear(sTarget, C3D_CLEAR_DEPTH, 0, 0);
+            if (sStereo) {
+                C3D_RenderTargetClear(sTargetRight, C3D_CLEAR_DEPTH, 0, 0);
+            }
+        }
         for (i = 0; i < slot->numParts; i++) {
-            GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
+            if (sSvcFlush) {
+                gpu_flush(slot->partAddr[i], slot->partWords[i] * 4);
+                GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, 0);
+            } else {
+                GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
+            }
         }
         sTarget->used = true;
         if (sStereo) {
@@ -2360,7 +2582,23 @@ void gfxb_texture_upload(GfxTexture *tex) {
             return;
         }
         t->levels = levels;
+        texture_link(t);
         tex->backendData = t;
+    } else if (in_vram(t->tex.data)) {
+        // Written again, by the CPU, which can't write VRAM: into new linear memory (P17).
+        u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
+        void *data = linearAlloc(total);
+        C3DTexture *old = calloc(1, sizeof(C3DTexture));
+        if (data == NULL || old == NULL) {
+            linearFree(data);
+            free(old);
+            return; // Keeps the old picture.
+        }
+        old->tex.data = t->tex.data;
+        move_shares(t->tex.data, data);
+        t->tex.data = data;
+        sVramTextureBytes -= total;
+        defer_delete(old);
     }
     // Swizzled straight into the texture's memory in 8x8 tiles, top row first (the GPU samples t = 0 from the start
     // of the data). No temporary buffer: when the heap was short, skipping the upload left whatever the memory held
@@ -2383,7 +2621,11 @@ void gfxb_texture_upload(GfxTexture *tex) {
     }
     set_texture_filter(t, tex->filter == GFX_FILTER_POINT);
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
-    GSPGPU_FlushDataCache(data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
+    gpu_flush(data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
+    if (!t->toVram && plat_switch("DKR_TEX_VRAM", 0)) {
+        t->toVram = 1; // Copied over by promote_textures.
+        sToVram++;
+    }
     forget_gpu_state();
 }
 
@@ -2431,17 +2673,22 @@ static void verify_texture(const GfxTexture *tex) {
 
 void gfxb_texture_free(GfxTexture *tex) {
     C3DTexture *t = (C3DTexture *) tex->backendData;
-    FrameSlot *slot = &sSlots[sRec];
     if (t == NULL) {
         return;
     }
     tex->backendData = NULL;
-    // The GPU may still be drawing with it, and this frame may have used it: delete it once the GPU has drawn this
-    // frame (process_pending_frees).
+    defer_delete(t);
+}
+
+/* The GPU may still be drawing with the texture, and this frame may have used it: deletes it once the GPU has drawn
+ * this frame (process_pending_frees). */
+static void defer_delete(C3DTexture *t) {
+    FrameSlot *slot = &sSlots[sRec];
     if (slot->numFrees == slot->freesCapacity) {
         int capacity = slot->freesCapacity ? slot->freesCapacity * 2 : 256;
         C3DTexture **list = realloc(slot->frees, capacity * sizeof(C3DTexture *));
         if (list == NULL) {
+            texture_unlink(t);
             if (!t->shared) {
                 C3D_TexDelete(&t->tex); // Out of memory: delete now and risk a glitch.
             }
@@ -2463,6 +2710,8 @@ void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
     // The same memory with another sampler setting: only the C3D_Tex's parameters differ.
     *t = *s;
     t->shared = 1;
+    t->toVram = 0;
+    texture_link(t); // Follows its memory when that moves (move_shares).
     set_texture_filter(t, dst->filter == GFX_FILTER_POINT);
     dst->backendData = t;
 }
@@ -2936,11 +3185,11 @@ static int bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV)
     C3DTexture *t = (tex != NULL) ? (C3DTexture *) tex->backendData : NULL;
     C3D_Tex *bind = (t != NULL) ? &t->tex : &sWhiteTex;
     int changed = !sGpu.known || bind != sGpu.tex[unit];
-    if (t != NULL && t->levels > 0 && t->tinted != sMipmapsShown && tex->pixels != NULL) {
+    if (t != NULL && t->levels > 0 && t->tinted != sMipmapsShown && tex->pixels != NULL && !in_vram(t->tex.data)) {
         // The Show setting changed since the levels were built. The GPU may still be drawing the last frame with
         // them, which can show one frame of mixed levels.
         if (upload_mip_levels(t, tex, gpu_format(tex))) {
-            GSPGPU_FlushDataCache(t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
+            gpu_flush(t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
         }
         t->tinted = sMipmapsShown;
     }
@@ -3211,6 +3460,23 @@ static void set_draw_state(const GfxDrawState *state) {
  * DKR_STATE_CACHE=2 leaves that out, for testing.
  */
 
+/*
+ * More than half of a race frame's draws differ from the draw before only in their textures (PC count, P23). For
+ * those the combiner, fog and draw settings below would only find again that nothing changed, so with DKR_FAST_STATE
+ * (the default) they are skipped: the draw is compared with the last one whose settings were all checked, which is
+ * kept here. The comparison leaves out the padding byte after fogEnabled. What else the settings depend on (colour
+ * boost, wide screen, 3D, early depth) only changes between frames, when the settings are forgotten anyway; the depth
+ * clear's sDepthOnly is compared too.
+ */
+static GfxDrawState sCheckedState;
+static int sCheckedDepthOnly;
+
+static int same_but_textures(const GfxDrawState *a, const GfxDrawState *b) {
+    return memcmp(a, b, offsetof(GfxDrawState, fogEnabled) + 1) == 0 && a->fogMul == b->fogMul &&
+           a->fogOffset == b->fogOffset && a->cullMode == b->cullMode && a->flat == b->flat &&
+           memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
+}
+
 /* Sets every GPU setting a draw uses. */
 static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
     static int sCache = -1;
@@ -3222,6 +3488,14 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
         plat_log("GPU settings: %s", sCache == 0   ? "all set for every draw"
                                      : sCache == 2 ? "only changes are set"
                                                    : "only changes are set, all draw settings with a new texture");
+    }
+    if (sFastState && sGpu.known && sDepthOnly == sCheckedDepthOnly && same_but_textures(state, &sCheckedState)) {
+        newTexture = bind_texture(0, state->textures[0], su0, sv0);
+        newTexture |= bind_texture(1, state->textures[1], su1, sv1);
+        if (newTexture && sCache == 1) {
+            C3D_CullFace((GPU_CULLMODE) sGpu.cull); // As below
+        }
+        return;
     }
     newTexture = bind_texture(0, state->textures[0], su0, sv0);
     newTexture |= bind_texture(1, state->textures[1], su1, sv1);
@@ -3236,10 +3510,34 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
         // It wrote the combiner stages itself.
         forget_gpu_state();
     }
+    sCheckedState = *state;
+    sCheckedDepthOnly = sDepthOnly;
 }
 
-/* citro3d's own function that writes the changed settings to the command list (not in its public header). */
-void C3Di_UpdateContext(void);
+/*
+ * citro3d's flags for the groups of settings that set_all_state sets when nothing is known (sGpu forgotten): the
+ * effect (blending, depth, culling), the scissor, the combiner buffer and fog, the texture units and the combiner
+ * stages. From citro3d's internal.h (C3DiF_Effect, _Scissor, _TexEnvBuf, _TexAll, _TexEnvAll).
+ */
+#define C3D_SETTINGS_FLAGS ((1u << 4) | (1u << 7) | (1u << 9) | (7u << 23) | (0x3Fu << 26))
+
+/*
+ * Writes all of a draw's settings now, and leaves them all marked for the draw to write a second time
+ * (drain_before_draw says why). The settings were all just set with nothing known. The full way sets them all again
+ * after the first write; the short way (DKR_FAST_STATE) puts back the flags the first write cleared, which marks the
+ * same groups with the same values, so the command list comes out the same for less work.
+ */
+static void write_settings_twice(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
+    if (sFastState) {
+        u32 again = __C3D_Context.flags & C3D_SETTINGS_FLAGS;
+        C3Di_UpdateContext();
+        __C3D_Context.flags |= again;
+        return;
+    }
+    C3Di_UpdateContext();
+    forget_gpu_state();
+    set_all_state(state, su0, sv0, su1, sv1);
+}
 
 /* Triangles reaching far off the screen, such as the sky dome and big stretches of ground around the camera, are cut
  * down to a guard band before they reach the GPU, as the N64 does. The 3DS's GPU can drop such triangles or draw them
@@ -3264,9 +3562,13 @@ static float band_for(int pixels) {
     return band < GUARD_BAND ? band : GUARD_BAND;
 }
 
+/* Which sides of the band a vertex is beyond: bit p for clip_distance's plane p, OUTSIDE_BEHIND for w <= 0. */
+#define OUTSIDE_PLANES 0xF
+#define OUTSIDE_BEHIND 0x10
 static inline int outside_band(const GfxVertex *v) {
     float gx = sBandX * v->w, gy = sBandY * v->w;
-    return v->w <= 0.0f || v->x > gx || -v->x > gx || v->y > gy || -v->y > gy;
+    return (v->x > gx) | ((-v->x > gx) << 1) | ((v->y > gy) << 2) | ((-v->y > gy) << 3) |
+           (v->w <= 0.0f ? OUTSIDE_BEHIND : 0);
 }
 
 static float clip_distance(const GfxVertex *v, int plane) {
@@ -3328,12 +3630,18 @@ int plat_3ds_guard_band_setting(void) {
  * left as it is. Otherwise the vertices are copied, and the clipped triangles' new corners added after them, into
  * buffers of their own, which replace verts and indices: triangles within the band keep their indices, the others
  * are replaced by the fan of their clipped polygon (at most 7 corners, so 5 triangles).
+ *
+ * Roadmap P22: in a race about a third of the draws reach past the band and some 500 triangles a frame are outside it,
+ * but more than 80% of those lie wholly beyond one of its sides (PC count), so clipping leaves nothing of them. With
+ * DKR_FAST_CLIP (the default) they are dropped as soon as their corners' sides show it, and the vertices are only
+ * copied once a triangle really has to be cut, which most draws never reach (their indices then point into the
+ * draw's own vertices). What is drawn is the same.
  */
 static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16 **indices, int *numTriangles) {
     GfxVertex poly[2][16];
     const GfxVertex *in = *verts;
     const u16 *idx = *indices;
-    int i, j, k, n, plane, count = *numTriangles * 3, used, usedIdx, any = 0;
+    int i, j, k, n, plane, count = *numTriangles * 3, used, usedIdx, any = 0, copied;
 
     if (!plat_3ds_guard_band_setting() || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
         return;
@@ -3353,15 +3661,28 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
         !grow((void **) &sClipIndices, &sClipIndexCapacity, *numTriangles * 15, sizeof(u16))) {
         return;
     }
-    memcpy(sClipVerts, in, *numVerts * sizeof(GfxVertex));
+    copied = !sFastClip;
+    if (copied) {
+        memcpy(sClipVerts, in, *numVerts * sizeof(GfxVertex));
+    }
     used = *numVerts;
     usedIdx = 0;
     for (i = 0; i < count; i += 3) {
-        if (!sClipOutside[idx[i]] && !sClipOutside[idx[i + 1]] && !sClipOutside[idx[i + 2]]) {
+        int a = sClipOutside[idx[i]], b = sClipOutside[idx[i + 1]], c = sClipOutside[idx[i + 2]];
+        if (!(a | b | c)) {
             sClipIndices[usedIdx++] = idx[i];
             sClipIndices[usedIdx++] = idx[i + 1];
             sClipIndices[usedIdx++] = idx[i + 2];
             continue;
+        }
+        if (sFastClip) {
+            if (a & b & c & OUTSIDE_PLANES) {
+                continue; // Wholly beyond one side: the clipper would leave nothing.
+            }
+            if (!copied) {
+                memcpy(sClipVerts, in, *numVerts * sizeof(GfxVertex));
+                copied = 1;
+            }
         }
         poly[0][0] = in[idx[i]];
         poly[0][1] = in[idx[i + 1]];
@@ -3398,10 +3719,49 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
             used += 3;
         }
     }
-    *verts = sClipVerts;
-    *numVerts = used;
+    if (copied) {
+        *verts = sClipVerts;
+        *numVerts = used;
+    }
     *indices = sClipIndices;
     *numTriangles = usedIdx / 3;
+}
+
+/*
+ * The draws' parts (profile.h PROF_PART_BACKEND to _WRITE), timed while the profiler is on. They are kept in clock
+ * ticks and handed over at the end of the frame: converting a reading to nanoseconds takes three 64-bit divisions,
+ * which cost more than some of the parts (P23). As in the display list walk, each span between two readings holds
+ * about one reading's cost, which is taken back out of its part and, through PROF_PART_WALK_TIMER, of the renderer's.
+ */
+enum { DRAW_PART_BACKEND, DRAW_PART_CLIP, DRAW_PART_STATE, DRAW_PART_TWICE, DRAW_PART_WRITE, DRAW_PART_COUNT };
+static const int sDrawPartProf[DRAW_PART_COUNT] = { PROF_PART_BACKEND, PROF_PART_CLIP, PROF_PART_STATE,
+                                                     PROF_PART_STATE_TWICE, PROF_PART_WRITE };
+static unsigned long long sDrawPartTicks[DRAW_PART_COUNT];
+static unsigned int sDrawPartSpanReads[DRAW_PART_COUNT]; // Readings within each part's spans
+static unsigned int sDrawPartReads;                      // All the readings taken
+
+static inline void draw_part(int part, unsigned long long ticks, int reads) {
+    sDrawPartTicks[part] += ticks;
+    sDrawPartSpanReads[part] += reads;
+}
+
+static void hand_over_draw_parts(void) {
+    unsigned long long cost, perSecond;
+    int i;
+    if (sDrawPartReads == 0) {
+        return;
+    }
+    cost = prof_clock_read_cost();
+    perSecond = plat_ticks_per_second();
+    for (i = 0; i < DRAW_PART_COUNT; i++) {
+        unsigned long long reads = sDrawPartSpanReads[i] * cost / 256;
+        unsigned long long ticks = sDrawPartTicks[i] > reads ? sDrawPartTicks[i] - reads : 0;
+        prof_part(sDrawPartProf[i], ticks * 1000000000ULL / perSecond);
+        sDrawPartTicks[i] = 0;
+        sDrawPartSpanReads[i] = 0;
+    }
+    prof_part(PROF_PART_WALK_TIMER, sDrawPartReads * cost / 256 * 1000000000ULL / perSecond);
+    sDrawPartReads = 0;
 }
 
 /*
@@ -3468,21 +3828,22 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     int first, vertex, count, fmt, flat = gfx_flat_mode(state), indexed = indexed_enabled();
     int vertBytes, written;
     u16 *ibo = NULL;
-    // Timed in parts while the profiler is on (prof_part); a tick read costs a system call.
-    int timed = prof_enabled();
+    // Timed in parts while the profiler is on (draw_part).
+    int timed = prof_enabled(), twiceReads = 0;
     unsigned long long t0 = 0, t1 = 0, t2 = 0, t3;
 
     if (timed) {
-        t0 = plat_time_ns();
+        t0 = plat_ticks();
     }
     clip_to_guard_band(&verts, &numVerts, &indices, &numTriangles);
     if (timed) {
-        t1 = plat_time_ns();
-        prof_part(PROF_PART_CLIP, t1 - t0);
+        t1 = plat_ticks();
+        draw_part(DRAW_PART_CLIP, t1 - t0, 1);
     }
     if (numTriangles == 0) {
         if (timed) {
-            prof_part(PROF_PART_BACKEND, t1 - t0);
+            draw_part(DRAW_PART_BACKEND, t1 - t0, 1);
+            sDrawPartReads += 2;
         }
         return;
     }
@@ -3504,6 +3865,9 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
                      : indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16) ? "index buffer"
                                                                                        : "command list",
                      sVboUsed, sIboUsed, (unsigned long) cmd_position());
+        }
+        if (timed) {
+            sDrawPartReads += 2;
         }
         return;
     }
@@ -3541,15 +3905,17 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     }
     set_all_state(state, &su0, &sv0, &su1, &sv1);
     if (first) {
-        // Write all the settings now, then mark them changed so that the draw writes them a second time.
-        C3Di_UpdateContext();
-        forget_gpu_state();
-        set_all_state(state, &su0, &sv0, &su1, &sv1);
+        unsigned long long tw = timed ? plat_ticks() : 0;
+        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+        if (timed) {
+            draw_part(DRAW_PART_TWICE, plat_ticks() - tw, 1);
+            twiceReads = 2;
+        }
     }
 
     if (timed) {
-        t2 = plat_time_ns();
-        prof_part(PROF_PART_STATE, t2 - t1);
+        t2 = plat_ticks();
+        draw_part(DRAW_PART_STATE, t2 - t1, 1 + twiceReads);
     }
     vertex = use_vertex_format(fmt);
     if (indexed && vertex + numVerts > 0xFFFF) {
@@ -3567,8 +3933,8 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         sIboUsed += count;
     }
     if (timed) {
-        t3 = plat_time_ns();
-        prof_part(PROF_PART_WRITE, t3 - t2);
+        t3 = plat_ticks();
+        draw_part(DRAW_PART_WRITE, t3 - t2, 1);
     }
     draw_prims(vertex, count, ibo);
     if (hangDraw != NULL) {
@@ -3577,7 +3943,8 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     sVboUsed += vertBytes;
     sFrameTriangles += numTriangles;
     if (timed) {
-        prof_part(PROF_PART_BACKEND, plat_time_ns() - t0);
+        draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 4 + twiceReads);
+        sDrawPartReads += 5 + twiceReads;
     }
 }
 
@@ -3643,7 +4010,25 @@ void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, uns
     draw_clear_rect(rect, (r << 24) | (g << 16) | (b << 8) | a, 0);
 }
 
+/*
+ * Each frame starts with a depth clear drawn over the whole screen, and the game draws its own right after (roadmap
+ * item P18): two passes over every pixel. Instead, a whole-screen depth clear before anything else is drawn becomes
+ * one memory fill of the depth buffer, queued ahead of the frame's command list in gfxb_end_frame. A depth-only fill
+ * was blamed for hanging a real New 3DS after the first frame in October, but that hang turned out to be the vertex
+ * shader, which hung the GPU with plain drawn clears too; switch bench #176 ran it on a New 3DS without trouble and
+ * saved 0.4-1.6 ms of GPU time a frame. Other depth clears (part of the screen, or after a draw) are drawn.
+ * DKR_DEPTH_FILL=0 draws them all, as before.
+ */
 void gfxb_clear_depth(const short rect[4]) {
-    // Always drawn: a memory fill of the depth buffer alone hangs a real 3DS (see gfxb_start_frame).
+    // The game's own clear leaves out the bottom row (its scissor ends at 239), which the frame's first clear has
+    // just cleared anyway.
+    if (sDepthFill && sFrameFirstDraw && rect[0] <= 0 && rect[1] <= 0 && rect[2] >= GFX_SCREEN_WIDTH - 1 &&
+        rect[3] >= GFX_SCREEN_HEIGHT - 1) {
+        sDepthFillPending = 1;
+        if (sEarlyDepth && !sStereo) {
+            GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+        }
+        return;
+    }
     draw_clear_rect(rect, 0, 1);
 }

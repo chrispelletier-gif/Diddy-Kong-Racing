@@ -65,6 +65,7 @@ enum ProfPart {
     PROF_PART_BACKEND,
     PROF_PART_CLIP,
     PROF_PART_STATE,
+    PROF_PART_STATE_TWICE, /* Within PROF_PART_STATE: writing the settings a second time (drain_before_draw) */
     PROF_PART_WRITE,
     /*
      * The display list walk (gfx_rdp.c, P26): the rest of PROF_RDP between the start of the display list and the end
@@ -79,7 +80,8 @@ enum ProfPart {
     PROF_PART_WALK_DRAWSTATE, /* build_draw_state: blend, combiner, depth settings */
     PROF_PART_WALK_TEXTURES,  /* lookup_texture: hashing the texture and finding it in the cache */
     PROF_PART_WALK_FRAMEEND,  /* Ending the frame (gfxb_end_frame) */
-    PROF_PART_WALK_TIMER,     /* The walk's own clock reads, taken out of the parts above and of PROF_RDP */
+    PROF_PART_WALK_TIMER,     /* The profiler's own clock reads in the walk and the draws, taken out of the parts
+                               * and of PROF_RDP */
     /* Waits within the frame end (3DS), shown apart from it: for the GPU to finish the frame before (part of
      * PROF_GPU_WAIT), and for the screen to show it (DKR_PRESENT_WAIT, also counted as PROF_GPU_WAIT). */
     PROF_PART_END_GPU_WAIT,
@@ -87,6 +89,9 @@ enum ProfPart {
     PROF_PART_COUNT
 };
 void prof_part(int part, unsigned long long ns);
+/* What one plat_ticks() read costs, in 1/256ths of a tick (measured the first time), for taking the profiler's own
+ * clock reads back out of the parts they time. */
+unsigned long long prof_clock_read_cost(void);
 
 /* Statistics over a span of frames (a race, or the last second for the overlay). */
 typedef struct ProfStats {

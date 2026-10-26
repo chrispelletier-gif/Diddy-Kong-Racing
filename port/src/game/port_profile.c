@@ -135,6 +135,29 @@ void prof_part(int part, unsigned long long ns) {
     }
 }
 
+unsigned long long prof_clock_read_cost(void) {
+    static unsigned long long sCost;
+    if (sCost == 0) {
+        // The fastest of a few tries, so a thread switch in one doesn't count.
+        s32 attempt, i;
+        for (attempt = 0; attempt < 8; attempt++) {
+            unsigned long long start = plat_ticks(), cost;
+            for (i = 0; i < 32; i++) {
+                (void) plat_ticks();
+            }
+            cost = (plat_ticks() - start) * 256 / 33;
+            if (attempt == 0 || cost < sCost) {
+                sCost = cost;
+            }
+        }
+        if (sCost == 0) {
+            sCost = 1;
+        }
+        port_log("profiler: a clock read takes %llu ns", (sCost * 1000000000ULL / 256) / plat_ticks_per_second());
+    }
+    return sCost;
+}
+
 void prof_render_task(unsigned long long totalNs) {
     unsigned long long busyNs;
     s32 w;
@@ -310,10 +333,10 @@ static void show_overlay(void) {
             }
             sPartLoggedFrames = sRenderedFrames;
             if (backendTimed) {
-                port_log("renderer parts: draws %.2f ms (clip %.2f, settings %.2f, vertices %.2f), %u tris %u draws "
-                         "a frame",
+                port_log("renderer parts: draws %.2f ms (clip %.2f, settings %.2f of which written twice %.2f, "
+                         "vertices %.2f), %u tris %u draws a frame",
                          perFrame[PROF_PART_BACKEND], perFrame[PROF_PART_CLIP], perFrame[PROF_PART_STATE],
-                         perFrame[PROF_PART_WRITE],
+                         perFrame[PROF_PART_STATE_TWICE], perFrame[PROF_PART_WRITE],
                          s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
             }
