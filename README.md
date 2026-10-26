@@ -36,8 +36,7 @@ The first start takes a little longer while the game checks the 3DS GPU once.
 The bottom-screen race HUD shows a portrait for every racer. The ROM only has portraits of the ten playable
 characters, and we can't ship Rare's artwork, so the bosses and Taj get a box with their initial unless you add
 portraits yourself: six 40x40 PNG files in `sdmc:/3ds/dkr/portraits/` named `tricky.png`, `bluey.png`, `bubbler.png`,
-`smokey.png`, `wizpig.png` and `taj.png`. [port/tools/portraits](port/tools/portraits/README.md) makes them from the
-game's own 3D models in your ROM (needs a PC and Python).
+`smokey.png`, `wizpig.png` and `taj.png`. Any other size or format is skipped.
 
 ## Playing
 
