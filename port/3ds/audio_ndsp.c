@@ -385,7 +385,21 @@ static void voices_frame(void *arg) {
     }
     sLastFrameId = ndspFrameId;
     if (sVoiceResumePending) {
+        // Every channel is set up again from scratch (ndspChnReset sends the DSP its init-params flag too) rather
+        // than merged with whatever the firmware restored, and the aux buses re-enabled (libctru does not resend
+        // effect settings on a resume); then the engine restarts the voices that were playing.
+        int i;
         sVoiceResumePending = 0;
+        for (i = 0; i < PV_CHANNELS; i++) {
+            ndspChnReset(i);
+            ndspChnSetFormat(i, NDSP_FORMAT_MONO_PCM16);
+            ndspChnSetInterp(i, sSmooth ? NDSP_INTERP_POLYPHASE : NDSP_INTERP_LINEAR);
+        }
+        for (i = 0; i < 2; i++) {
+            ndspAuxSetEnable(i, true);
+            ndspAuxSetFrontBypass(i, false);
+            ndspAuxSetVolume(i, 1.0f);
+        }
         pv_resync();
     }
     pv_frame_tick();

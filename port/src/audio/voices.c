@@ -492,6 +492,7 @@ void pv_resync(void) {
     for (i = 0; i < PV_CHANNELS; i++) {
         Voice *v = &sVoices[i];
         if (!v->playing || v->sample == NULL) {
+            pv_backend_stop(i); // whatever the DSP may have carried over on an idle channel
             continue;
         }
         if (v->sample->loopCount != 0) {
