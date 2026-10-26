@@ -144,10 +144,11 @@ typedef struct BenchSwitch {
     s8 usual, test;
 } BenchSwitch;
 
-/* Nothing to compare right now: command list splits (P19) were measured and are off by default (#153), early depth
- * (P20) was tried and dropped (#155), and the white-line diagnostics (P28) cost about 1 ms of GPU time a frame and are
- * off for good. The bench says so instead of racing. The list ends with an empty entry, so it may be otherwise empty. */
+/* Command list splits (P19) were measured and are off by default (#153), early depth (P20) was tried and dropped
+ * (#155), and the white-line diagnostics (P28) cost about 1 ms of GPU time a frame and are off for good. With nothing
+ * to compare the bench says so instead of racing. The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
+    { "VFP vector vertex transforms (P27)", { "DKR_VFP_VECTORS", NULL }, 0, 1 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
