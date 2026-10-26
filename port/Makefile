@@ -89,6 +89,11 @@ else
   OPT_FLAGS := -O$(OPT) -g $(if $(filter 1,$(LTO)),-flto=auto)
 endif
 HOT_SRC := src/gfx/gfx_rdp.c src/audio/audio_rsp.c 3ds/gfx_c3d.c
+# Roadmap P25: the hot files (only the renderer has floats) may reorder float maths, use reciprocals and skip NaN,
+# infinity, signed zero and errno handling, which the ARM11's slow VFP compares and divides pay for. Game code keeps
+# strict float maths so physics stays bit-identical. FAST_MATH=0 gives the old build.
+FAST_MATH ?= 1
+HOT_FLAGS := $(if $(HOT_OPT),-O$(HOT_OPT) $(if $(filter 1,$(FAST_MATH)),-ffast-math))
 
 ifeq ($(TARGET),3ds)
   ifeq ($(strip $(DEVKITARM)),)
@@ -152,8 +157,8 @@ endef
 $(foreach f,$(GAME_SRC) $(LIBULTRA_SRC),$(eval $(call compile_rule,$(f),$$(GAME_CFLAGS))))
 $(foreach f,$(PORT_GAME_SRC),$(eval $(call compile_rule,$(f),$$(PORT_CFLAGS))))
 $(foreach f,$(PORT_SYS_SRC),$(eval $(call compile_rule,$(f),$$(SYS_CFLAGS))))
-ifneq ($(HOT_OPT),)
-$(foreach f,$(HOT_SRC),$(call obj,$(f))): FILE_FLAGS := -O$(HOT_OPT)
+ifneq ($(strip $(HOT_FLAGS)),)
+$(foreach f,$(HOT_SRC),$(call obj,$(f))): FILE_FLAGS := $(HOT_FLAGS)
 endif
 
 $(EXE): $(ALL_OBJS)
