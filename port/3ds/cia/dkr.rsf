@@ -26,6 +26,12 @@ AccessControlInfo:
     - DirectSdmc
     - DirectSdmcWrite
   IoAccessControl:
+  # DSP memory (ndspInit writes to it) and VRAM: the Homebrew Launcher's title has these, an exheader without them
+  # crashes in ndspInit (bug report #199).
+  IORegisterMapping:
+    - 1ff00000-1ff7ffff
+  MemoryMapping:
+    - 1f000000-1f5fffff:r
   MemoryType              : Application
   SystemMode              : 64MB
   IdealProcessor          : 0
