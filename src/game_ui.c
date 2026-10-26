@@ -23,6 +23,9 @@
 #include "thread3_main.h"
 #include "tracks.h"
 #include "types.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 
 /************ .data ************/
 
@@ -3221,6 +3224,10 @@ void hud_race_time(Object_Racer *racer, s32 updateRate) {
                 }
             }
 
+#ifdef TARGET_PORT
+            // The race HUD on the bottom screen shows the time instead (the tick above still plays).
+            if (!port_race_hud_hides(HUD_RACE_TIME_NUMBER))
+#endif
             if (gNumActivePlayers == 1) {
                 hud_timer_render(gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.x,
                                  gCurrentHud->entry[HUD_RACE_TIME_NUMBER].pos.y, minutes, seconds, hundredths, FALSE);
@@ -3384,6 +3391,9 @@ void minimap_init(LevelModel *model) {
     gMinimapBlue = model->minimapColor & 0xFF;
     load_sprite_info(model->minimapSpriteIndex, &gMinimapDotOffsetX, &gMinimapDotOffsetY, &sp2C, &sp2C, &sp2C);
     func_8007CA68(model->minimapSpriteIndex, 0, &D_80126D14, &D_80126D18, &sp2C);
+#ifdef TARGET_PORT
+    port_race_hud_map(model->minimapSpriteIndex);
+#endif
     model->minimapSpriteIndex = (s32) tex_load_sprite(model->minimapSpriteIndex, 1);
 }
 
@@ -3751,7 +3761,10 @@ void hud_render_general(Gfx **dList, Mtx **mtx, Vertex **vtx, s32 updateRate) {
     } else {
         gDPSetPrimColor(gHudDL++, 0, 0, gMinimapRed, gMinimapGreen, gMinimapBlue, mapOpacity);
     }
-    render_ortho_triangle_image(&gHudDL, &gHudMtx, &gHudVtx, (ObjectSegment *) &hudElem, minimap, 0);
+#ifdef TARGET_PORT
+    if (!port_race_hud_hides(-1)) // The map is on the bottom screen.
+#endif
+        render_ortho_triangle_image(&gHudDL, &gHudMtx, &gHudVtx, (ObjectSegment *) &hudElem, minimap, 0);
     sp11C = (lvlMdl->upperXBounds - lvlMdl->lowerXBounds) / (f32) (lvlMdl->upperZBounds - lvlMdl->lowerZBounds);
     sp118 = coss_f((lvlMdl->minimapRotation * 0xFFFF) / 360);
     sp114 = sins_f((lvlMdl->minimapRotation * 0xFFFF) / 360);
@@ -3918,6 +3931,13 @@ void hud_element_render(Gfx **dList, Mtx **mtx, Vertex **vtxList, HudElement *hu
     UNUSED s32 pad4[2];
     s32 spriteElementId;
 
+#ifdef TARGET_PORT
+    // Pieces the race HUD on the bottom screen shows instead (their sounds and animations still run).
+    if (hud >= gCurrentHud->entry && hud < gCurrentHud->entry + HUD_ELEMENT_COUNT &&
+        port_race_hud_hides(hud - gCurrentHud->entry)) {
+        return;
+    }
+#endif
     spriteID = hud->spriteID;
     spriteElementId = gAssetHudElementIds[spriteID];
     if ((spriteElementId & ASSET_MASK_TEXTURE) == ASSET_MASK_TEXTURE) {

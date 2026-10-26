@@ -1,6 +1,7 @@
 /* POSIX implementation of the platform layer. Used by the host (Linux/macOS) test build. */
 #define _GNU_SOURCE
 #include "plat.h"
+#include "race_hud.h"
 
 #include <pthread.h>
 #include <semaphore.h>
@@ -49,12 +50,33 @@ void plat_overlay_show(const char *text) {
 
 void host_bottom_preview(const char *dir);
 
-/* DKR_BOTTOM_PREVIEW=dir: draws the 3DS bottom screen's views to PNG files in dir, then exits. */
+void host_bottom_race_start(void);
+void host_bottom_race(const char *dir, const RaceHud *hud);
+
+/*
+ * DKR_BOTTOM_PREVIEW=dir: draws the 3DS bottom screen's views to PNG files in dir, then exits.
+ * DKR_BOTTOM_RACE=dir: draws the bottom screen's race HUD from the race being played to dir every second or so.
+ */
 void plat_rom_loaded(void) {
     const char *dir = getenv("DKR_BOTTOM_PREVIEW");
     if (dir != NULL) {
         host_bottom_preview(dir);
         exit(0);
+    }
+    if (getenv("DKR_BOTTOM_RACE") != NULL) {
+        host_bottom_race_start();
+    }
+}
+
+/* The race HUD of the 3DS bottom screen (port_race_hud.c): only drawn for DKR_BOTTOM_RACE. */
+int plat_race_hud_screen(void) {
+    return getenv("DKR_BOTTOM_RACE") != NULL;
+}
+
+void plat_set_race_hud(const RaceHud *hud) {
+    const char *dir = getenv("DKR_BOTTOM_RACE");
+    if (dir != NULL && hud != NULL) {
+        host_bottom_race(dir, hud);
     }
 }
 

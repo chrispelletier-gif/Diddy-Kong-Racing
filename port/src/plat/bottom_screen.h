@@ -12,6 +12,8 @@
  * neutral so the host build can draw it to PNG files (DKR_BOTTOM_PREVIEW).
  */
 
+#include "race_hud.h"
+
 #define BS_WIDTH 320
 #define BS_HEIGHT 240
 
@@ -61,6 +63,9 @@ void bs_set_buttons(const char *const *labels, int count);
 /* A line of text in place of the buttons, while something is busy. */
 void bs_set_panel_text(const char *text);
 void bs_set_status_line(int line, const char *text);
+/* The race HUD (race_hud.h) in place of the top area while racing, unless the menu or the profiler is showing; NULL
+ * ends it. */
+void bs_set_race_hud(const RaceHud *hud);
 
 /* The areas changed since the last call, as bits (1 << BS_AREA_*), cleared; and a copy of the state to draw. */
 unsigned bs_take_changes(void);
