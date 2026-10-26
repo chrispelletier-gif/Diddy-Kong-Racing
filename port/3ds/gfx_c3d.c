@@ -2049,6 +2049,7 @@ static void wait_for_gpu(int measure) {
 static int sSwitchEpoch = -1;
 static int sSplitMode, sEarlyDepth, sDepthFill;
 static int sFastState = 1; // DKR_FAST_STATE (roadmap P23): the cheaper per-draw settings path
+static int sFastClip = 1;  // DKR_FAST_CLIP (roadmap P22): triangles wholly beyond the band dropped, not clipped
 
 static void read_switches(void) {
     int recent, i;
@@ -2062,6 +2063,7 @@ static void read_switches(void) {
     sSvcFlush = plat_switch("DKR_SVC_FLUSH", 0) != 0;
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 0) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
+    sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -2076,9 +2078,9 @@ static void read_switches(void) {
              "settings path %s",
              sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes", sLineWatch,
              sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off", sFastState ? "short" : "full");
-    plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s",
+    plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s",
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
-             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off");
+             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all");
 }
 
 void gfxb_start_frame(void) {
@@ -3557,9 +3559,13 @@ static float band_for(int pixels) {
     return band < GUARD_BAND ? band : GUARD_BAND;
 }
 
+/* Which sides of the band a vertex is beyond: bit p for clip_distance's plane p, OUTSIDE_BEHIND for w <= 0. */
+#define OUTSIDE_PLANES 0xF
+#define OUTSIDE_BEHIND 0x10
 static inline int outside_band(const GfxVertex *v) {
     float gx = sBandX * v->w, gy = sBandY * v->w;
-    return v->w <= 0.0f || v->x > gx || -v->x > gx || v->y > gy || -v->y > gy;
+    return (v->x > gx) | ((-v->x > gx) << 1) | ((v->y > gy) << 2) | ((-v->y > gy) << 3) |
+           (v->w <= 0.0f ? OUTSIDE_BEHIND : 0);
 }
 
 static float clip_distance(const GfxVertex *v, int plane) {
@@ -3621,12 +3627,18 @@ int plat_3ds_guard_band_setting(void) {
  * left as it is. Otherwise the vertices are copied, and the clipped triangles' new corners added after them, into
  * buffers of their own, which replace verts and indices: triangles within the band keep their indices, the others
  * are replaced by the fan of their clipped polygon (at most 7 corners, so 5 triangles).
+ *
+ * Roadmap P22: in a race about a third of the draws reach past the band and some 500 triangles a frame are outside it,
+ * but more than 80% of those lie wholly beyond one of its sides (PC count), so clipping leaves nothing of them. With
+ * DKR_FAST_CLIP (the default) they are dropped as soon as their corners' sides show it, and the vertices are only
+ * copied once a triangle really has to be cut, which most draws never reach (their indices then point into the
+ * draw's own vertices). What is drawn is the same.
  */
 static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16 **indices, int *numTriangles) {
     GfxVertex poly[2][16];
     const GfxVertex *in = *verts;
     const u16 *idx = *indices;
-    int i, j, k, n, plane, count = *numTriangles * 3, used, usedIdx, any = 0;
+    int i, j, k, n, plane, count = *numTriangles * 3, used, usedIdx, any = 0, copied;
 
     if (!plat_3ds_guard_band_setting() || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
         return;
@@ -3646,15 +3658,28 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
         !grow((void **) &sClipIndices, &sClipIndexCapacity, *numTriangles * 15, sizeof(u16))) {
         return;
     }
-    memcpy(sClipVerts, in, *numVerts * sizeof(GfxVertex));
+    copied = !sFastClip;
+    if (copied) {
+        memcpy(sClipVerts, in, *numVerts * sizeof(GfxVertex));
+    }
     used = *numVerts;
     usedIdx = 0;
     for (i = 0; i < count; i += 3) {
-        if (!sClipOutside[idx[i]] && !sClipOutside[idx[i + 1]] && !sClipOutside[idx[i + 2]]) {
+        int a = sClipOutside[idx[i]], b = sClipOutside[idx[i + 1]], c = sClipOutside[idx[i + 2]];
+        if (!(a | b | c)) {
             sClipIndices[usedIdx++] = idx[i];
             sClipIndices[usedIdx++] = idx[i + 1];
             sClipIndices[usedIdx++] = idx[i + 2];
             continue;
+        }
+        if (sFastClip) {
+            if (a & b & c & OUTSIDE_PLANES) {
+                continue; // Wholly beyond one side: the clipper would leave nothing.
+            }
+            if (!copied) {
+                memcpy(sClipVerts, in, *numVerts * sizeof(GfxVertex));
+                copied = 1;
+            }
         }
         poly[0][0] = in[idx[i]];
         poly[0][1] = in[idx[i + 1]];
@@ -3691,8 +3716,10 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
             used += 3;
         }
     }
-    *verts = sClipVerts;
-    *numVerts = used;
+    if (copied) {
+        *verts = sClipVerts;
+        *numVerts = used;
+    }
     *indices = sClipIndices;
     *numTriangles = usedIdx / 3;
 }
