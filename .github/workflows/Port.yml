@@ -320,3 +320,5 @@ jobs:
             ${{ runner.temp }}/regression/differences/
             ${{ runner.temp }}/regression/runs/*/*/log.txt
           if-no-files-found: ignore
+          # The side-by-side frames are pictures of the game; keep them a week, not GitHub's default 90 days.
+          retention-days: 7
