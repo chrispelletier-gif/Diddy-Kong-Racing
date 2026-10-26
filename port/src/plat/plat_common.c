@@ -357,3 +357,7 @@ void plat_set_60fps_setting(int on) {
     sFps60Setting = sFps60 = on != 0;
     settings_set("fps60", sFps60Setting);
 }
+
+float plat_camera_near(void) {
+    return (plat_aspect_scale() > 1.0f && !plat_fb16()) ? 2.5f : 10.0f;
+}

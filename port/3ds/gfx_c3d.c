@@ -3429,9 +3429,9 @@ static void set_draw_state(const GfxDrawState *state) {
         sGpu.earlyDepth = early;
     }
     if (!sGpu.known || state->decal != sGpu.decal) {
-        // Widescreen's camera cuts 4 times closer (CAMERA_NEAR), which spreads depth 4 times as far: decals are pulled
-        // a quarter as much to stay as close to their surfaces.
-        C3D_DepthMap(true, -1.0f, state->decal ? (sWide ? 0.00005f : 0.0002f) : 0.0f);
+        // Widescreen's camera cuts 4 times closer (plat_camera_near), which spreads depth 4 times as far: decals are
+        // pulled a quarter as much to stay as close to their surfaces.
+        C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f * plat_camera_near() / 10.0f : 0.0f);
         sGpu.decal = state->decal;
     }
     if (sNoCull < 0) {

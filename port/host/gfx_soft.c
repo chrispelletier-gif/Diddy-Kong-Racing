@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "gfx/gfx_backend.h"
+#include "plat/plat.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO_FILES_UNUSED
@@ -631,7 +632,7 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
                 // nearer or equal passes. Kept negated so that the test below stays the same.
                 float d = w0 * v0->zd + w1 * v1->zd + w2 * v2->zd;
                 if (st->decal) {
-                    d += sWide ? 0.00005f : 0.0002f;
+                    d += 0.0002f * plat_camera_near() / 10.0f;
                 }
                 d = d < 0.0f ? 0.0f : (d > 1.0f ? 1.0f : d);
                 z = -floorf(d * sDepthScale);

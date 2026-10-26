@@ -50,14 +50,15 @@ WARPS = {
 NAMES = {**TRACKS, **BOSSES, **WARPS}
 WARP_SECONDS = 90
 
-# Screen modes: the host's DKR_WIDESCREEN (0 4:3, 1 Wide, 2 Balanced, 3 Zoomed) and the depth buffer's bits.
+# Screen modes: the host's DKR_WIDESCREEN (0 4:3, 1 Wide, 2 Balanced, 3 Zoomed) and the depth buffer's bits (16 also
+# DKR_FB16, the 3DS's 16-bit buffers setting, which keeps the N64's near plane in widescreen).
 MODES = {
     "43": {"DKR_WIDESCREEN": "0", "DKR_DEPTH_BITS": "24"},
-    "43_16": {"DKR_WIDESCREEN": "0", "DKR_DEPTH_BITS": "16"},
+    "43_16": {"DKR_WIDESCREEN": "0", "DKR_DEPTH_BITS": "16", "DKR_FB16": "1"},
     "balanced": {"DKR_WIDESCREEN": "2", "DKR_DEPTH_BITS": "24"},
-    "balanced16": {"DKR_WIDESCREEN": "2", "DKR_DEPTH_BITS": "16"},
+    "balanced16": {"DKR_WIDESCREEN": "2", "DKR_DEPTH_BITS": "16", "DKR_FB16": "1"},
     "wide": {"DKR_WIDESCREEN": "1", "DKR_DEPTH_BITS": "24"},
-    "wide16": {"DKR_WIDESCREEN": "1", "DKR_DEPTH_BITS": "16"},
+    "wide16": {"DKR_WIDESCREEN": "1", "DKR_DEPTH_BITS": "16", "DKR_FB16": "1"},
     "balanced60": {"DKR_WIDESCREEN": "2", "DKR_DEPTH_BITS": "24", "DKR_60FPS": "1"},
 }
 
