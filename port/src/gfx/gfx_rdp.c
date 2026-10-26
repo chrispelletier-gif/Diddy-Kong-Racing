@@ -853,9 +853,11 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     u8 flat = m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f;
     // Billboard (sprite) vertices are offsets in clip space, sized for the N64's camera; on the port's wider (G3) or
     // narrower (the widescreen style's field of view) camera they are scaled to keep their size next to the 3D world.
-    // Their matrix has no perspective, but they belong to the 3D world, not the flat HUD.
+    // Their matrix has no perspective, but they belong with their anchor: the 3D world's, or, anchored by the HUD's
+    // or a menu's orthographic matrix (the Save Options balloons, the banana counter), the flat 4:3 picture.
     float bbScaleY = 1.0f, bbScaleX = 1.0f;
-    if (g.billboard) {
+    u8 bbFlat = g.verts[0].flat;
+    if (g.billboard && !bbFlat) {
         bbScaleY = 1.0f / plat_fov_tan_scale();
         bbScaleX = bbScaleY / plat_aspect_scale();
     }
@@ -874,7 +876,7 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
             v->y = v->y * bbScaleY + g.verts[0].y;
             v->z += g.verts[0].z;
             v->w += g.verts[0].w;
-            v->flat = 0;
+            v->flat = bbFlat;
         }
         v->r = src[i].r;
         v->g = src[i].g;
