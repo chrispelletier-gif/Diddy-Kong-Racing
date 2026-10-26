@@ -223,6 +223,14 @@ s32 port_camera_wall_check(void);
 void port_set_camera_wall_check(s32 on);
 
 /*
+ * The intro logos (port/src/game/port_intro.c, roadmap Q10): whether the game skips the Rareware and N64 logo screen and
+ * goes from the boot screen to the title screen (skipintro= in settings.txt, DKR_SKIP_INTRO for a test). Off by
+ * default. src/menu.c also lets A, B or START cut the logo screen short.
+ */
+s32 port_skip_intro(void);
+void port_set_skip_intro(s32 on);
+
+/*
  * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c, roadmap G9): port_race_hud_frame copies the
  * race's state for the bottom screen once a frame; port_race_hud_map takes the track map's sprite from minimap_init;
  * port_race_hud_hides says which HUD elements (HUD_*, or -1 for the track map) src/game_ui.c leaves off the top screen.
