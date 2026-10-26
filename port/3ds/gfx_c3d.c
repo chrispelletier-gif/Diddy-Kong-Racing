@@ -3534,33 +3534,40 @@ static void write_settings_twice(const GfxDrawState *state, float *su0, float *s
     set_all_state(state, su0, sv0, su1, sv1);
 }
 
-/* Triangles reaching far off the screen, such as the "LAP 2" letters flying in from well past the right edge at each
- * lap, are cut down to a band twice the screen's size before they reach the GPU, as the N64 does (its guard band).
- * The 3DS's GPU can draw such triangles with stray lines of pixels, here a white line down the middle of the screen.
- * Flat draws are cut before gfx_flat_x widens them, which moves the texture a little only on what crosses the band.
- * Off by default: the white line turned out to be the banana counter's sprite overrunning its display list (PR #136),
- * and on hardware the trimmed triangles lost the hub's grass in Wide and Balanced (#147), though the cut is exact on
- * the PC. Settings > Screen > Edge trimming On (or DKR_GUARD_BAND=1) turns it on. */
+/* Triangles reaching far off the screen, such as the sky dome and big stretches of ground around the camera, are cut
+ * down to a guard band before they reach the GPU, as the N64 does. The 3DS's GPU can drop such triangles or draw them
+ * with stray lines of pixels. Its rasterizer seems to take corners only up to about 1024 pixels from the corner of the
+ * render target: a band twice the screen's size put corners at 1200 pixels on an 800-pixel target, and those
+ * triangles vanished (the hub's grass, #147). So the band stays within GUARD_PIXELS of the target's corner on each
+ * axis, and at most twice the screen. Flat draws are cut before gfx_flat_x narrows them, which moves the texture a
+ * little only on what crosses the band. Settings > Screen > Edge trimming Off (or DKR_GUARD_BAND=0) = no cutting. */
 #define GUARD_BAND 2.0f
+#define GUARD_PIXELS 1000.0f
 
 static volatile int sGuardBand = -1; // Settings > Screen > Edge trimming (settings.txt "guardband"), else DKR_GUARD_BAND
+static float sBandX = GUARD_BAND, sBandY = GUARD_BAND; // The band in clip space: |x| <= sBandX * w, |y| <= sBandY * w
 static GfxVertex *sClipVerts;
 static u16 *sClipIndices;
 static u8 *sClipOutside; // For each vertex of the draw: outside the guard band
 static int sClipCapacity, sClipIndexCapacity, sClipOutsideCapacity;
 
+/* The band for an axis of the render target that many pixels long: its far edge at GUARD_PIXELS, at most GUARD_BAND. */
+static float band_for(int pixels) {
+    float band = 2.0f * GUARD_PIXELS / pixels - 1.0f;
+    return band < GUARD_BAND ? band : GUARD_BAND;
+}
+
 static inline int outside_band(const GfxVertex *v) {
-    float g = GUARD_BAND * v->w;
-    return v->w <= 0.0f || v->x > g || -v->x > g || v->y > g || -v->y > g;
+    float gx = sBandX * v->w, gy = sBandY * v->w;
+    return v->w <= 0.0f || v->x > gx || -v->x > gx || v->y > gy || -v->y > gy;
 }
 
 static float clip_distance(const GfxVertex *v, int plane) {
-    float g = GUARD_BAND * v->w;
     switch (plane) {
-        case 0: return g - v->x;
-        case 1: return g + v->x;
-        case 2: return g - v->y;
-        default: return g + v->y;
+        case 0: return sBandX * v->w - v->x;
+        case 1: return sBandX * v->w + v->x;
+        case 2: return sBandY * v->w - v->y;
+        default: return sBandY * v->w + v->y;
     }
 }
 
@@ -3604,7 +3611,7 @@ void plat_3ds_set_guard_band_setting(int on) {
 int plat_3ds_guard_band_setting(void) {
     if (sGuardBand < 0) {
         const char *env = plat_getenv("DKR_GUARD_BAND");
-        sGuardBand = settings_get("guardband", env != NULL && atoi(env) != 0) != 0;
+        sGuardBand = settings_get("guardband", env == NULL || atoi(env) != 0) != 0;
     }
     return sGuardBand;
 }
@@ -3624,6 +3631,9 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
     if (!plat_3ds_guard_band_setting() || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
         return;
     }
+    // Clip x runs along the target's height (the screen's 400 or 800 pixels across), clip y along its width.
+    sBandX = band_for(sTarget->frameBuf.height);
+    sBandY = band_for(sTarget->frameBuf.width);
     for (i = 0; i < *numVerts; i++) {
         sClipOutside[i] = outside_band(&in[i]);
         any |= sClipOutside[i];
