@@ -211,6 +211,11 @@ s32 port_modern_camera(void);
 void port_set_modern_camera(s32 on);
 s32 port_look_back_held(void);
 void port_set_look_back_held(s32 held);
+/* The camera wall check (Settings > Camera > Wall check, camwall= in settings.txt, DKR_CAMERA_WALLS for a test): stops
+ * the chase camera in front of walls and scenery instead of letting it pass into them as the N64's does. On by
+ * default. */
+s32 port_camera_wall_check(void);
+void port_set_camera_wall_check(s32 on);
 
 /*
  * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c, roadmap G9): port_race_hud_frame copies the

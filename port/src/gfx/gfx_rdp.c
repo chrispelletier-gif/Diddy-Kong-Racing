@@ -1001,6 +1001,11 @@ static void read_switches(void) {
     sVfpVectors = plat_switch("DKR_VFP_VECTORS", 0) != 0;
 }
 
+/* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
+ * triangles being drawn use the level model's vertices. */
+int gGfxSweep, gGfxSweepLevel;
+extern s32 port_sweep_level_vertex(const void *vertices);
+
 static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float(*m)[4] = g.matrices[g.curMatrix];
     s32 i, fog = (g.geometryMode & G_FOG) != 0;
@@ -1022,6 +1027,14 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
         bbScaleY = 1.0f / plat_fov_tan_scale();
         bbScaleX = bbScaleY / plat_aspect_scale();
         bbScaleZ = plat_aspect_scale() > 1.0f ? 2.5f / 10.0f : 1.0f;
+    }
+
+    if (gGfxSweep) {
+        int level = port_sweep_level_vertex(src) != 0;
+        if (level != gGfxSweepLevel) {
+            flush_batch();
+            gGfxSweepLevel = level;
+        }
     }
 
 #ifdef HAVE_VFP_VECTORS

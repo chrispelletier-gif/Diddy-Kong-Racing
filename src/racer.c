@@ -7818,6 +7818,77 @@ static void look_back(Object *obj) {
         gCameraObject->cameraSegmentID = segmentIndex;
     }
 }
+
+/**
+ * The camera wall check (port_camera.c): the N64's chase cameras never test for walls, so the camera swings into
+ * cliffs, tunnel sides and scenery next to the track and the screen fills with the inside of the wall. This sweeps a
+ * small sphere from just above the kart to where the camera wants to be, through the level's collision (as a kart's
+ * own movement), and moves the camera to where the sphere stopped. The cameras take their height from the frame
+ * before, so the position the game chose is put back at the start of the next update (unless something else has moved
+ * the camera since), and the game carries on as if the wall had not been there.
+ */
+extern f32 gCollisionNormalX, gCollisionNormalY, gCollisionNormalZ;
+extern s32 gHitWall, gCollisionMode;
+extern LevelModel *gCurrentLevelModel;
+
+#define CAMERA_WALL_RADIUS 14.0f
+#define CAMERA_WALL_LIFT 20.0f
+
+static Camera *sWallCamera;
+static Vec3f sWallWanted, sWallPlaced; // Where the game put the camera, and where the wall check moved it.
+
+static void camera_wall_restore(void) {
+    if (sWallCamera == gCameraObject && gCameraObject->trans.x_position == sWallPlaced.x &&
+        gCameraObject->trans.y_position == sWallPlaced.y && gCameraObject->trans.z_position == sWallPlaced.z) {
+        gCameraObject->trans.x_position = sWallWanted.x;
+        gCameraObject->trans.y_position = sWallWanted.y;
+        gCameraObject->trans.z_position = sWallWanted.z;
+    }
+    sWallCamera = NULL;
+}
+
+static void camera_wall_check(Object *obj, Object_Racer *racer) {
+    Vec3f origin, target;
+    f32 radius = CAMERA_WALL_RADIUS, normalX, normalY, normalZ;
+    s32 hitWall, mode, numCollisions = 0, segmentIndex;
+    s8 surface = SURFACE_NONE;
+
+    origin.x = obj->trans.x_position;
+    origin.y = obj->trans.y_position + CAMERA_WALL_LIFT;
+    origin.z = obj->trans.z_position;
+    target.x = gCameraObject->trans.x_position;
+    target.y = gCameraObject->trans.y_position;
+    target.z = gCameraObject->trans.z_position;
+    // The racers' collision results live in globals that the racer code reads later: keep them as they were.
+    normalX = gCollisionNormalX;
+    normalY = gCollisionNormalY;
+    normalZ = gCollisionNormalZ;
+    hitWall = gHitWall;
+    mode = gCollisionMode;
+    gCollisionMode = COLLISION_MODE_DEFAULT;
+    generate_collision_candidates(1, &origin, &target, racer->vehicleID);
+    resolve_collisions(&origin, &target, &radius, &surface, 1, &numCollisions);
+    gCollisionMode = mode;
+    gCollisionNormalX = normalX;
+    gCollisionNormalY = normalY;
+    gCollisionNormalZ = normalZ;
+    gHitWall = hitWall;
+    if (numCollisions == 0) {
+        return;
+    }
+    sWallCamera = gCameraObject;
+    sWallWanted.x = gCameraObject->trans.x_position;
+    sWallWanted.y = gCameraObject->trans.y_position;
+    sWallWanted.z = gCameraObject->trans.z_position;
+    gCameraObject->trans.x_position = target.x;
+    gCameraObject->trans.y_position = target.y;
+    gCameraObject->trans.z_position = target.z;
+    sWallPlaced = target;
+    segmentIndex = get_level_segment_index_from_position(target.x, target.y, target.z);
+    if (segmentIndex != SEGMENT_NONE) {
+        gCameraObject->cameraSegmentID = segmentIndex;
+    }
+}
 #endif
 
 void update_player_camera(Object *obj, Object_Racer *racer, f32 updateRateF) {
@@ -7825,6 +7896,9 @@ void update_player_camera(Object *obj, Object_Racer *racer, f32 updateRateF) {
     s32 tempUpdateRateF;
     s32 angle;
 
+#ifdef TARGET_PORT
+    camera_wall_restore();
+#endif
     if (gCurrentButtonsPressed & U_CBUTTONS && race_starting()) {
         gCameraObject->zoom++;
         if (gCameraObject->zoom > ZOOM_VERY_CLOSE) {
@@ -7939,6 +8013,12 @@ void update_player_camera(Object *obj, Object_Racer *racer, f32 updateRateF) {
         gCameraObject->shakeTimer += 5;
         gCameraObject->shakeMagnitude = -gCameraObject->shakeMagnitude * 0.75;
     }
+#ifdef TARGET_PORT
+    if (port_camera_wall_check() && racer->playerIndex == PLAYER_ONE && gDialogueCameraAngle == 0 &&
+        gCurrentLevelModel != NULL) {
+        camera_wall_check(obj, racer);
+    }
+#endif
 }
 
 /**
