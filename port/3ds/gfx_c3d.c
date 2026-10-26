@@ -1046,7 +1046,8 @@ void gfxb_init(void) {
                     sTargetFb16 ? "16-bit" : "32-bit", s800 ? ", 800 pixels" : "");
     }
     sMipmapSetting = settings_get("mipmaps", 1);
-    if (sMipmapSetting < 0 || sMipmapSetting > 2) {
+    // 2, "Show" (each level tinted), is a debug build's view.
+    if (sMipmapSetting < 0 || sMipmapSetting > (PLAT_DEBUG_TOOLS ? 2 : 1)) {
         sMipmapSetting = 1;
     }
     sMipmapsUsed = sMipmapSetting != 0;

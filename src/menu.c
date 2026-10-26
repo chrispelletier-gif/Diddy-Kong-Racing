@@ -539,6 +539,19 @@ s8 gInAdvModeTrophyRace = FALSE;
 
 // Height scale of the wooden frames in the track select menu.
 f32 gTrackSelectWoodFrameHeightScale = 1.0f;
+#ifdef TARGET_PORT
+// Widescreen: the track preview's 3D is drawn plat_aspect_scale() (1.25) times as wide as on the N64, about the
+// screen's middle, so the frame around it, its picture and the arrows on it are spread by as much. Set while the
+// frame model draws.
+static f32 sTrackFrameWiden = 1.0f;
+// The frame model's inner edge, in model units (x = +-331; its outer edge is at +-441).
+#define TRACK_FRAME_INNER 331.0f
+#define TRACK_FRAME_X(x) (SCREEN_WIDTH_HALF + (s32) (((x) - SCREEN_WIDTH_HALF) * plat_aspect_scale()))
+#define TRACK_FRAME_TEXRECT TEXRECT_PORT_WIDE
+#else
+#define TRACK_FRAME_X(x) (x)
+#define TRACK_FRAME_TEXRECT 0
+#endif
 
 s32 gResetTitleScale = TRUE;
 
@@ -9355,13 +9368,16 @@ void trackmenu_render_2D(s32 x, s32 y, char *hubName, char *trackName, s32 rectO
                 x2 = xTemp + 80;
             }
             x1 = temp;
+#ifdef TARGET_PORT
+            sp58 *= plat_aspect_scale();
+#endif
             if (temp < SCREEN_WIDTH && xTemp > 0) {
-                texrect_draw_scaled(&sMenuCurrDisplayList, arg7, xTemp, yTemp, sp58, sp54, (rectOpacity & 0xFF) | ~0xFF,
-                                    TEXRECT_FLIP_X);
+                texrect_draw_scaled(&sMenuCurrDisplayList, arg7, TRACK_FRAME_X(xTemp), yTemp, sp58, sp54,
+                                    (rectOpacity & 0xFF) | ~0xFF, TEXRECT_FLIP_X | TRACK_FRAME_TEXRECT);
             }
             if (xTemp < SCREEN_WIDTH && x2 > 0) {
-                texrect_draw_scaled(&sMenuCurrDisplayList, arg7, xTemp, yTemp, sp58, sp54, (rectOpacity & 0xFF) | ~0xFF,
-                                    0);
+                texrect_draw_scaled(&sMenuCurrDisplayList, arg7, TRACK_FRAME_X(xTemp), yTemp, sp58, sp54,
+                                    (rectOpacity & 0xFF) | ~0xFF, TRACK_FRAME_TEXRECT);
             }
             rendermode_reset(&sMenuCurrDisplayList);
         }
@@ -9374,13 +9390,26 @@ void trackmenu_render_2D(s32 x, s32 y, char *hubName, char *trackName, s32 rectO
     } else {
         offsets = gTracksMenuArrowPositionsNTSC;
     }
+#ifdef TARGET_PORT
+    sTrackFrameWiden = plat_aspect_scale();
+    gMenuImages[imageId].trans.x_position = x * sTrackFrameWiden;
     menu_element_render(imageId);
+    sTrackFrameWiden = 1.0f;
+    xTemp = TRACK_FRAME_X(xTemp);
+    // The side arrows sit on the frame's sides, which move out by as much as its inner edge (see TRACK_FRAME_INNER).
+    temp = (s32) (TRACK_FRAME_INNER * gMenuImages[imageId].trans.scale * (plat_aspect_scale() - 1.0f) + 0.5f);
+#else
+    menu_element_render(imageId);
+    temp = 0;
+#endif
     gTrackSelectWoodFrameHeightScale = 1.0f;
     for (i = 0; i < 4; i++) {
         if ((1 << i) & arg8) {
-            texrect_draw(&sMenuCurrDisplayList, gMenuSelectionArrows[i], offsets[(i << 1)] + xTemp + 1,
+            x1 = offsets[(i << 1)];
+            x1 += (x1 > 0) ? temp : (x1 < 0) ? -temp : 0;
+            texrect_draw(&sMenuCurrDisplayList, gMenuSelectionArrows[i], x1 + xTemp + 1,
                          offsets[(i << 1) + 1] + yTemp + 1, 0, 0, 0, 128);
-            texrect_draw(&sMenuCurrDisplayList, gMenuSelectionArrows[i], offsets[(i << 1)] + xTemp - 1,
+            texrect_draw(&sMenuCurrDisplayList, gMenuSelectionArrows[i], x1 + xTemp - 1,
                          offsets[(i << 1) + 1] + yTemp - 1, 255, 255, 255, 255);
         }
     }
@@ -14579,6 +14608,27 @@ void render_track_selection_viewport_border(ObjectModel *objMdl) {
                 texOffset = objMdl->batches[i].texOffset << 14;
             }
             material_set(&sMenuCurrDisplayList, tex, flags, texOffset);
+#ifdef TARGET_PORT
+            if (sTrackFrameWiden != 1.0f) {
+                // Widen a copy: the opening by sTrackFrameWiden, the sides moved out by as much, so they keep
+                // their thickness.
+                s32 v;
+                for (v = 0; v < numVerts; v++) {
+                    f32 vx = verts[v].x;
+                    sMenuCurrHudVerts[v] = verts[v];
+                    if (vx > TRACK_FRAME_INNER) {
+                        vx += TRACK_FRAME_INNER * (sTrackFrameWiden - 1.0f);
+                    } else if (vx < -TRACK_FRAME_INNER) {
+                        vx -= TRACK_FRAME_INNER * (sTrackFrameWiden - 1.0f);
+                    } else {
+                        vx *= sTrackFrameWiden;
+                    }
+                    sMenuCurrHudVerts[v].x = (s16) (vx + (vx < 0.0f ? -0.5f : 0.5f));
+                }
+                verts = sMenuCurrHudVerts;
+                sMenuCurrHudVerts += numVerts;
+            }
+#endif
 
             gSPVertexDKR(sMenuCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVerts, 0);
             gSPPolygon(sMenuCurrDisplayList++, OS_K0_TO_PHYSICAL(tris), numTris, texEnabled);

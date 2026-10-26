@@ -78,7 +78,7 @@ int prof_enabled(void) {
         user_file_path(path, sizeof(path));
         length = plat_load_file_start(path, text, sizeof(text) - 1);
         text[length > 0 ? length : 0] = '\0';
-        sUserOn = text[0] == '1';
+        sUserOn = PLAT_DEBUG_TOOLS && text[0] == '1'; // A player's build has no Profiler row to turn it off.
         sEnabled = plat_getenv("DKR_PROFILE") != NULL;
     }
     return sEnabled || sUserOn || port_autorun_enabled();

@@ -32,6 +32,13 @@ void options_value(int category, int inRace, int row, char *out, int size);
 const char *options_hint(int category, int inRace, int row);
 void options_change(int category, int inRace, int row, int step);
 
+/*
+ * For a list of count rows some of which hidden(row) leaves out (a player's build hides the debug ones, plat.h
+ * PLAT_DEBUG_TOOLS): the number of rows shown, and the row the i-th one shown is (-1 past the end).
+ */
+int options_visible_count(int count, int (*hidden)(int row));
+int options_visible_row(int count, int (*hidden)(int row), int i);
+
 /* Counts the changes made with options_change, so another menu showing the same values knows to redraw. */
 unsigned int options_change_count(void);
 

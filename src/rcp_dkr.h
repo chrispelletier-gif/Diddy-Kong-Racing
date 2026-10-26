@@ -14,6 +14,10 @@ enum TextureRectangleFlags {
     TEXRECT_POINT = (1 << 0),
     TEXRECT_FLIP_X = (1 << 12),
     TEXRECT_FLIP_Y = (1 << 13),
+#ifdef TARGET_PORT
+    // Widescreen: keep the parts left and right of the N64 screen, which the wide screen still shows.
+    TEXRECT_PORT_WIDE = (1 << 14),
+#endif
 };
 
 typedef s32 (*BackgroundFunction)(Gfx **, Mtx **);

@@ -52,8 +52,8 @@ void port_input_poll(PortControllerState *state, s32 maxControllers) {
     hidScanInput();
     held = hidKeysHeld();
     // Only the buttons at the bottom of the screen respond to touch (update_3ds.c); a stray tap elsewhere does
-    // nothing. SELECT + touch anywhere sends a bug report (bugreport_3ds.c).
-    if ((hidKeysDown() & KEY_TOUCH) && !(held & KEY_SELECT)) {
+    // nothing. SELECT + touch anywhere sends a bug report (bugreport_3ds.c), except in a player's build.
+    if ((hidKeysDown() & KEY_TOUCH) && !(PLAT_DEBUG_TOOLS && (held & KEY_SELECT))) {
         touchPosition touch;
         hidTouchRead(&touch);
         update_3ds_touch(touch.px, touch.py);

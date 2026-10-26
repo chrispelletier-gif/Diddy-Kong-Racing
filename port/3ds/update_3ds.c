@@ -1,7 +1,8 @@
 /*
  * Updates from the bottom screen. CI (.github/workflows/Port.yml) publishes every 3DS build as a GitHub release:
- * "3ds-master" is the newest build of master, "3ds-newest" the newest build of any branch. Each has dkr.3dsx and
- * build.txt (commit, branch, date, size and sha256 of dkr.3dsx).
+ * "3ds-master-debug" is the newest debug build of master, "3ds-newest" the newest debug build of any branch ("3ds-master"
+ * is master's player build, which has no updater, so this never installs it). Each has dkr.3dsx and build.txt (commit,
+ * branch, date, size and sha256 of dkr.3dsx).
  *
  * Tapping "Check for updates" reads both build.txt files and offers them. The chosen dkr.3dsx is downloaded next to
  * the running one, checked against its size and sha256, and then replaces it; the new build runs the next time the
@@ -79,7 +80,7 @@ static volatile int sTapX, sTapY;
 #define TAP_MENU -2
 #define TAP_REFRESH -3 // Not a tap: a race started or ended, so the idle buttons change.
 static LightEvent sTapEvent;
-static Channel sChannels[2] = { { "3ds-master", "master" }, { "3ds-newest", "newest" } };
+static Channel sChannels[2] = { { "3ds-master-debug", "master" }, { "3ds-newest", "newest" } };
 static int sChosen;
 
 /* The panel: rows 1-3 are the buttons (screen rows 26-28, y 200-223). */
