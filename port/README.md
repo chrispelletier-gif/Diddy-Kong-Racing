@@ -44,101 +44,69 @@ writes `sdmc:/3ds/dkr/crash.txt`. CI builds both; the updater installs debug bui
 
 ## Installing
 
-Copy these to the SD card:
-
-| File                          | Goes to                         |
-| ----------------------------- | ------------------------------- |
-| `port/build/3ds/dkr.3dsx`     | `sdmc:/3ds/dkr.3dsx`            |
-| your ROM                      | `sdmc:/3ds/dkr/baserom.z64`     |
-
-Then start it from the Homebrew Launcher. The ROM may have any name: the port also looks for any `.z64`, `.n64` or
-`.v64` file in `sdmc:/3ds/dkr/`, `sdmc:/3ds/` and the root of the SD card. If it cannot find one it says so on the
-top screen. Saves go to `sdmc:/3ds/dkr/`:
-- `eeprom.bin` holds the game's own save.
-- `controllerpak.bin` is a virtual Controller Pak for ghosts and copied saves.
-
-Sound needs the DSP firmware dump at `sdmc:/3ds/dspfirm.cdc`, the same file other homebrew uses. Without it the game
-runs silently.
+Installing a release, the ROM, the DSP firmware, saves, the optional SD portraits, the controls and the player
+settings are described for players in the [main README](../README.md). For a build of your own, copy
+`port/build/3ds/dkr.3dsx` (or `3ds-release/dkr.3dsx`) to `sdmc:/3ds/dkr.3dsx`, or send it with `3dslink`. The port
+looks for the ROM as `sdmc:/3ds/dkr/baserom.z64`, then any `.z64`, `.n64` or `.v64` file in `sdmc:/3ds/dkr/`,
+`sdmc:/3ds/` and the root of the SD card (`find_rom` in `src/port_main.c`), and says on the top screen when it finds
+none.
 
 ## Controls
 
-| 3DS           | N64                 | In game                 |
-| ------------- | ------------------- | ----------------------- |
-| Circle Pad    | Control stick       | Steer                   |
-| A             | A                   | Accelerate              |
-| B             | B                   | Brake / reverse         |
-| L             | Z                   | Use item                |
-| ZL            | (port)              | Look behind             |
-| R or ZR       | R                   | Hop / drift             |
-| X             | C-Up                |                         |
-| Y             | C-Left              |                         |
-| C-Stick       | C buttons           | (New 3DS)               |
-| D-Pad         | D-Pad               |                         |
-| SELECT        | L                   |                         |
-| START         | START               | Pause                   |
+The default layout is in the [main README](../README.md#playing). Remapping, the presets and the circle pad's deadzone,
+sensitivity and response curve are in `src/plat/controls.c` and saved in `sdmc:/3ds/dkr/controls.txt` (`version=2`
+moved ZL from Z to Look back). START, the D-Pad and the C-Stick are fixed. The look-back button is a port-only pad bit
+that `src/os/os_si.c` strips before the game sees the controller.
 
-That is the default layout. A, B, X, Y, L, R, ZL, ZR and SELECT can be remapped (with presets for A/B swapped and L/R
-swapped), and the circle pad's deadzone (default 6%), sensitivity and response curve changed, on the settings menu's
-Controls page. They are kept in `sdmc:/3ds/dkr/controls.txt`. START, the D-Pad and the C-Stick always stay as above.
+The touch screen does nothing outside its buttons, so a stray tap can't interrupt a race. Debug build only: Stop test
+while a test run is on, and SELECT + touch sends a bug report.
 
-The menus are driven by the stick, as on the N64. At the bottom of the bottom screen is a Settings button (and Stop
-test while a test run is on; and Pause, first, during a race). The rest of the touch screen does nothing while the menu
-is closed, so a stray tap can't interrupt a race; holding SELECT while touching anywhere also sends a bug report.
+## Race HUD on the bottom screen
 
-## Race HUD on the bottom screen (3DS)
+The race HUD is drawn by `src/plat/bottom_screen.c` from the state `src/game/port_race_hud.c` fills in each frame
+(`src/plat/race_hud.h`); `src/game_ui.c` (the game's own, under `TARGET_PORT`) leaves off the top screen what it
+replaces (`port_race_hud_hides`). There is a layout for every mode (race, time trial, boss, Taj, the challenges, hub)
+and for the title screen, file select and Tracks menu. It uses only the game's own HUD art from the ROM; `racehud=` is
+1 Bottom (default), 2 Both or 0 Top. The profiler's readout (debug build) takes its place while it is on.
 
-During a one player race (not time trials or the challenges, which keep the N64's HUD) the bottom screen shows the
-race (`src/plat/bottom_screen.c`, from `src/game/port_race_hud.c`): every racer in race order as the game's portrait,
-framed in their map colour, with the time gap to you (red: ahead of you, green: behind, timed at the track's
-checkpoints); the item you hold at twice size; your place, lap and race time; your bananas with your last and best lap
-times; and the track's map with every racer on it, you as a gold arrow. It is all the game's own HUD art at its own
-size or exactly twice, read from your ROM. The top screen then keeps only the countdown, the lap announcements, the
-direction arrows, WRONG WAY and the finish. The Race HUD page of the Settings menu (and VIDEO OPTIONS) moves it:
-Bottom (the default), Both screens, or Top (the N64's HUD only); saved as `racehud=` (1, 2, 0). The profiler's
-readout takes the bottom screen's place while it is on.
+Boss and Taj portraits come from `sdmc:/3ds/dkr/portraits/NAME.png` (40x40 PNG, loaded with stb_image); anything
+else is skipped with a log line and the racer gets a box with its initial. `port/tools/portraits` makes a set from
+the game's models in your ROM. Keep them out of the repository: they are Rare's characters.
 
-The ROM has no portraits for the bosses and Taj, and drawn ones of Rare's characters cannot be shipped here, so they
-come from your SD card: `sdmc:/3ds/dkr/portraits/` with `tricky.png`, `bluey.png`, `bubbler.png`, `smokey.png`,
-`wizpig.png` and `taj.png`, each a 40x40 PNG framed like the game's portraits (`port/tools/portraits` makes them from
-your ROM). A file that is missing, is not a PNG or is any other size is skipped (the log says so) and that racer gets
-a box with its initial instead.
+The game is one player only, and DOUBLEVISION and JOINTVENTURE are answered like wrong codes. The 2 to 4 player code
+is still there for local wireless play later (roadmap O9): `make -C port TARGET=3ds PORT_MULTIPLAYER=1` brings it
+back. Test runs and CI never play multiplayer.
 
-The game is one player only: a 3DS has one set of controls, so nobody else can join character select, and the magic
-codes that only matter with more players (DOUBLEVISION, JOINTVENTURE) are answered like wrong codes and left out of the
-code list. The 2 to 4 player code is all still there for local wireless play later (roadmap O9): building with
-`make -C port TARGET=3ds PORT_MULTIPLAYER=1` brings it back. Test runs and CI never play multiplayer.
+## Settings
 
-## Settings in the game's menus
+Settings are saved in `sdmc:/3ds/dkr/settings.txt` (`src/plat/settings.c`). The player settings (picture, screen,
+race HUD, camera, controls, sound, start-up) are listed in the [main README](../README.md#playing). They are in the
+bottom screen's Settings menu and in the game's own menus: VIDEO, CAMERA and CONTROL OPTIONS in Options, MORE AUDIO
+OPTIONS in Audio Options, and an OPTIONS row in the pause menu without the settings that only apply after a restart
+(`src/menu.c`, categories registered in `src/plat/options.c`). Both change the same saved values.
 
-The same settings are also in the game's own menus, drawn in its fonts and dialogue boxes (`src/menu.c`, with the
-categories in `src/plat/options.c`). The Options menu gets VIDEO OPTIONS (anti-aliasing, frame rate, 16-bit buffers,
-mipmaps, colour boost, widescreen, 800 pixels, stereo 3D), CAMERA OPTIONS and CONTROL OPTIONS rows next to the game's
-own, and the Audio Options screen a MORE AUDIO OPTIONS row with the Sound settings. The pause menu gets an OPTIONS row
-that lists the same categories, without the settings that only apply after a restart. Up and down pick a row, left
-and right (or A) change it, B goes back. Both menus change the same saved values as the bottom screen's Settings menu,
-which redraws when the game's menus change something it shows.
+The bottom screen is drawn in the game's own style (`src/plat/bottom_screen.c`, menu in `3ds/menu_3ds.c`), with its
+fonts, logo, arrows and menu sounds read from the ROM; until the ROM is loaded it uses a plain 8x8 font. Other parts
+of the port add a page with `menu_3ds_add_page` (`3ds/menu_3ds.h`): its rows are a label, a value and a change
+function.
 
-## Settings menu (3DS)
+### Debug build only
 
-Settings opens a menu over the bottom screen; tap a row to change it (the left half of a value steps back), and Close,
-Back, Prev and Next are where the button was. Choices are saved in `sdmc:/3ds/dkr/settings.txt`.
-
-The bottom screen is drawn in the game's own style (`src/plat/bottom_screen.c`): its title logo, menu title font, small
-font, colourful font, blue arrows and ON / OFF labels, all read from your ROM like the game reads them, so nothing of
-the game is shipped. Taps on the menu play the game's own menu sounds. Until the ROM is loaded the screen uses a plain
-8x8 font.
-- **Anti-aliasing**: on or off, from the next frame (see Graphics).
-- **Mipmaps**: Off, On, or Show (on, with the levels tinted red, green, blue and yellow, to see where the GPU uses
-  them), from the next frame (see Graphics).
-- **Colour boost**: Off, Low, Medium or High, from the next frame (see Graphics).
+`make RELEASE=1` hides these rows and keeps their defaults; a value for them in `settings.txt` is ignored. Any new
+debug or performance row must be added to the hidden lists in `3ds/menu_3ds.c` and to `is_debug_switch` in
+`src/plat/settings.c`.
+- **Mipmaps: Show**: mipmaps on, with the levels tinted red, green, blue and yellow, to see where the GPU uses them.
+- **16-bit buffers**: RGB565 colour and 16-bit depth (off by default; 16-bit depth makes distant detail flicker in
+  widescreen).
 - **Render ahead**: 1 frame (the N64's timing: the game builds a frame while the renderer draws the one before, and
   waits for it) or 2 frames (the game runs one frame further ahead, so a slow frame in the renderer is absorbed
   instead of dropped, at the cost of one frame more input lag; the game keeps a third display list heap for it).
   `DKR_RENDER_AHEAD=2` in `env.txt` tries it without the menu; it also works on the host build.
+- **Edge trimming**: clip triangles to the GPU's guard band (on by default).
 - **Profiler**: frame times on the bottom screen (see Profiler).
-- **Test run**: start a full test, a quick test, the boss fights or the GPU bench, or stop the one running.
-- **Controls**: button layout, remapping and circle pad deadzone, sensitivity and response (see Controls).
-- **Sound** (roadmap Phase 7):
+- **Test run**: start a full test, a quick test, the boss fights, the GPU bench or the switch bench, or stop the one
+  running.
+- **Sound** (roadmap Phase 7; the player build keeps only Smooth resampling):
   - *Sound engine*: DSP voices (default) plays every voice of the game's music and sound effects on one of the 3DS
     DSP's 24 channels, which decode, resample, envelope and mix it; the CPU only runs the game's sequencer and the
     N64 reverbs (see Sound below). CPU mixer runs the N64 audio microcode on the CPU instead, as before. Applies on
@@ -151,15 +119,9 @@ the game is shipped. Taps on the menu play the game's own menu sounds. Until the
   - *Mixer rate*: 22 kHz (the game's own) or 32 kHz, which keeps more of the high frequencies when sounds are
     pitched up, for about 45% more mixing work. Pitches and reverb lengths are scaled to sound the same. Applies on
     the next start.
-  - *Smooth resampling*: ON (default) lets the DSP use its polyphase filter to resample (each voice with the DSP
-    voices, the whole mix with the CPU mixer) instead of linear interpolation, which is softer on high frequencies.
-    Free on the CPU; from the next sound.
   - *Sound buffer*: Large keeps 50 ms more sound queued, so a late audio frame doesn't leave a gap, at the cost of
     the sound coming 50 ms later.
 - **Check for updates** and **Send a bug report** (see below).
-
-Other parts of the port add a page to the menu with `menu_3ds_add_page` (`3ds/menu_3ds.h`): its rows are a label, a
-value and a change function, and the main page gets a row that opens it.
 
 ## How it works
 
@@ -239,7 +201,7 @@ The host build previews widescreen with `DKR_WIDESCREEN=1` (frames are then 400 
 In Azahar you can also raise the internal resolution in the graphics settings; the port renders on the 3DS GPU, so
 that applies to it as well.
 
-## Debug settings on the 3DS
+## Debug settings on the 3DS (debug build only)
 
 The start-up is always logged to `sdmc:/3ds/dkr/log.txt`, and its progress is shown on the bottom screen, so if
 the game does not start, the last line says how far it got. Create `sdmc:/3ds/dkr/debug` (an empty file) to keep
@@ -271,7 +233,7 @@ controls) work there, as do these renderer switches:
 - `DKR_SYSCORE_LIMIT=n` (the share of the system core, in percent, asked for when the sound is mixed there; 80)
 - `DKR_SYSCORE_PRIO=n` (the sound thread's priority on the system core, 0x18 highest to 0x3F lowest; 0x30)
 
-## Bug reports
+## Bug reports (debug build only)
 
 The 3DS build can send a bug report over Wi-Fi as an issue on this repository, labelled `3ds-bug-report`:
 - Tap Settings, then Send a bug report, or hold SELECT and touch the screen anywhere. The game saves a
@@ -350,7 +312,7 @@ voices instead of 40 (the driver steals the quietest, as it did when the N64 ran
 use linear interpolation. The CPU mixer stays as a Settings > Sound fallback. The host build has a software
 stand-in for the channels (`host/audio_soft.c`), so `DKR_DUMP_AUDIO` records the same engine on a PC.
 
-## Profiler
+## Profiler (debug build only)
 
 Turn Profiler on in the Settings menu to show the profiler on the bottom screen, updated every second (it appears
 when the menu closes); the game remembers the setting. `DKR_PROFILE=1` in `env.txt` and the test run
@@ -372,7 +334,7 @@ line also goes to the log, followed on the 3DS by a `renderer parts` line that s
 calls (what is left is the display list walk) and, within them, the guard band clipping, the GPU settings and the
 vertex writes, in ms per frame.
 
-## Unattended test run
+## Unattended test run (debug build only)
 
 Tap Settings, Test run, then Full test, and leave the console on its charger. From the
 title screen, the game races every track with every character (200 races, some 8 hours), with the AI driving your
