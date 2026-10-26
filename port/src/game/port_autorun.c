@@ -1580,3 +1580,30 @@ void port_autorun_frame(s32 updateRate) {
         show_status();
     }
 }
+
+/* The level and the active camera, for the host renderer's clipping sweep (DKR_CLIP_SWEEP, host/gfx_soft.c). */
+void port_sweep_camera(int *level, float pos[3], int *segment) {
+    Camera *camera = cam_get_active_camera();
+    *level = level_id();
+    pos[0] = camera->trans.x_position;
+    pos[1] = camera->trans.y_position;
+    pos[2] = camera->trans.z_position;
+    *segment = camera->cameraSegmentID;
+}
+
+/* Whether the vertices are the level model's (track and scenery) rather than an object's, for the clipping sweep. */
+s32 port_sweep_level_vertex(const void *vertices) {
+    extern LevelModel *gCurrentLevelModel;
+    s32 i;
+    if (gCurrentLevelModel == NULL) {
+        return FALSE;
+    }
+    for (i = 0; i < gCurrentLevelModel->numberOfSegments; i++) {
+        LevelModelSegment *segment = &gCurrentLevelModel->segments[i];
+        if ((const Vertex *) vertices >= segment->vertices &&
+            (const Vertex *) vertices < segment->vertices + segment->numberOfVertices) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}

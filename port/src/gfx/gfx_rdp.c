@@ -961,8 +961,20 @@ static void vertex_fog(RspVertex *v) {
     v->fog = (fog < 0.0f) ? 0 : (fog > 255.0f) ? 255 : (u8) fog;
 }
 
+/* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
+ * triangles being drawn use the level model's vertices. */
+int gGfxSweep, gGfxSweepLevel;
+extern s32 port_sweep_level_vertex(const void *vertices);
+
 static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float(*m)[4] = g.matrices[g.curMatrix];
+    if (gGfxSweep) {
+        int level = port_sweep_level_vertex(src) != 0;
+        if (level != gGfxSweepLevel) {
+            flush_batch();
+            gGfxSweepLevel = level;
+        }
+    }
     s32 i, fog = (g.geometryMode & G_FOG) != 0;
     // An orthographic matrix (the HUD's, menus', fades') gives every vertex the same w.
     u8 flat = m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f;
