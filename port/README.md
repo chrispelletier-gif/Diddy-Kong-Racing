@@ -75,6 +75,11 @@ The menus are driven by the stick, as on the N64. At the bottom of the bottom sc
 test while a test run is on). The rest of the touch screen does nothing while the menu is closed, so a stray tap can't
 interrupt a race; holding SELECT while touching anywhere also sends a bug report.
 
+The game is one player only: a 3DS has one set of controls, so nobody else can join character select, and the magic
+codes that only matter with more players (DOUBLEVISION, JOINTVENTURE) are answered like wrong codes and left out of the
+code list. The 2 to 4 player code is all still there for local wireless play later (roadmap O9): building with
+`make -C port TARGET=3ds PORT_MULTIPLAYER=1` brings it back. Test runs and CI never play multiplayer.
+
 ## Settings in the game's menus
 
 The same settings are also in the game's own menus, drawn in its fonts and dialogue boxes (`src/menu.c`, with the
