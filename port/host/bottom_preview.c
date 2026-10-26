@@ -43,10 +43,10 @@ static void row(BsMenu *m, const char *label, const char *value, const char *hin
     snprintf(r->hint, sizeof(r->hint), "%s", hint);
 }
 
-/* The menu's tabs, as a player's build (count 7) or a debug build (9) has them, with tab picked. */
+/* The menu's tabs, as a player's build (count 8) or a debug build (10) has them, with tab picked. */
 static void tabs(BsMenu *m, int picked, int count) {
-    static const char *const sTabs[9] = { "Picture", "Screen",   "Controls", "Sound", "Race HUD",
-                                          "Camera",  "Start-up", "Test run", "Tools" };
+    static const char *const sTabs[10] = { "Picture", "Screen",   "Controls", "Sound",    "Race HUD",
+                                           "Camera",  "Start-up", "Saves",    "Test run", "Tools" };
     int i;
     for (i = 0; i < count; i++) {
         snprintf(m->tabs[i], sizeof(m->tabs[i]), "%s", sTabs[i]);
@@ -107,7 +107,7 @@ void host_bottom_preview(const char *dir) {
 
     // The Settings menu: a player's tabs, then a debug build's.
     memset(&menu, 0, sizeof(menu));
-    tabs(&menu, 0, 7);
+    tabs(&menu, 0, 8);
     snprintf(menu.title, sizeof(menu.title), "Picture");
     row(&menu, "Anti-aliasing", "4x", "Smoother edges; the GPU draws 4x");
     row(&menu, "Frame rate", "30 fps", "60 when a frame fits (try AA off)");
@@ -123,7 +123,7 @@ void host_bottom_preview(const char *dir) {
     save(dir, "3_menu");
 
     memset(&menu, 0, sizeof(menu));
-    tabs(&menu, 2, 9);
+    tabs(&menu, 2, 10);
     snprintf(menu.title, sizeof(menu.title), "Controls");
     snprintf(menu.pages, sizeof(menu.pages), "1/3");
     row(&menu, "Layout", "Standard", "");
@@ -141,7 +141,7 @@ void host_bottom_preview(const char *dir) {
     save(dir, "4_controls");
 
     memset(&menu, 0, sizeof(menu));
-    tabs(&menu, 8, 9);
+    tabs(&menu, 9, 10);
     snprintf(menu.title, sizeof(menu.title), "Tools");
     row(&menu, "Profiler", "Off", "Frame times on this screen");
     row(&menu, "Check for updates", "", "Install a newer build from GitHub");
@@ -154,6 +154,26 @@ void host_bottom_preview(const char *dir) {
         bs_set_buttons(sMenuButtons, 3);
     }
     save(dir, "4_tools");
+
+    memset(&menu, 0, sizeof(menu));
+    tabs(&menu, 7, 10);
+    snprintf(menu.title, sizeof(menu.title), "Saves");
+    row(&menu, "Back up now", "", "Saves a dated copy, ghosts included");
+    row(&menu, "Backup", "10-26 23:45", "1 of 3 in sdmc:/3ds/dkr/backup");
+    row(&menu, "Tap again to restore", "", "Overwrites your save, then quits");
+    menu.picked = 2;
+    snprintf(menu.note, sizeof(menu.note), "Saved as N64 dkr.eep and dkr.mpk");
+    bs_show_menu(&menu);
+    {
+        static const char *const sMenuButtons[3] = { "Close", "-Prev", "-Next" };
+        bs_set_buttons(sMenuButtons, 3);
+    }
+    save(dir, "4_saves");
+    menu.picked = -1;
+    tabs(&menu, 7, 8);
+    snprintf(menu.rows[2].label, sizeof(menu.rows[2].label), "Restore backup");
+    bs_show_menu(&menu);
+    save(dir, "4_saves_player");
 
     bs_show_menu(NULL);
     bs_add_message("This build: 1a2b3c4");

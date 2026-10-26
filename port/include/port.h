@@ -153,6 +153,25 @@ void port_rumble(s32 controller, s32 enable);
 /* Save files. */
 s32 port_save_read(const char *name, void *data, u32 size);
 s32 port_save_write(const char *name, const void *data, u32 size);
+/*
+ * The saves on disk are in the N64's byte order, the same as an emulator's .eep and .mpk (os/save_convert.c). These
+ * turn a 512 byte EEPROM image either way (it is its own inverse) and a 32 KB Controller Pak image to the N64's order
+ * (toN64) or back to the one the game's code reads.
+ */
+void port_eep_convert(u8 *eeprom);
+void port_mpk_convert(u8 *pak, s32 toN64);
+/*
+ * Save backups (os_si.c), asked for from another thread (the 3DS Settings menu) and done by the game's at its next
+ * controller read. port_save_backup writes the saves, as they are now, as dkr.eep and dkr.mpk in dir (a folder under
+ * the data folder, which must exist). port_save_restore first backs up to undoDir (if not NULL), then replaces the
+ * saves with the N64 order images given (NULL: keep that one) and stops saving until the game restarts, as the game
+ * still holds the old progress in its memory. Both return 1 when done, 0 if the files could not be written, -1 if the
+ * game did not get to it in time (nothing done).
+ */
+s32 port_save_backup(const char *dir);
+s32 port_save_restore(const u8 *eeprom, const u8 *pak, const char *undoDir);
+#define PORT_EEPROM_SIZE 512
+#define PORT_MEMPAK_SIZE 0x8000
 
 /* Small libc helpers. */
 static inline s32 port_atoi(const char *s) {

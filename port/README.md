@@ -51,6 +51,14 @@ looks for the ROM as `sdmc:/3ds/dkr/baserom.z64`, then any `.z64`, `.n64` or `.v
 `sdmc:/3ds/` and the root of the SD card (`find_rom` in `src/port_main.c`), and says on the top screen when it finds
 none.
 
+Saves go to `sdmc:/3ds/dkr/` as `dkr.eep` (the cartridge EEPROM) and `dkr.mpk` (a virtual Controller Pak for ghosts
+and copied saves), byte for byte the `.eep` and `.mpk` files of a real cartridge and N64 emulators. In memory they
+are in the order the game's code reads; `src/os/save_convert.c` converts them on load and save, and has the layout.
+Builds before that kept `eeprom.bin` and `controllerpak.bin` in memory order; a newer build converts them once and
+leaves the old files alone. Settings > Saves (`3ds/saves_3ds.c`) writes dated backups to `sdmc:/3ds/dkr/backup/` and
+restores any folder there holding an `.eep` and/or `.mpk`; a restore keeps the replaced save as a `-undo` backup and
+closes the game, which still holds the old progress. `tools/n64_save_check.py` checks files against the N64 layout.
+
 ## Controls
 
 The default layout is in the [main README](../README.md#playing). Remapping, the presets and the circle pad's deadzone,
@@ -411,8 +419,9 @@ These settings work on both builds (in `env.txt` on the 3DS, as environment vari
 | `DKR_DIFF_EVERY=n`       | 3DS only: every nth frame is also drawn by the software renderer, and both images are written to `sdmc:/3ds/dkr/` (`diff_N_ref.png`, `diff_N_gpu.bin`). `port/tools/diff_frames.py <dir> <out>` compares them and writes side by side images of the frames that differ. |
 | `DKR_TEST_SAVE=1`        | Starting a save file gives it complete progress: all balloons, keys, trophies, amulets and Taj challenges, and every boss and door. The progress is written to the save, so the file keeps it without the setting. |
 
-`port/tools/testdata/eeprom_complete.bin` is a save made this way (file A, "AAA"). Copying it over `eeprom.bin`
-replaces your own saves.
+`port/tools/testdata/eeprom_complete.bin` is a save made this way (file A, "AAA"), in the old `eeprom.bin` byte
+order (the frame regression scenarios use it as one, so builds from before the N64 format read it too). Copied to
+`eeprom.bin` in a data folder without a `dkr.eep`, it replaces that folder's saves.
 
 `DKR_LOCKSTEP=1` (meant for the host build) makes runs repeatable: the N64 threads take turns like on the console's
 single CPU, each retrace waits until every thread is done with the previous one, and the game's clock advances by

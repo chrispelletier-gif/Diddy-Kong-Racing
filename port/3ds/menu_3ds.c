@@ -454,6 +454,12 @@ void menu_3ds_add_options(void) {
 
 void menu_3ds_add_page(const char *title, int (*count)(void), const char *(*label)(int i),
                        void (*value)(int i, char *out, int size), void (*change)(int i, int step)) {
+    menu_3ds_add_page_hint(title, count, label, value, change, NULL, NULL);
+}
+
+void menu_3ds_add_page_hint(const char *title, int (*count)(void), const char *(*label)(int i),
+                            void (*value)(int i, char *out, int size), void (*change)(int i, int step),
+                            const char *(*hint)(int i), const char *note) {
     MenuPage *page;
     if (sPageCount >= MAX_PAGES) {
         plat_log("menu: no room for the %s page", title);
@@ -466,6 +472,8 @@ void menu_3ds_add_page(const char *title, int (*count)(void), const char *(*labe
     page->label = label;
     page->value = value;
     page->change = change;
+    page->hint = hint;
+    page->note = note;
     sPageCount++;
 }
 
