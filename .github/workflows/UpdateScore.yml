@@ -49,5 +49,5 @@ jobs:
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v8
         with:
-          add-paths: README.md
+          add-paths: doc/decompilation.md
           commit-message: "Update score"

@@ -1,3 +1,17 @@
+# Licence
+
+The code in this repository, the N64 decompilation and the 3DS port (`port/`), is dedicated to the public domain
+under CC0 1.0 Universal, whose text follows. Some files are under other licences, and the built 3DS game links
+libraries with their own licences; [NOTICE.md](NOTICE.md) lists them, with what you must keep when you share the
+game.
+
+Diddy Kong Racing itself is not covered: no part of the game (code, graphics, sound, text) is in this repository or
+in its releases, and the port reads all of it from the player's own ROM. Diddy Kong Racing, its characters and
+Nintendo 3DS are trademarks of their respective owners. This project is not affiliated with or endorsed by Nintendo
+or Rare.
+
+---
+
 Creative Commons Legal Code
 
 CC0 1.0 Universal

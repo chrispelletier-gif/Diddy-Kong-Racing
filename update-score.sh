@@ -3,7 +3,7 @@
 export NEW_SCORE="$(.venv/bin/python3 ./tools/python/score.py)"
 export NEW_SCORE_SUMMARY="$(.venv/bin/python3 ./tools/python/score.py --summary)"
 
-.venv/bin/python3 - <<'EOF' > README.md.tmp
+.venv/bin/python3 - <<'EOF' > doc/decompilation.md.tmp
 import sys
 import os
 import re
@@ -18,7 +18,7 @@ DATE_STR = datetime.now().strftime('As of %B %-d, %Y, this is our current score:
 score_updated = re.sub(
   fr'(?s).{BEGIN}.*{END}',
   f'\n{BEGIN}\n{DATE_STR}\n```\n{os.environ["NEW_SCORE"]}\n```\n{END}',
-  open('README.md', 'r').read()
+  open('doc/decompilation.md', 'r').read()
 )
 
 tabbed_summary = '\n\n'.join([('&emsp;' * 4) + line for line in os.environ["NEW_SCORE_SUMMARY"].split('\n')])
@@ -30,4 +30,4 @@ summary_updated = re.sub(
 )
 print(summary_updated, end='')
 EOF
-mv README.md.tmp README.md
+mv doc/decompilation.md.tmp doc/decompilation.md
