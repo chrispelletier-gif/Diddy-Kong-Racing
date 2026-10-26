@@ -12,6 +12,7 @@
  *   DKR_AUTORUN_LOOP=1              Start over after the last race, forever.
  *   DKR_AUTORUN_RESTART=1           Start from the first race instead of resuming.
  *   DKR_AUTORUN_SNAPSHOT=1          Also save a snapshot (GPU and reference images) after each race finishes.
+ *   DKR_AUTORUN_TIME_TRIAL=1        Race in time trial (alone, with the ghosts) instead of against the field.
  *
  * The GPU benchmark is a short run instead: the heaviest races of the hardware test runs, each raced once with every
  * render setting of sBenchConfigs (anti-aliasing 4x, 2x or off, 32 or 16-bit buffers, 30 or 60 fps), with the
@@ -521,6 +522,19 @@ static s32 pct(u32 part, u32 whole) {
     return whole ? (s32) (((unsigned long long) part * 100 + whole / 2) / whole) : 0;
 }
 
+static const char *aa_label(void) {
+    s32 aa = plat_antialias();
+    return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
+}
+
+/* The graphics settings the frames are drawn with now, for the results (e.g. "aa4x/60fps/fb32/ahead2"). */
+static const char *graphics_setup(void) {
+    static char text[40];
+    plat_snprintf(text, sizeof(text), "aa%s/%dfps/fb%d/ahead%d", aa_label(), plat_frame_retraces() == 1 ? 60 : 30,
+                  plat_fb16() ? 16 : 32, plat_render_ahead());
+    return text;
+}
+
 /* Writes the results line of the race that just ended. stats may be NULL (the race never got going). */
 static void record_result(const char *outcome, s32 position, const ProfStats *stats) {
     char path[256];
@@ -541,7 +555,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                       "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
                       "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
                       "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
-                      "audio_gaps,audio_drops,sound\n",
+                      "audio_gaps,audio_drops,sound,graphics\n",
                       sModes[sMode].extraColumn ? "," : "",
                       sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
         append_file(results_file(), header);
@@ -583,10 +597,10 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     }
     length = strlen(line);
     // After the mode's own column, so the columns before keep their places in older results files.
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s\n",
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
-                  plat_audio_setup());
+                  plat_audio_setup(), graphics_setup());
     append_file(results_file(), line);
     port_log("autorun: %s", line);
     if (str_equal(outcome, "finished")) {
@@ -896,6 +910,12 @@ s32 port_autorun_title(void) {
     return port_autorun_setup_race(race->track, race->character, race->vehicle);
 }
 
+/* DKR_AUTORUN_TIME_TRIAL: the races are time trials (src/menu.c, port_autorun_setup_race). */
+s32 port_autorun_time_trial(void) {
+    const char *env = plat_getenv("DKR_AUTORUN_TIME_TRIAL");
+    return env != NULL && port_atoi(env) != 0;
+}
+
 /* Nonzero while the player's kart is driven by the AI. */
 s32 port_autorun_drives(void) {
     return sEnabled > 0 && sPhase >= PHASE_LOADING && sPhase <= PHASE_FINISHED;
@@ -942,6 +962,8 @@ enum BenchColumn {
     COL_AUDIO_GAPS = COL_COUNT, // Only in results written since the sound columns were added (the benchmark: one on).
     COL_PCT_60FPS = COL_COUNT,  // The benchmark's second column of its own.
 };
+/* The most columns a line has: the benchmark's two, the sound's three and the graphics settings. */
+#define MAX_FIELDS (COL_COUNT + 6)
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 3
@@ -966,7 +988,7 @@ static s32 split_fields(char *line, const char **fields) {
     s32 numFields = 0;
     char *c;
     fields[numFields++] = line;
-    for (c = line; *c && numFields < COL_COUNT + 4; c++) {
+    for (c = line; *c && numFields < MAX_FIELDS; c++) {
         if (*c == ',') {
             *c = '\0';
             fields[numFields++] = c + 1;
@@ -984,7 +1006,7 @@ static void bench_summary(char *out, s32 size) {
     static BenchGroup groups[BENCH_MAX_TRACKS][MAX_CONFIGS];
     char path[256];
     char *data, *copy, *line, *next;
-    const char *fields[COL_COUNT + 4];
+    const char *fields[MAX_FIELDS];
     unsigned int dataSize;
     s32 numTracks = 0, length, t, k, i, run, previousRun = 0;
     s32 quick = sMode == MODE_QUICK;
@@ -1214,7 +1236,7 @@ static void bench_summary(char *out, s32 size) {
 static void boss_summary(char *out, s32 size) {
     char path[256];
     char *data, *text, *line, *next;
-    const char *fields[COL_COUNT + 4];
+    const char *fields[MAX_FIELDS];
     unsigned int dataSize;
     s32 length;
 
@@ -1274,6 +1296,13 @@ static void send_results(const char *why) {
                            (int) sRun, why,
                            (int) (sFinished + sProblems), (int) sNumRaces, (int) sFinished, (int) sProblems,
                            sFpsCount ? sFpsSum / sFpsCount : 0.0, (int) sFpsCount);
+    if (length > 0 && length < (s32) sizeof(summary)) {
+        length += plat_snprintf(summary + length, sizeof(summary) - length,
+                                "Graphics when sent: anti-aliasing %s, %d fps cap, %d-bit buffers, render ahead %d "
+                                "(each race's are in the results file's graphics column).\n",
+                                aa_label(), plat_frame_retraces() == 1 ? 60 : 30, plat_fb16() ? 16 : 32,
+                                plat_render_ahead());
+    }
     if (sMode == MODE_BOSS && length > 0 && length < (s32) sizeof(summary)) {
         boss_summary(summary + length, sizeof(summary) - length);
     } else if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {

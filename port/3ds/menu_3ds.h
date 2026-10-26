@@ -19,6 +19,7 @@ void menu_3ds_add_page(const char *title, int (*count)(void), const char *(*labe
 void menu_3ds_add_options(void);
 
 void menu_3ds_open(void);
+int menu_3ds_open_page(const char *title);
 void menu_3ds_close(void);
 int menu_3ds_on_main_page(void);
 int menu_3ds_back(void);

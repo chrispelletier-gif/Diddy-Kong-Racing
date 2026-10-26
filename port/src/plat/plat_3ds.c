@@ -681,25 +681,48 @@ void plat_3ds_menu_draw(const BsMenu *menu) {
 void update_3ds_race_changed(int racing);
 
 /*
- * The race HUD (race_hud.h), from the game thread once a frame, or NULL after a race. The screen's thread draws the
- * newest one when it gets to it; the panel's buttons change (Pause joins Settings) when a race starts or ends.
+ * The race HUD (race_hud.h), from the game thread once a frame, or NULL after a race (a menu's companion between
+ * races). The screen's thread draws the newest one when it gets to it; the panel's buttons change (Pause joins
+ * Settings) when a race starts or ends.
  */
 int plat_race_hud_screen(void) {
     return 1;
 }
 
+/* Whether a HUD only differs from the last one drawn in what moves every frame (the timer and the map). */
+static int same_standing(const RaceHud *a, const RaceHud *b) {
+    int i;
+    if (a->mode != b->mode || a->position != b->position || a->lap != b->lap || a->item != b->item ||
+        a->itemLevel != b->itemLevel || a->itemCount != b->itemCount || a->bananas != b->bananas ||
+        a->finished != b->finished || a->silverCoins != b->silverCoins || a->racersLeft != b->racersLeft ||
+        a->balloons != b->balloons || a->racerCount != b->racerCount) {
+        return 0;
+    }
+    for (i = 0; i < a->racerCount && i < RACE_HUD_RACERS; i++) {
+        if (a->racers[i].score != b->racers[i].score || a->racers[i].carrying != b->racers[i].carrying ||
+            a->racers[i].out != b->racers[i].out) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 void plat_set_race_hud(const RaceHud *hud) {
-    static int sRacing;
+    static int sShown, sRacing;
     static RaceHud sLast;
     static u64 sLastNs;
     u64 now = svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000000) * 1000;
-    // The timer and the map move every frame; 15 redraws a second is plenty for them, which keeps the screen's
-    // thread from taking much of its core. A change of place, lap, item or bananas is drawn straight away.
-    if (hud != NULL && sRacing && now - sLastNs < 66000000ULL && hud->position == sLast.position &&
-        hud->lap == sLast.lap && hud->item == sLast.item && hud->itemLevel == sLast.itemLevel &&
-        hud->itemCount == sLast.itemCount && hud->bananas == sLast.bananas && hud->finished == sLast.finished) {
-        return;
+    int racing = hud != NULL && hud->mode < RACE_HUD_MODE_FIRST_MENU;
+    if (hud != NULL && sShown) {
+        // A menu's companion only changes with what the menu has highlighted. In a race, the timer and the map move
+        // every frame; 15 redraws a second is plenty for them, which keeps the screen's thread from taking much of
+        // its core. A change of place, lap, item, bananas or scores is drawn straight away.
+        if (!racing ? memcmp(hud, &sLast, sizeof(*hud)) == 0
+                    : now - sLastNs < 66000000ULL && same_standing(hud, &sLast)) {
+            return;
+        }
     }
+    sShown = hud != NULL;
     if (hud != NULL) {
         sLast = *hud;
         sLastNs = now;
@@ -708,8 +731,8 @@ void plat_set_race_hud(const RaceHud *hud) {
     bs_set_race_hud(hud);
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
-    if ((hud != NULL) != sRacing) {
-        sRacing = hud != NULL;
+    if (racing != sRacing) {
+        sRacing = racing;
         update_3ds_race_changed(sRacing);
     }
 }

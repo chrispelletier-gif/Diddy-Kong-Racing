@@ -34,6 +34,7 @@ static void save(const char *dir, const char *name) {
 }
 
 static void preview_race(const char *dir);
+static void preview_modes(const char *dir, RaceHud *race);
 
 static void row(BsMenu *m, const char *label, const char *value, const char *hint) {
     BsMenuRow *r = &m->rows[m->rowCount++];
@@ -70,6 +71,10 @@ void host_bottom_preview(const char *dir) {
     save(dir, "0_before_rom");
 
     bs_load_assets();
+    {
+        static const char *const sHome[3] = { "Settings", "Controls", "Updates" };
+        bs_set_buttons(sHome, 3);
+    }
     bs_add_message("Starting the game...");
     bs_add_message("Saves and settings: sdmc:/3ds/dkr/");
     save(dir, "1_home");
@@ -151,9 +156,11 @@ static void preview_race(const char *dir) {
     int i;
     memset(&hud, 0, sizeof(hud));
     hud.mapSprite = -1;
+    hud.silverCoins = -1;
     hud.racerCount = 8;
     for (i = 0; i < 8; i++) {
         hud.racers[i].character = sOrder[i];
+        hud.racers[i].special = RACE_HUD_NOT_SPECIAL;
         hud.racers[i].player = i == 2;
         hud.racers[i].gap = i == 2 ? RACE_HUD_NO_GAP : sGaps[i];
     }
@@ -176,7 +183,139 @@ static void preview_race(const char *dir) {
     hud.position = 1;
     bs_set_race_hud(&hud);
     save(dir, "9_race_final_lap");
+    hud.lap = 2;
+    hud.position = 3;
+    hud.silverCoins = 5;
+    bs_set_race_hud(&hud);
+    save(dir, "10_silver_coins");
+    preview_modes(dir, &hud);
     bs_set_race_hud(NULL);
+}
+
+static void set_racer(RaceHudRacer *r, int character, int special, int player, int gap) {
+    memset(r, 0, sizeof(*r));
+    r->character = character;
+    r->special = special;
+    r->player = player;
+    r->gap = gap;
+}
+
+/* The other modes, as the mockups in 3ds/bottom-ui/mode-mockups showed them. */
+static void preview_modes(const char *dir, RaceHud *race) {
+    static const signed char sChallengers[4] = { 0, 9, 7, 4 }; // Krunch, Diddy (the player), Pipsy, Timber
+    static const signed char sScores[4] = { 7, 9, 4, 2 };
+    RaceHud hud;
+    int i;
+
+    hud = *race;
+    hud.mode = RACE_HUD_MODE_TIME_TRIAL;
+    hud.silverCoins = -1;
+    hud.racerCount = 1;
+    set_racer(&hud.racers[0], 9, RACE_HUD_NOT_SPECIAL, 1, RACE_HUD_NO_GAP);
+    hud.item = -1;
+    hud.record = 5530;
+    hud.recordLap = 1812;
+    hud.staffTime = 5490;
+    hud.bestGap = -42;
+    hud.bestLaps[0] = 1890;
+    hud.bestLaps[1] = 1870;
+    hud.bestLaps[2] = 1850;
+    hud.bestLapCount = 3;
+    hud.bestTotal = 5610;
+    bs_set_race_hud(&hud);
+    save(dir, "11_time_trial");
+
+    hud = *race;
+    hud.mode = RACE_HUD_MODE_BOSS;
+    hud.silverCoins = -1;
+    hud.round = 2;
+    hud.racerCount = 2;
+    set_racer(&hud.racers[0], 9, RACE_HUD_NOT_SPECIAL, 1, RACE_HUD_NO_GAP);
+    set_racer(&hud.racers[1], 0, RACE_HUD_TRICKY, 0, -95);
+    hud.position = 1;
+    bs_set_race_hud(&hud);
+    save(dir, "12_boss");
+
+    hud.mode = RACE_HUD_MODE_TAJ;
+    hud.vehicle = 2;
+    set_racer(&hud.racers[0], 0, RACE_HUD_TAJ, 0, 140);
+    set_racer(&hud.racers[1], 9, RACE_HUD_NOT_SPECIAL, 1, RACE_HUD_NO_GAP);
+    hud.position = 2;
+    bs_set_race_hud(&hud);
+    save(dir, "13_taj");
+
+    hud = *race;
+    hud.silverCoins = -1;
+    hud.laps = 0;
+    hud.lapsTimed = 0;
+    hud.racerCount = 4;
+    for (i = 0; i < 4; i++) {
+        set_racer(&hud.racers[i], sChallengers[i], RACE_HUD_NOT_SPECIAL, i == 1, RACE_HUD_NO_GAP);
+        hud.racers[i].score = sScores[i];
+        hud.racers[i].carrying = i == 1;
+        hud.racers[i].character = sChallengers[i];
+    }
+    hud.mode = RACE_HUD_MODE_BANANAS;
+    hud.goal = 10;
+    bs_set_race_hud(&hud);
+    save(dir, "14_bananas");
+    hud.mode = RACE_HUD_MODE_EGGS;
+    hud.goal = 3;
+    for (i = 0; i < 4; i++) {
+        hud.racers[i].score = sScores[i] % 3;
+    }
+    bs_set_race_hud(&hud);
+    save(dir, "15_eggs");
+    hud.mode = RACE_HUD_MODE_BATTLE;
+    hud.goal = 0;
+    for (i = 0; i < 4; i++) {
+        hud.racers[i].score = 3 - i;
+        hud.racers[i].out = i == 3;
+    }
+    hud.racersLeft = 3;
+    bs_set_race_hud(&hud);
+    save(dir, "16_battle");
+
+    memset(&hud, 0, sizeof(hud));
+    hud.mode = RACE_HUD_MODE_HUB;
+    hud.mapSprite = -1;
+    hud.world = 0;
+    hud.balloons = 23;
+    for (i = 0; i < RACE_HUD_WORLDS; i++) {
+        hud.worldBalloons[i] = i < 2 ? 8 - i : i == 2 ? 3 : 0;
+        hud.worldTrophy[i] = i == 0 ? 3 : i == 1 ? 1 : 0;
+    }
+    hud.worldKeys = 3;
+    hud.worldBosses = 1;
+    hud.ttAmulet = 2;
+    hud.wizpigAmulet = 1;
+    hud.racerCount = 1;
+    set_racer(&hud.racers[0], 9, RACE_HUD_NOT_SPECIAL, 1, RACE_HUD_NO_GAP);
+    bs_set_race_hud(&hud);
+    save(dir, "17_hub");
+
+    // The menus' companions, with the idle buttons.
+    {
+        static const char *const sHome[3] = { "Settings", "Controls", "Updates" };
+        bs_set_buttons(sHome, 3);
+    }
+    hud.mode = RACE_HUD_MODE_MENU_SAVE;
+    hud.world = -1;
+    hud.racerCount = 0;
+    hud.worldBosses = 3;
+    snprintf(hud.name, sizeof(hud.name), "DKR");
+    bs_set_race_hud(&hud);
+    save(dir, "18_menu_save");
+    memset(&hud, 0, sizeof(hud));
+    hud.mode = RACE_HUD_MODE_MENU_TRACK;
+    hud.mapSprite = -1;
+    hud.level = 10; // Crescent Island.
+    hud.record = 5500;
+    hud.recordLap = 1790;
+    hud.bestTotal = 5610;
+    snprintf(hud.name, sizeof(hud.name), "Crescent Island");
+    bs_set_race_hud(&hud);
+    save(dir, "19_menu_track");
 }
 
 static int sRaceFrames;
@@ -196,7 +335,7 @@ void host_bottom_race(const char *dir, const RaceHud *hud) {
         int i;
         for (i = 0; i < hud->racerCount; i++) {
             if (hud->racers[i].player) {
-                printf("player %d %d %u\n", hud->racers[i].mapX, hud->racers[i].mapY, hud->racers[i].heading);
+                printf("player %d %d %u\n", hud->racers[i].at.mapX, hud->racers[i].at.mapY, hud->racers[i].at.heading);
             }
         }
     }

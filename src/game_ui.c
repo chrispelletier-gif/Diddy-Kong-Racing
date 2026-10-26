@@ -3392,7 +3392,7 @@ void minimap_init(LevelModel *model) {
     load_sprite_info(model->minimapSpriteIndex, &gMinimapDotOffsetX, &gMinimapDotOffsetY, &sp2C, &sp2C, &sp2C);
     func_8007CA68(model->minimapSpriteIndex, 0, &D_80126D14, &D_80126D18, &sp2C);
 #ifdef TARGET_PORT
-    port_race_hud_map(model->minimapSpriteIndex);
+    port_race_hud_map(model, model->minimapSpriteIndex);
 #endif
     model->minimapSpriteIndex = (s32) tex_load_sprite(model->minimapSpriteIndex, 1);
 }
