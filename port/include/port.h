@@ -228,6 +228,8 @@ void port_set_race_hud_setting(s32 value);
  * portraits from the game's 3D models. src/tracks.c places the camera and leaves out the track and sky; render_object
  * leaves out every other object.
  */
+struct Object;
+struct Camera;
 s32 port_portrait_active(void);
 s32 port_portrait_hides(struct Object *obj);
 void port_portrait_camera(struct Camera *cam);
