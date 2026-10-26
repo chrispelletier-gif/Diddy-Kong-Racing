@@ -26,6 +26,20 @@
  * It keeps its own files (gpu_bench_state.txt, gpu_bench_results.csv with "config" and "pct_60fps" columns), so a
  * full run it interrupts carries on afterwards. DKR_AUTORUN_TIMEOUT, _LOOP and _RESTART apply to it too.
  *
+ * The switch bench (roadmap P29) is the GPU benchmark's twin for the renderer's experimental switches (sSwitches): the
+ * same heavy races, once with every switch at its usual setting and once with each switch flipped by itself, set in
+ * the program at the start of each race (plat_override_switch), so env.txt needs no editing. The races keep the
+ * player's render settings, which the results name. About 6 minutes a switch plus 6 for the usual settings. New
+ * experiments add a line to sSwitches. It is started with the "Switch bench" button in the Test run confirmation,
+ * or always runs with:
+ *   DKR_AUTORUN_SWITCH=1              Turns it on (instead of the full run).
+ *   DKR_AUTORUN_SWITCH_TRACKS=id,...  Tracks (default: the GPU benchmark's three).
+ *   DKR_AUTORUN_SWITCH_CHARACTER=n    Character (default Bumper).
+ *   DKR_AUTORUN_SWITCH_CONFIGS=n,...  The races' switch sets: 0 every switch at its usual setting, n switch n-1 of
+ *                                     sSwitches flipped (default all).
+ * Its files are switch_bench_state.txt and switch_bench_results.csv (with "config" and "pct_60fps" columns, as the
+ * GPU benchmark's).
+ *
  * The quick test is the other short run: the slowest tracks of the full run, twice each with one character and the
  * player's own anti-aliasing setting, about 20 minutes. It is for telling whether a change made the slow spots
  * faster: its results compare each track with the quick test before it (usually the previous build). It is started
@@ -87,12 +101,17 @@
 #define BOSS_STATE_FILE "boss_test_state.txt"
 #define BOSS_RESULTS_FILE "boss_test_results.csv"
 #define BOSS_PASSES 1
+#define SWITCH_STATE_FILE "switch_bench_state.txt"
+#define SWITCH_RESULTS_FILE "switch_bench_results.csv"
+
+/* Which run: the full test run, the GPU benchmark, the quick test, the boss fights or the switch bench. */
+enum Mode { MODE_FULL, MODE_BENCH, MODE_QUICK, MODE_BOSS, MODE_SWITCH, MODE_COUNT };
 
 typedef struct Race {
     s8 track;
     s8 character;
     s8 vehicle;
-    s8 config; // The render settings for the race (the benchmark: an index into sBenchConfigs), or -1 to leave them.
+    s8 config; // The settings for the race (an index into sBenchConfigs, or the switch bench's set), or -1 to leave them.
 } Race;
 
 /* The GPU benchmark's render settings. The first is the default ones, which the others are compared with. */
@@ -115,10 +134,45 @@ static const BenchConfig sBenchConfigs[] = {
 };
 #define BENCH_CONFIGS ((s32) ARRAY_COUNT(sBenchConfigs))
 
+/*
+ * The switch bench's experimental switches (plat_switch names, read by the renderer at the start of a frame). Each
+ * is raced at its usual setting and, by itself, at its test setting; a switch can set two variables together.
+ */
+typedef struct BenchSwitch {
+    const char *name; // For the results: what the test setting does.
+    const char *env[2];
+    s8 usual, test;
+} BenchSwitch;
+
+/* Early depth (P20, DKR_EARLY_DEPTH=1) is left out until it draws right: on a New 3DS it threw away random blocks of
+ * the picture. The white-line diagnostics (P28) were measured once (about 1 ms of GPU time a frame) and are off for
+ * good. */
+static const BenchSwitch sSwitches[] = {
+    { "command list splits off (P19)", { "DKR_GPU_SPLIT", NULL }, 1, 0 },
+};
+#define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches) + 1) // The usual settings, then each switch flipped
+#define MAX_CONFIGS 16
+
+static s32 sMode; // enum Mode
+
+static s32 config_count(void);
+static const char *config_name(s32 config);
+
+/* Sets the race's settings: config -1 puts back the player's render settings and every switch's own value. */
 static void apply_config(s32 config) {
-    if (config < 0 || config >= BENCH_CONFIGS) {
+    s32 i, k;
+    if (config < 0 || config >= config_count()) {
         plat_set_gpu_config(-1, -1);
         plat_set_60fps(-1);
+        plat_clear_switch_overrides();
+        return;
+    }
+    if (config_count() == SWITCH_CONFIGS) {
+        for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
+            for (k = 0; k < 2 && sSwitches[i].env[k] != NULL; k++) {
+                plat_override_switch(sSwitches[i].env[k], config == i + 1 ? sSwitches[i].test : sSwitches[i].usual);
+            }
+        }
         return;
     }
     plat_set_gpu_config(sBenchConfigs[config].aa, sBenchConfigs[config].fb16);
@@ -143,10 +197,7 @@ static const char *const sCharacterNames[NUMBER_OF_CHARACTERS] = {
 };
 static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
-enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS };
-
-/* Which run: the full test run, the GPU benchmark, the quick test or the boss fights. */
-enum Mode { MODE_FULL, MODE_BENCH, MODE_QUICK, MODE_BOSS, MODE_COUNT };
+enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS, REQUEST_SWITCH };
 
 typedef struct ModeInfo {
     const char *name;        // For the bottom screen and the results.
@@ -161,10 +212,29 @@ static const ModeInfo sModes[MODE_COUNT] = {
     { "GPU benchmark", BENCH_STATE_FILE, BENCH_RESULTS_FILE, "config,pct_60fps", "DKR_AUTORUN_BENCH" },
     { "Quick test", QUICK_STATE_FILE, QUICK_RESULTS_FILE, "build", "DKR_AUTORUN_QUICK" },
     { "Boss fights", BOSS_STATE_FILE, BOSS_RESULTS_FILE, "build", "DKR_AUTORUN_BOSS" },
+    { "Switch bench", SWITCH_STATE_FILE, SWITCH_RESULTS_FILE, "config,pct_60fps", "DKR_AUTORUN_SWITCH" },
 };
 
+/* The benchmarks: their races each have a config (an index into sBenchConfigs, or a switch set). */
+static s32 is_bench(void) {
+    return sMode == MODE_BENCH || sMode == MODE_SWITCH;
+}
+
+static s32 config_count(void) {
+    return sMode == MODE_SWITCH ? SWITCH_CONFIGS : BENCH_CONFIGS;
+}
+
+static const char *config_name(s32 config) {
+    if (config < 0 || config >= config_count()) {
+        return "?";
+    }
+    if (sMode == MODE_SWITCH) {
+        return config == 0 ? "usual settings" : sSwitches[config - 1].name;
+    }
+    return sBenchConfigs[config].name;
+}
+
 static s32 sEnabled = -1;
-static s32 sMode; // enum Mode
 static s32 sInitialised;
 static volatile s32 sRequest;
 static s32 sQuitPending;
@@ -283,13 +353,17 @@ static void build_short_list(void) {
         ASSET_LEVEL_TRICKYTOPS2, ASSET_LEVEL_BLUEY2, ASSET_LEVEL_BUBBLER2, ASSET_LEVEL_SMOKEY2, ASSET_LEVEL_WIZPIG2,
     };
     s32 quick = sMode == MODE_QUICK, boss = sMode == MODE_BOSS;
+    s32 numBenchConfigs = config_count();
     const s8 *defaultTracks = boss ? sBossTracks : quick ? sQuickTracks : sBenchTracks;
     s32 numDefault = boss    ? (s32) ARRAY_COUNT(sBossTracks)
                      : quick ? (s32) ARRAY_COUNT(sQuickTracks)
                              : (s32) ARRAY_COUNT(sBenchTracks);
-    const char *prefix = boss ? "DKR_AUTORUN_BOSS" : quick ? "DKR_AUTORUN_QUICK" : "DKR_AUTORUN_BENCH";
+    const char *prefix = boss                    ? "DKR_AUTORUN_BOSS"
+                         : quick                 ? "DKR_AUTORUN_QUICK"
+                         : sMode == MODE_SWITCH ? "DKR_AUTORUN_SWITCH"
+                                                 : "DKR_AUTORUN_BENCH";
     char name[48];
-    s8 tracks[MAX_TRACKS], character[1], configs[BENCH_CONFIGS];
+    s8 tracks[MAX_TRACKS], character[1], configs[MAX_CONFIGS];
     s32 numTracks, numLevels, numWorlds, t, pass, passes, numConfigs;
 
     plat_snprintf(name, sizeof(name), "%s_TRACKS", prefix);
@@ -304,9 +378,10 @@ static void build_short_list(void) {
         character[0] >= NUMBER_OF_CHARACTERS) {
         character[0] = 1; // Bumper
     }
-    numConfigs = parse_list(plat_getenv("DKR_AUTORUN_BENCH_CONFIGS"), configs, BENCH_CONFIGS);
+    plat_snprintf(name, sizeof(name), "%s_CONFIGS", prefix);
+    numConfigs = parse_list(plat_getenv(name), configs, numBenchConfigs);
     if (numConfigs < 0) {
-        for (numConfigs = 0; numConfigs < BENCH_CONFIGS; numConfigs++) {
+        for (numConfigs = 0; numConfigs < numBenchConfigs; numConfigs++) {
             configs[numConfigs] = numConfigs;
         }
     }
@@ -496,7 +571,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         stats->counters[PROF_TEXTURE_UPLOADS], (int) pct((u32) (stats->idleNs / 1000), (u32) (stats->elapsedNs / 1000)),
         stats->gameFrames ? prof_limit(stats) : "-", (int) sUnsticks, sUnstuckAt);
     length = strlen(line);
-    if (sMode == MODE_BENCH) {
+    if (is_bench()) {
         // The settings the race was meant to have (the log says what the renderer made of them), and the frames at 60.
         plat_snprintf(line + length, sizeof(line) - length, ",%d,%d", (int) race->config,
                       (int) pct(stats->rateFrames[1], stats->gameFrames));
@@ -570,6 +645,8 @@ static void init(void) {
     const char *quickNames[] = { "DKR_AUTORUN_QUICK_TRACKS", "DKR_AUTORUN_QUICK_CHARACTER",
                                  "DKR_AUTORUN_QUICK_PASSES" };
     const char *bossNames[] = { "DKR_AUTORUN_BOSS_TRACKS", "DKR_AUTORUN_BOSS_CHARACTER", "DKR_AUTORUN_BOSS_PASSES" };
+    const char *switchNames[] = { "DKR_AUTORUN_SWITCH_TRACKS", "DKR_AUTORUN_SWITCH_CHARACTER",
+                                  "DKR_AUTORUN_SWITCH_CONFIGS" };
     s32 i;
 
     sInitialised = TRUE;
@@ -578,6 +655,14 @@ static void init(void) {
         hash_text("gpu bench");
         for (i = 0; i < (s32) ARRAY_COUNT(benchNames); i++) {
             hash_text(plat_getenv(benchNames[i]));
+        }
+    } else if (sMode == MODE_SWITCH) {
+        hash_text("switch bench");
+        for (i = 0; i < (s32) ARRAY_COUNT(switchNames); i++) {
+            hash_text(plat_getenv(switchNames[i]));
+        }
+        for (i = 1; i < SWITCH_CONFIGS; i++) {
+            hash_text(config_name(i)); // A new switch starts a new run.
         }
     } else if (sMode == MODE_QUICK) {
         hash_text("quick test");
@@ -681,11 +766,12 @@ s32 port_autorun_active(void) {
 }
 
 /*
- * From any thread (the bottom screen's buttons): start the test run (1), the anti-aliasing benchmark (2), the quick
- * test (3) or the boss fights (4), or stop whichever is going (0), at the next game frame.
+ * From any thread (the bottom screen's buttons): start the test run (1), the GPU benchmark (2), the quick test (3), the
+ * boss fights (4) or the switch bench (5), or stop whichever is going (0), at the next game frame.
  */
 void port_autorun_request(s32 start) {
-    sRequest = start == 4   ? REQUEST_BOSS
+    sRequest = start == 5   ? REQUEST_SWITCH
+               : start == 4 ? REQUEST_BOSS
                : start == 3 ? REQUEST_QUICK
                : start == 2 ? REQUEST_BENCH
                : start      ? REQUEST_START
@@ -734,15 +820,15 @@ static void show_status(void) {
             break;
     }
     plat_snprintf(line[0], sizeof(line[0]), "%s %d  race %d/%d  ok %d bad %d",
-                  sMode == MODE_BENCH   ? "GPU BENCH"
-                  : sMode == MODE_QUICK ? "QUICK TEST"
+                  sMode == MODE_BENCH    ? "GPU BENCH"
+                  : sMode == MODE_SWITCH ? "SWITCH BENCH"
+                  : sMode == MODE_QUICK  ? "QUICK TEST"
                   : sMode == MODE_BOSS  ? "BOSS FIGHTS"
                                         : "TEST RUN",
                   (int) sRun,
                   (int) sNext + 1, (int) sNumRaces, (int) sFinished, (int) sProblems);
-    if (sMode == MODE_BENCH) {
-        plat_snprintf(line[1], sizeof(line[1]), "%s, %s %s", track_name(race->track),
-                      race->config >= 0 && race->config < BENCH_CONFIGS ? sBenchConfigs[(s32) race->config].name : "?",
+    if (is_bench()) {
+        plat_snprintf(line[1], sizeof(line[1]), "%s, %s %s", track_name(race->track), config_name(race->config),
                       what);
     } else {
         plat_snprintf(line[1], sizeof(line[1]), "%s %s %s %s", sCharacterNames[(s32) race->character],
@@ -887,7 +973,7 @@ static s32 split_fields(char *line, const char **fields) {
  * test: one line per track for the quick test before this one and one for this one, then the difference.
  */
 static void bench_summary(char *out, s32 size) {
-    static BenchGroup groups[BENCH_MAX_TRACKS][BENCH_CONFIGS];
+    static BenchGroup groups[BENCH_MAX_TRACKS][MAX_CONFIGS];
     char path[256];
     char *data, *copy, *line, *next;
     const char *fields[COL_COUNT + 4];
@@ -955,7 +1041,7 @@ static void bench_summary(char *out, s32 size) {
                 continue;
             }
             k = port_atoi(fields[COL_EXTRA]);
-            if (k < 0 || k >= BENCH_CONFIGS) {
+            if (k < 0 || k >= config_count()) {
                 continue;
             }
         }
@@ -1011,6 +1097,18 @@ static void bench_summary(char *out, s32 size) {
                                    "| limit | audio ms | sound gaps |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
                                    (int) sRun, (int) previousRun);
         }
+    } else if (sMode == MODE_SWITCH) {
+        static const char *const sAaNames[3] = { "off", "4x", "2x" };
+        s32 aa = plat_antialias();
+        length = plat_snprintf(out, size,
+                               "\n### Switches (averages of the finished races)\n\n"
+                               "Each switch is flipped by itself; saved is against the usual settings' races. "
+                               "Render settings: %d fps cap, anti-aliasing %s, %d-bit buffers.\n\n"
+                               "| track | switch | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | rdp ms | rdp saved "
+                               "| worst GPU | worst frame | limit |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n",
+                               plat_frame_retraces() == 1 ? 60 : 30, aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
+                               plat_fb16() ? 16 : 32);
     } else {
         length = plat_snprintf(out, size,
                                "\n### Render settings (averages of the finished races)\n\n"
@@ -1019,8 +1117,10 @@ static void bench_summary(char *out, s32 size) {
                                "rdp ms | worst frame | limit | audio ms | sound gaps |\n"
                                "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
                                sBenchConfigs[0].name);
+    }
+    if (!quick) {
         for (t = 0; t < numTracks; t++) {
-            for (k = 0; k < BENCH_CONFIGS; k++) {
+            for (k = 0; k < config_count(); k++) {
                 BenchGroup *g = &groups[t][k], *base = &groups[t][0];
                 s32 limit = 0;
                 if (g->races == 0) {
@@ -1034,10 +1134,23 @@ static void bench_summary(char *out, s32 size) {
                 if (length >= size) {
                     return;
                 }
+                if (sMode == MODE_SWITCH) {
+                    length += plat_snprintf(
+                        out + length, size - length,
+                        "| %s | %s | %d | %.1f | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s |\n",
+                        groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
+                        bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
+                        base->races ? "" : "?",
+                        base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
+                        bench_avg(g->rdp, g->races), base->races ? "" : "?",
+                        base->races ? bench_avg(base->rdp, base->races) - bench_avg(g->rdp, g->races) : 0.0,
+                        (int) g->worstGpu, (int) g->worstFrame, sLimitNames[limit]);
+                    continue;
+                }
                 length += plat_snprintf(
                     out + length, size - length,
                     "| %s | %s | %d | %.1f | %.0f%% | %.0f%% | %.1f | %s%.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
-                    groups[t][0].track, sBenchConfigs[k].name, (int) g->races, bench_avg(g->fps, g->races),
+                    groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
                     bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                     base->races ? "" : "?",
                     base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
@@ -1135,8 +1248,9 @@ static void send_results(const char *why) {
     static char summary[6144];
     s32 length;
     plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
-                  sMode == MODE_BENCH   ? "GPU benchmark "
-                  : sMode == MODE_QUICK ? "quick test "
+                  sMode == MODE_BENCH    ? "GPU benchmark "
+                  : sMode == MODE_SWITCH ? "switch bench "
+                  : sMode == MODE_QUICK  ? "quick test "
                   : sMode == MODE_BOSS  ? "boss fights "
                                         : "",
                   (int) sRun, (int) (sFinished + sProblems), (int) sNumRaces,
@@ -1144,8 +1258,9 @@ static void send_results(const char *why) {
     length = plat_snprintf(summary, sizeof(summary),
                            "%s %d %s after %d of %d races: %d finished, %d with problems.\n"
                            "Average frame rate of the races finished since the game started: %.1f fps (%d races).\n",
-                           sMode == MODE_BENCH   ? "GPU benchmark run"
-                           : sMode == MODE_QUICK ? "Quick test run"
+                           sMode == MODE_BENCH    ? "GPU benchmark run"
+                           : sMode == MODE_SWITCH ? "Switch bench run"
+                           : sMode == MODE_QUICK  ? "Quick test run"
                            : sMode == MODE_BOSS  ? "Boss fights run"
                                                  : "Run",
                            (int) sRun, why,
@@ -1167,7 +1282,7 @@ static void turn_off(const char *why) {
     sInitialised = FALSE;
     set_phase(PHASE_OFF);
     save_state(-1);
-    if (sMode == MODE_BENCH) {
+    if (is_bench()) {
         apply_config(-1); // Back to the player's settings.
     }
     sMode = MODE_FULL;
@@ -1227,9 +1342,11 @@ static void end_race(const char *outcome, s32 position) {
 static void handle_request(void) {
     s32 request = sRequest;
     sRequest = REQUEST_NONE;
-    if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS) &&
+    if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS ||
+         request == REQUEST_SWITCH) &&
         !port_autorun_active()) {
-        sMode = request == REQUEST_BENCH   ? MODE_BENCH
+        sMode = request == REQUEST_SWITCH  ? MODE_SWITCH
+                : request == REQUEST_BENCH ? MODE_BENCH
                 : request == REQUEST_QUICK ? MODE_QUICK
                 : request == REQUEST_BOSS  ? MODE_BOSS
                                            : MODE_FULL;

@@ -4,7 +4,8 @@ with bugreport_fetch.py) as a Markdown report.
 
     python3 port/tools/autorun_report.py autorun_results.csv [--run N] [--out report.md]
 
-The GPU benchmark's gpu_bench_results.csv (it has a "config" column) also gets a table by track and render setting
+The GPU benchmark's gpu_bench_results.csv (it has a "config" column) also gets a table by track and render setting,
+and the switch bench's switch_bench_results.csv one by track and switch
 (the older anti-aliasing benchmark's aa_bench_results.csv, with an "aa" column, by track and AA).
 The quick test's quick_test_results.csv (it has a "build" column) also gets a table by track and build over every
 run in the file, to see whether a build made the slow tracks faster.
@@ -110,9 +111,11 @@ def main():
         ]
         lines += group_table(finished, "track", "track") + [""]
         if any(r.get("config") not in (None, "") for r in finished):
-            # port_autorun.c's sBenchConfigs, in order.
+            # port_autorun.c's sBenchConfigs, in order, or for the switch bench the usual settings then sSwitches.
             configs = ["AA 4x", "AA 4x, 16-bit", "AA 2x", "AA 2x, 16-bit", "AA off", "AA off, 16-bit",
                        "60 fps, AA off, 16-bit", "60 fps, AA 2x, 16-bit"]
+            if any("switch_bench" in path for path in args.csv):
+                configs = ["usual settings", "command list splits off (P19)"]
             for row in finished:
                 index = int(row["config"]) if row["config"].isdigit() else -1
                 row["track and settings"] = f"{row['track']}, {configs[index] if 0 <= index < len(configs) else '?'}"

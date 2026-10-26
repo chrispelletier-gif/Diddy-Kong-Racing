@@ -215,6 +215,56 @@ const char *plat_getenv(const char *name) {
 }
 #endif
 
+#define MAX_SWITCH_OVERRIDES 16
+
+static struct {
+    const char *name; // NULL: a free entry
+    int value;
+} sSwitchOverrides[MAX_SWITCH_OVERRIDES];
+volatile int gPlatSwitchEpoch;
+
+int plat_switch(const char *name, int fallback) {
+    const char *env;
+    int i;
+    for (i = 0; i < MAX_SWITCH_OVERRIDES; i++) {
+        if (sSwitchOverrides[i].name != NULL && strcmp(sSwitchOverrides[i].name, name) == 0) {
+            return sSwitchOverrides[i].value;
+        }
+    }
+    env = plat_getenv(name);
+    return env != NULL ? atoi(env) : fallback;
+}
+
+void plat_override_switch(const char *name, int value) {
+    int i, free = -1;
+    for (i = 0; i < MAX_SWITCH_OVERRIDES; i++) {
+        if (sSwitchOverrides[i].name != NULL && strcmp(sSwitchOverrides[i].name, name) == 0) {
+            break;
+        }
+        if (sSwitchOverrides[i].name == NULL && free < 0) {
+            free = i;
+        }
+    }
+    if (i == MAX_SWITCH_OVERRIDES) {
+        i = free;
+    }
+    if (i < 0) {
+        return;
+    }
+    // The value before the name, as the renderer may be reading the table on the other core.
+    sSwitchOverrides[i].value = value;
+    sSwitchOverrides[i].name = value < 0 ? NULL : name;
+    gPlatSwitchEpoch++;
+}
+
+void plat_clear_switch_overrides(void) {
+    int i;
+    for (i = 0; i < MAX_SWITCH_OVERRIDES; i++) {
+        sSwitchOverrides[i].name = NULL;
+    }
+    gPlatSwitchEpoch++;
+}
+
 int plat_list_dir(const char *dir, char *names, int nameSize, int maxNames) {
     DIR *d = opendir(dir);
     struct dirent *entry;
