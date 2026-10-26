@@ -158,6 +158,17 @@ static inline s32 port_atoi(const char *s) {
     return neg ? -v : v;
 }
 
+/*
+ * Multiplayer. One 3DS is one set of controls, so the 2 to 4 player game is hidden until wireless or online play
+ * (roadmap Phase 10) can fill the other seats: only player one joins character select, and the magic codes that only
+ * do something with more players (DOUBLEVISION, JOINTVENTURE) are left out of code entry, the code list and the
+ * credits (src/menu.c). The multiplayer code itself stays compiled and untouched; building with PORT_MULTIPLAYER=1
+ * (make ... PORT_MULTIPLAYER=1) brings it all back. Test runs, the switch bench and CI never play multiplayer.
+ */
+#ifndef PORT_MULTIPLAYER
+#define PORT_MULTIPLAYER 0
+#endif
+
 /* Test helpers (port/src/game/port_test.c). */
 s32 port_warp_next(s32 levelId, s32 *cutsceneId, s16 *timer);
 s32 port_warp_active(void);

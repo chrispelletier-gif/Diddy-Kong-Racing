@@ -1874,6 +1874,11 @@ s32 gCheatsInCreditsArray[21] = { CHEAT_BIG_CHARACTERS,
                                   CHEAT_ULTIMATE_AI };
 #define NUMBER_CHEATS_IN_CREDITS sizeof(gCheatsInCreditsArray) / sizeof(s32)
 
+#ifdef TARGET_PORT
+// Magic codes that only do something with two or more players, hidden while multiplayer is (PORT_MULTIPLAYER, port.h).
+#define PORT_HIDDEN_MAGIC_CODES (PORT_MULTIPLAYER ? 0 : (CHEAT_SELECT_SAME_PLAYER | CHEAT_TWO_PLAYER_ADVENTURE))
+#endif
+
 s32 gViewingCreditsFromCheat = FALSE; // Set to 1 if viewing credits from "WHODIDTHIS" cheat
 
 MenuElement gCreditsMenuElements[9] = {
@@ -6833,6 +6838,15 @@ s32 menu_magic_codes_loop(s32 updateRate) {
                     gNewCheatID += 2;
 #endif
                 }
+#ifdef TARGET_PORT
+#if VERSION >= VERSION_79
+                if (foundCheat && ((1 << gNewCheatID) & PORT_HIDDEN_MAGIC_CODES)) {
+#else
+                if (foundCheat && ((1 << (gNewCheatID >> 1)) & PORT_HIDDEN_MAGIC_CODES)) {
+#endif
+                    foundCheat = FALSE; // Answered like a wrong code.
+                }
+#endif
                 if (foundCheat == FALSE) {
                     gNewCheatID = -1;
                 } else {
@@ -7003,7 +7017,11 @@ void cheatlist_render(UNUSED s32 updateRate) {
               ALIGN_MIDDLE_CENTER); // MAGIC CODES LIST
 
     for (i = 0, code = 1, numOfUnlockedCheats = 0; i < 32; i++, code <<= 1) {
+#ifdef TARGET_PORT
+        if (code & gUnlockedMagicCodes & ~PORT_HIDDEN_MAGIC_CODES) {
+#else
         if (code & gUnlockedMagicCodes) {
+#endif
             gUnlockedCheatIDs[numOfUnlockedCheats] = i;
             numOfUnlockedCheats += 1;
         }
@@ -7099,7 +7117,11 @@ s32 menu_magic_codes_list_loop(s32 updateRate) {
     }
 
     for (i = 0, code = 1, numUnlockedCodes = 0; i < MAX_CHEATS; i++) {
+#ifdef TARGET_PORT
+        if (code & gUnlockedMagicCodes & ~PORT_HIDDEN_MAGIC_CODES) {
+#else
         if (code & gUnlockedMagicCodes) {
+#endif
             gUnlockedCheatIDs[numUnlockedCodes] = i;
             numUnlockedCodes++;
         }
@@ -7402,6 +7424,12 @@ void charselect_new_player(void) {
     s32 j;
     s32 takenChar;
     s32 var_a2;
+
+#ifdef TARGET_PORT
+    if (!PORT_MULTIPLAYER && gNumberOfActivePlayers > 0) {
+        return; // One player only (port.h).
+    }
+#endif
 
     for (i = 0; i < MAXCONTROLLERS; i++) {
         if (!gActivePlayersArray[i]) {
@@ -13601,6 +13629,11 @@ void menu_credits_init(void) {
         }
 
         cheat = gCheatsInCreditsArray[rand_range(0, NUMBER_CHEATS_IN_CREDITS - 1)];
+#ifdef TARGET_PORT
+        while (cheat & PORT_HIDDEN_MAGIC_CODES) {
+            cheat = gCheatsInCreditsArray[rand_range(0, NUMBER_CHEATS_IN_CREDITS - 1)];
+        }
+#endif
         cheatIndex = -1;
         while (cheat != 0) {
             cheat >>= 1;
