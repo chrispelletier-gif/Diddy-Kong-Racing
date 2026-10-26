@@ -160,6 +160,11 @@ jobs:
             printf 'commit=%s\nbranch=%s\ndate=%s\nsize=%s\nsha256=%s\n' "$GITHUB_SHA" "$BRANCH" \
               "$(date -u +%Y-%m-%dT%H:%MZ)" "$(stat -c %s "$dir/dkr.3dsx")" \
               "$(sha256sum "$dir/dkr.3dsx" | cut -d' ' -f1)" > "$dir/build.txt"
+            # A .cia build updates itself from these (port/3ds/update_3ds.c).
+            if [ -f "$dir/dkr.cia" ]; then
+              printf 'cia_size=%s\ncia_sha256=%s\n' "$(stat -c %s "$dir/dkr.cia")" \
+                "$(sha256sum "$dir/dkr.cia" | cut -d' ' -f1)" >> "$dir/build.txt"
+            fi
             cat "$dir/build.txt"
           done
 
