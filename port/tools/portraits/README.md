@@ -11,7 +11,7 @@ in-game models, for the bottom screen.
    | Subject | Command |
    |---|---|
    | Tricky  | `cap.sh boss38 180 70 90 DKR_PORTRAIT=boss DKR_AUTORUN=1 DKR_AUTORUN_BOSS=1 DKR_AUTORUN_BOSS_TRACKS=38` |
-   | Bluey   | `cap.sh bluey 130 45 180 ... DKR_AUTORUN_BOSS_TRACKS=1` |
+   | Bluey   | `cap.sh bluey7 150 68 180 ... DKR_AUTORUN_BOSS_TRACKS=1 DKR_DUMP_EVERY=25` (frame 1350, three-quarter view) |
    | Bubbler | `cap.sh bubbler3 220 50 270 ... DKR_AUTORUN_BOSS_TRACKS=40` |
    | Smokey  | `cap.sh smokey3 110 65 0 ... DKR_AUTORUN_BOSS_TRACKS=41` |
    | Wizpig  | `cap.sh wizpig 130 105 90 ... DKR_AUTORUN_BOSS_TRACKS=37` |

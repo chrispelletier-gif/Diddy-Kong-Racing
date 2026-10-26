@@ -7,12 +7,12 @@ from key import key
 from PIL import Image, ImageFilter
 H = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../assets/.vanilla/us.v77/textures/2d/hud/')
 SUBJECTS = {
-    'tricky': ('boss38/frame_01400.png', (78, 80, 178, 180)),
-    'bluey': ('bluey/frame_01550.png', (108, 0, 228, 120)),
-    'bubbler': ('bubbler3/frame_01250.png', (95, 30, 245, 180)),
-    'smokey': ('smokey3/frame_01250.png', (125, 15, 250, 140)),
-    'wizpig': ('wizpig/frame_01400.png', (75, 40, 205, 170)),
-    'taj': ('taj4/frame_01250.png', (122, 74, 204, 156)),
+    'tricky': ('boss38/frame_01400.png', (80, 114, 170, 204)),
+    'bluey': ('bluey7/frame_01350.png', (78, 114, 163, 199)),
+    'bubbler': ('bubbler3/frame_01250.png', (110, 96, 220, 206)),
+    'smokey': ('smokey3/frame_01250.png', (140, 38, 250, 148)),
+    'wizpig': ('wizpig/frame_01400.png', (105, 52, 225, 172)),
+    'taj': ('taj4/frame_01250.png', (126, 90, 200, 164)),
 }
 
 
