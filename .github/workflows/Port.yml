@@ -96,8 +96,12 @@ jobs:
             ${{ matrix.out }}/dkr.3dsx
             ${{ matrix.out }}/dkr.elf
 
-  # The game's "Check for updates" button (port/3ds/update_3ds.c) installs these: release 3ds-newest has the build of
-  # the latest push to any branch, 3ds-master the latest build of master. Each holds dkr.3dsx and build.txt.
+  # Releases (all pre-releases, each holding dkr.3dsx and build.txt):
+  #   3ds-master        the player build (RELEASE=1) of master: the one to download and play
+  #   3ds-master-debug  the debug build of master
+  #   3ds-newest        the debug build of the latest push to any branch
+  # The debug builds' Check for updates button (port/3ds/update_3ds.c) installs 3ds-master-debug or 3ds-newest, so it
+  # never swaps a debug build for a player build.
   publish-3ds:
     name: Publish the 3DS build
     needs: build-3ds
@@ -109,20 +113,30 @@ jobs:
     concurrency:
       group: port-publish-3ds
     steps:
-      - name: Download dkr.3dsx
+      - name: Download the debug dkr.3dsx
         uses: actions/download-artifact@v4
         with:
           name: dkr-3ds-${{ github.sha }}
-          path: build
+          path: build/debug
+
+      - name: Download the player dkr.3dsx
+        if: github.ref_name == github.event.repository.default_branch
+        uses: actions/download-artifact@v4
+        with:
+          name: dkr-3ds-release-${{ github.sha }}
+          path: build/release
 
       - name: Write build.txt
         env:
           BRANCH: ${{ github.ref_name }}
         run: |
-          printf 'commit=%s\nbranch=%s\ndate=%s\nsize=%s\nsha256=%s\n' "$GITHUB_SHA" "$BRANCH" \
-            "$(date -u +%Y-%m-%dT%H:%MZ)" "$(stat -c %s build/dkr.3dsx)" \
-            "$(sha256sum build/dkr.3dsx | cut -d' ' -f1)" > build/build.txt
-          cat build/build.txt
+          for dir in build/debug build/release; do
+            [ -f "$dir/dkr.3dsx" ] || continue
+            printf 'commit=%s\nbranch=%s\ndate=%s\nsize=%s\nsha256=%s\n' "$GITHUB_SHA" "$BRANCH" \
+              "$(date -u +%Y-%m-%dT%H:%MZ)" "$(stat -c %s "$dir/dkr.3dsx")" \
+              "$(sha256sum "$dir/dkr.3dsx" | cut -d' ' -f1)" > "$dir/build.txt"
+            cat "$dir/build.txt"
+          done
 
       - name: Publish the releases
         env:
@@ -131,15 +145,18 @@ jobs:
           BRANCH: ${{ github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          # publish TAG TITLE DIR NOTES
           publish() {
             gh release delete "$1" --cleanup-tag --yes 2>/dev/null || true
             gh release create "$1" --prerelease --target "$GITHUB_SHA" --title "$2" \
-              --notes "3DS build of $BRANCH at $GITHUB_SHA, made by CI. Install it from the game's Check for updates button." \
-              build/dkr.3dsx build/build.txt
+              --notes "3DS build of $BRANCH at $GITHUB_SHA, made by CI. $4" "$3/dkr.3dsx" "$3/build.txt"
           }
-          publish 3ds-newest "3DS build: newest ($BRANCH)"
+          DEBUG_NOTE="Debug build (profiler, test runs, bug reports, updates); install it from the game's Check for updates button."
+          publish 3ds-newest "3DS build: newest ($BRANCH, debug)" build/debug "$DEBUG_NOTE"
           if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
-            publish 3ds-master "3DS build: master"
+            publish 3ds-master-debug "3DS build: master (debug)" build/debug "$DEBUG_NOTE"
+            publish 3ds-master "3DS build: master" build/release \
+              "Copy dkr.3dsx to sdmc:/3ds/ and your own US 1.0 ROM to sdmc:/3ds/dkr/baserom.z64, then start it from the Homebrew Launcher."
           fi
 
   host:

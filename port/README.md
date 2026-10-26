@@ -308,8 +308,9 @@ A crash report gives `pc` and `lr`; with the `dkr.elf` of the same build (the `B
 
 ## Updates
 
-CI publishes every 3DS build as a pre-release: `3ds-newest` is the latest push to any branch, `3ds-master` the
-latest build of master. Tap Settings, then Check for updates; the game lists both builds (the
+CI publishes every 3DS build as a pre-release: `3ds-newest` is the debug build of the latest push to any branch,
+`3ds-master-debug` the debug build of master, and `3ds-master` the player build of master (the one to download; it has
+no Check for updates button). The updater only installs the two debug builds. Tap Settings, then Check for updates; the game lists both builds (the
 one running is marked "this") and offers master, newest or cancel. The chosen build is downloaded next to the
 running `.3dsx`, checked against its size and sha256, and replaces it; tap Quit to finish the update, or keep
 playing and the new build runs next time. It only works when the game was started from the SD card (not over
