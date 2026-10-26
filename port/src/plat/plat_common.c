@@ -292,6 +292,14 @@ const char *plat_build_version(void) {
 #endif
 }
 
+const char *plat_version(void) {
+#ifdef PORT_VERSION
+    return PORT_VERSION;
+#else
+    return "host";
+#endif
+}
+
 /* The render ahead setting (see plat.h): -1 until first read. */
 static volatile int sRenderAhead = -1;
 
