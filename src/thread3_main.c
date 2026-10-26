@@ -38,6 +38,7 @@
 #include "structs.h"
 #include "textures_sprites.h"
 #include "thread0_epc.h"
+#include "port_loadtime.h"
 #ifdef TARGET_PORT
 #include "port.h"
 #include "plat/profile.h"
@@ -267,6 +268,7 @@ void main_game_loop(void) {
     osSetTime(0);
 #ifdef TARGET_PORT
     prof_game_mark(PROF_MARK_LOOP_START, 0);
+    port_load_game_frame(gGameMode, gPlayableMapId);
     gPortGameStage = "building a frame";
 #endif
 
@@ -441,17 +443,21 @@ void load_next_ingame_level(s32 numPlayers, s32 trackID, Vehicle vehicle) {
  * Used when ingame.
  */
 void load_level_game(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId) {
+    PORT_LOAD_BEGIN();
     alloc_displaylist_heap(numberOfPlayers);
     mempool_free_timer(0);
     cam_init();
     load_game_text_table();
     level_load(levelId, numberOfPlayers, entranceId, vehicleId, gGameCurrentCutscene);
+    PORT_LOAD_STEP("rest");
     hud_init(cam_get_viewport_layout());
+    PORT_LOAD_STEP("hud");
     init_particle_buffers(8, 16, 150, 100, 50, 0);
     ainode_update();
     osSetTime(0);
     mempool_free_timer(2);
     rumble_init(TRUE);
+    PORT_LOAD_END(levelId, "game");
 }
 
 /**
@@ -954,15 +960,19 @@ Vehicle get_level_default_vehicle(void) {
  * Used for menus.
  */
 void load_level_menu(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId, s32 cutsceneId) {
+    PORT_LOAD_BEGIN();
     mempool_free_timer(0);
     cam_init();
     load_game_text_table();
     level_load(levelId, numberOfPlayers, entranceId, vehicleId, cutsceneId);
+    PORT_LOAD_STEP("rest");
     hud_init(cam_get_viewport_layout());
+    PORT_LOAD_STEP("hud");
     init_particle_buffers(4, 4, 110, 48, 32, 0);
     ainode_update();
     osSetTime(0);
     mempool_free_timer(2);
+    PORT_LOAD_END(levelId, bgload_active() ? "background" : "menu");
 }
 
 /**

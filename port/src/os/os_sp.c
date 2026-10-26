@@ -93,6 +93,7 @@ static void gfx_thread(void *arg) {
         start = plat_time_ns();
         port_gfx_run_task(task);
         prof_render_task(plat_time_ns() - start);
+        port_load_frame_done();
         gPlatCounters[PLAT_COUNTER_GFX_DONE]++;
         gPlatGfxStage = "raising the DP interrupt";
         plat_klock();
