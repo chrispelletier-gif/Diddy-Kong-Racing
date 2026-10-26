@@ -7,7 +7,7 @@
 enum { MENU_STAY, MENU_CLOSE, MENU_UPDATES, MENU_BUGREPORT };
 
 /*
- * Adds a page, opened from a row of the main page called title. count() is its number of rows; label(i) and
+ * Adds a page, a tab of the menu called title. count() is its number of rows; label(i) and
  * value(i) what row i shows (an empty value: a row that does something when tapped, with no value of its own);
  * change(i, step) is called when it is tapped, step -1 on the "<" half of the value and +1 elsewhere. All are called
  * from the bottom screen's thread. Call it at start-up (before update_3ds_start).
@@ -21,8 +21,6 @@ void menu_3ds_add_options(void);
 void menu_3ds_open(void);
 int menu_3ds_open_page(const char *title);
 void menu_3ds_close(void);
-int menu_3ds_on_main_page(void);
-int menu_3ds_back(void);
 int menu_3ds_can_scroll(int direction);
 void menu_3ds_scroll(int direction);
 int menu_3ds_tap(int x, int y);

@@ -43,6 +43,18 @@ static void row(BsMenu *m, const char *label, const char *value, const char *hin
     snprintf(r->hint, sizeof(r->hint), "%s", hint);
 }
 
+/* The menu's tabs, as a player's build (count 7) or a debug build (9) has them, with tab picked. */
+static void tabs(BsMenu *m, int picked, int count) {
+    static const char *const sTabs[9] = { "Picture", "Screen",   "Controls", "Sound", "Race HUD",
+                                          "Camera",  "Start-up", "Test run", "Tools" };
+    int i;
+    for (i = 0; i < count; i++) {
+        snprintf(m->tabs[i], sizeof(m->tabs[i]), "%s", sTabs[i]);
+    }
+    m->tabCount = count;
+    m->tab = picked;
+}
+
 void host_bottom_preview(const char *dir) {
     static unsigned char sMono[2048];
     const char *monoPath = getenv("DKR_MONO_FONT");
@@ -93,15 +105,16 @@ void host_bottom_preview(const char *dir) {
     save(dir, "2_profiler_test_run");
     bs_set_overlay("");
 
+    // The Settings menu: a player's tabs, then a debug build's.
     memset(&menu, 0, sizeof(menu));
-    snprintf(menu.title, sizeof(menu.title), "Settings");
-    row(&menu, "Anti-aliasing", "On", "Smoother edges; the GPU draws 4x");
-    row(&menu, "Profiler", "Off", "Frame times on this screen");
-    row(&menu, "Controls", "", "");
-    row(&menu, "Test run", "", "AI races that look for problems");
-    row(&menu, "Check for updates", "", "Install a newer build from GitHub");
-    row(&menu, "Send a bug report", "", "Log and snapshot (also SELECT+touch)");
-    snprintf(menu.note, sizeof(menu.note), "Build 1a2b3c4");
+    tabs(&menu, 0, 7);
+    snprintf(menu.title, sizeof(menu.title), "Picture");
+    row(&menu, "Anti-aliasing", "4x", "Smoother edges; the GPU draws 4x");
+    row(&menu, "Frame rate", "30 fps", "60 when a frame fits (try AA off)");
+    row(&menu, "Mipmaps", "On", "No shimmer on distant textures");
+    row(&menu, "Colour boost", "Medium", "Richer colours on the 3DS screen");
+    menu.picked = 0;
+    snprintf(menu.note, sizeof(menu.note), "Tap a value's arrows to change it");
     bs_show_menu(&menu);
     {
         static const char *const sMenuButtons[3] = { "Close", "-Prev", "-Next" };
@@ -110,21 +123,37 @@ void host_bottom_preview(const char *dir) {
     save(dir, "3_menu");
 
     memset(&menu, 0, sizeof(menu));
+    tabs(&menu, 2, 9);
     snprintf(menu.title, sizeof(menu.title), "Controls");
     snprintf(menu.pages, sizeof(menu.pages), "1/3");
     row(&menu, "Layout", "Standard", "");
     row(&menu, "A button", "A", "");
     row(&menu, "B button", "B", "");
     row(&menu, "Deadzone", "6%", "");
-    row(&menu, "Sensitivity", "100%", "");
     row(&menu, "Response curve", "Linear", "");
-    menu.note[0] = '\0';
+    menu.picked = 3;
+    snprintf(menu.note, sizeof(menu.note), "Tap a value's arrows to change it");
     bs_show_menu(&menu);
     {
-        static const char *const sMenuButtons[3] = { "Back", "-Prev", "Next" };
+        static const char *const sMenuButtons[3] = { "Close", "-Prev", "Next" };
         bs_set_buttons(sMenuButtons, 3);
     }
     save(dir, "4_controls");
+
+    memset(&menu, 0, sizeof(menu));
+    tabs(&menu, 8, 9);
+    snprintf(menu.title, sizeof(menu.title), "Tools");
+    row(&menu, "Profiler", "Off", "Frame times on this screen");
+    row(&menu, "Check for updates", "", "Install a newer build from GitHub");
+    row(&menu, "Send a bug report", "", "Log and snapshot (also SELECT+touch)");
+    menu.picked = -1;
+    snprintf(menu.note, sizeof(menu.note), "Build 1a2b3c4");
+    bs_show_menu(&menu);
+    {
+        static const char *const sMenuButtons[3] = { "Close", "-Prev", "-Next" };
+        bs_set_buttons(sMenuButtons, 3);
+    }
+    save(dir, "4_tools");
 
     bs_show_menu(NULL);
     bs_add_message("This build: 1a2b3c4");
