@@ -598,6 +598,20 @@ void pv_frame_tick(void) {
     }
     plat_sem_wait(sLock);
     now = played_samples();
+    if (sClockStarted && (double) (sQueuedBytes / 4) - now > (double) sSynthRate / 4) {
+        /*
+         * The game is more than 0.25 s ahead of the output. The game's sound thread goes on synthesizing while the
+         * HOME menu holds the DSP (its audio tasks need no RSP, so the paused renderer does not hold it), and its
+         * frames are sized to a minimum of nearly real time, so it never drains the lead again: every later sound
+         * would play that much late, and the event ring would overflow. The output skips to the game's time.
+         */
+        double behind = (double) (sQueuedBytes / 4) - now;
+        sFrame0 = pv_backend_frames() - (u32) ((double) (sQueuedBytes / 4) * PV_OUTPUT_RATE /
+                                               ((double) sSynthRate * PV_FRAME_SAMPLES));
+        now = played_samples();
+        plat_log("voices: the output was %.0f ms behind the game (the DSP was held): skipped ahead, %d events pending",
+                 behind * 1000.0 / sSynthRate, (int) sEventCount);
+    }
     // Events whose time has come, in the order they were queued; later ones wait (they stay in order).
     n = 0;
     for (i = 0; i < sEventCount; i++) {
