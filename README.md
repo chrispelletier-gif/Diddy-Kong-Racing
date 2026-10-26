@@ -65,6 +65,7 @@ menu (VIDEO, CAMERA and CONTROL OPTIONS) and the pause menu. What you can change
 - **Race HUD:** on the bottom screen (standings, map, item, lap times), on both screens, or the N64's HUD on top.
 - **Camera:** Modern (calmer, the default) or the original N64 camera, and whether the camera stops in front of walls.
 - **Sound:** smooth resampling.
+- **Intro logos:** shown, or skipped straight to the title screen. A, B or START also skips them.
 
 60 fps works best with anti-aliasing off or at 2x; a few heavy levels drop back to 30 fps with 2x on.
 
