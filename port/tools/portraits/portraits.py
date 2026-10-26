@@ -4,15 +4,17 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from key import key
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+import cv2
+import numpy as np
+from PIL import Image, ImageFilter
 H = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../assets/.vanilla/us.v77/textures/2d/hud/')
 SUBJECTS = {
-    'tricky': ('boss38/frame_01400.png', (66, 98, 184, 216)),
-    'bluey': ('blueyA/frame_01575.png', (86, 68, 181, 163)),
-    'bubbler': ('bubbler3/frame_01250.png', (92, 60, 242, 210)),
-    'smokey': ('smokeyC/frame_01475.png', (105, 8, 215, 118)),
+    'tricky': ('boss38/frame_01400.png', (60, 92, 190, 222)),
+    'bluey': ('bqhi/frame_01450.png', (110, 88, 212, 190)),
+    'bubbler': ('bubbler3/frame_01250.png', (78, 32, 262, 216)),
+    'smokey': ('sm330/frame_01450.png', (93, 8, 225, 140)),
     'wizpig': ('wizpig2/frame_01400.png', (95, 45, 225, 175)),
-    'taj': ('tajB/frame_01575.png', (97, 56, 223, 182)),
+    'taj': ('tajC/frame_01450.png', (100, 22, 236, 158)),
 }
 
 
@@ -47,22 +49,39 @@ def largest(k):
 
 
 def retouch(crop):
-    """Toward the ROM portraits' look: brighter fill light, richer colour, crisp edges and a dark outline."""
-    big = crop.resize((144, 144), Image.LANCZOS)
-    a = big.getchannel('A')
-    rgb = big.convert('RGB').filter(ImageFilter.MedianFilter(3))
-    rgb = ImageOps.autocontrast(rgb, cutoff=1, preserve_tone=True)
-    rgb = ImageEnhance.Color(rgb).enhance(1.35)
-    rgb = rgb.point(lambda v: int(255 * ((v / 255) ** 0.8)))
-    # Ink where the shading changes sharply (horn edges, eyes), as drawn art has.
-    edges = rgb.convert('L').filter(ImageFilter.FIND_EDGES).point(lambda v: 0 if v < 40 else min(160, v))
-    ink = Image.new('RGB', rgb.size, (30, 12, 20))
-    rgb = Image.composite(ink, rgb, edges)
-    rgb = rgb.filter(ImageFilter.UnsharpMask(radius=2, percent=90, threshold=3))
+    """Toward the ROM portraits' look: smooth painted shading instead of the game's blotchy textures, light from the
+    top left, crisp edges and a dark outline."""
+    big = crop.resize((144, 144), Image.BICUBIC)
+    a = big.getchannel('A').point(lambda v: 255 if v > 100 else 0)
+    # Close small gaps between parts (Wizpig's ear) so the backdrop doesn't show through them; they read as shadow.
+    closed = a.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.MinFilter(7))
+    rgb = np.asarray(big.convert('RGB')).copy()
+    gap = (np.asarray(closed) > 0) & (np.asarray(a) == 0)
+    rgb[gap] = (40, 16, 24)
+    # Edge-keeping smoothing irons out texture noise but keeps eyes, horns and mouths sharp.
+    for _ in range(3):
+        rgb = cv2.bilateralFilter(rgb, 9, 30, 7)
+    img = rgb.astype(np.float32) / 255
+    # Soft volume shading: surface normals guessed from the blurred silhouette, lit from the top left.
+    m = cv2.GaussianBlur(np.asarray(closed).astype(np.float32) / 255, (0, 0), 14)
+    gy, gx = np.gradient(m)
+    n = np.sqrt(gx * gx + gy * gy) + 1e-6
+    light = (-(gx * -0.7 + gy * -0.7) / n) * np.clip(n * 60, 0, 1)
+    img = img * (1 + 0.28 * light[..., None])
+    hsv = cv2.cvtColor(np.clip(img, 0, 1), cv2.COLOR_RGB2HSV)
+    hsv[..., 1] = np.clip(hsv[..., 1] * 1.25, 0, 1)
+    img = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+    # Lift dark models (Tricky) so their brightest lit areas come near white, as the ROM portraits do.
+    top = np.percentile(img.max(axis=2)[np.asarray(closed) > 0], 97)
+    img = (img / max(top, 0.5)) ** 0.85
+    rgb = Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8))
+    edges = rgb.convert('L').filter(ImageFilter.FIND_EDGES).point(lambda v: 0 if v < 50 else min(120, v))
+    rgb = Image.composite(Image.new('RGB', rgb.size, (30, 12, 20)), rgb, edges)
+    rgb = rgb.filter(ImageFilter.UnsharpMask(radius=2, percent=70, threshold=3))
     out = rgb.convert('RGBA')
-    out.putalpha(a)
+    out.putalpha(closed)
     rim = Image.new('RGBA', out.size, (20, 10, 40, 0))
-    rim.putalpha(a.filter(ImageFilter.MaxFilter(9)).point(lambda v: 255 if v > 128 else 0))
+    rim.putalpha(closed.filter(ImageFilter.MaxFilter(7)))
     rim.alpha_composite(out)
     return rim
 
