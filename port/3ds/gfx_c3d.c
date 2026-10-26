@@ -239,7 +239,7 @@ static inline void to_screen_flat(const GfxVertex *v, float *pos, int flat) {
     float z = 0.5f * (v->z - v->w);
     float f = (sStereo && v->w > 0.0f) ? sEyeConv / v->w : 1.0f;
     pos[0] = v->y * f;
-    pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW, flat == GFX_FLAT_STRETCH) : v->x * NARROW) * f;
+    pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW, flat) : v->x * NARROW) * f;
     pos[2] = (z < 0.0f ? z : 0.0f) * f;
     pos[3] = v->w * f;
 }

@@ -1069,6 +1069,9 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
     if (!textured) {
         state.textures[0] = NULL;
         state.textures[1] = NULL;
+    } else if (x0 > 1.0f || x1 < GFX_SCREEN_WIDTH - 1.0f) {
+        // Narrower than the screen: on a wide screen it keeps its size even where it ends at an edge (gfx_flat_x).
+        state.flat = GFX_FLAT_PLACED;
     }
     if (state.textures[0] != NULL) {
         w0 = state.textures[0]->width;
@@ -1114,10 +1117,17 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
     out[2] = first[3];
 }
 
+/* A rectangle's x (10.2 fixed point), read as signed: the game's x past the left edge wraps to 1023 and down, and the
+ * port has it draw there (src/rcp_dkr.c, src/font.c), where the wide screen shows it. On the N64 screen both are off
+ * the screen, and nothing the game draws starts 512 pixels or more to the right. */
+static inline float rect_x(u32 field) {
+    return (s32) ((field & 0xFFF) ^ 0x800) - 0x800;
+}
+
 static void texture_rectangle(u32 w0, u32 w1, s32 flip) {
-    float lrx = ((w0 >> 12) & 0xFFF) * 0.25f;
+    float lrx = rect_x(w0 >> 12) * 0.25f;
     float lry = (w0 & 0xFFF) * 0.25f;
-    float ulx = ((w1 >> 12) & 0xFFF) * 0.25f;
+    float ulx = rect_x(w1 >> 12) * 0.25f;
     float uly = (w1 & 0xFFF) * 0.25f;
     s32 tile = (w1 >> 24) & 7;
     float s = (s16) (g.rdpHalf1 >> 16) * (1.0f / 32.0f);

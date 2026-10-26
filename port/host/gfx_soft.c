@@ -334,7 +334,7 @@ typedef struct ClipVert {
 } ClipVert;
 
 static void to_clip(ClipVert *o, const GfxVertex *v, int flat) {
-    o->x = (sWide && flat) ? gfx_flat_x(v->x, v->w, NARROW, flat == GFX_FLAT_STRETCH) : v->x;
+    o->x = (sWide && flat) ? gfx_flat_x(v->x, v->w, NARROW, flat) : v->x;
     o->y = v->y;
     o->z = v->z;
     o->w = v->w;
