@@ -1,4 +1,4 @@
-# 3DS specific build steps: the vertex shader and the .3dsx/.smdh packaging.
+# 3DS specific build steps: the vertex shader and the .3dsx/.smdh/.cia packaging.
 
 ifeq ($(TARGET),3ds)
 
@@ -13,6 +13,12 @@ APP_TITLE       := Diddy Kong Racing
 APP_DESCRIPTION := Native port of the DKR decompilation
 APP_AUTHOR      := DKR decomp contributors
 APP_ICON        := $(firstword $(wildcard 3ds/icon.png) $(CTRULIB)/default_icon.png)
+
+# The installable .cia (roadmap O7): `make -C port TARGET=3ds cia`. makerom and bannertool are not part of
+# devkitPro; CI downloads them, or point these at your own copies.
+MAKEROM         ?= makerom
+BANNERTOOL      ?= bannertool
+CIA_DIR         := 3ds/cia
 
 SYS_CFLAGS += -I$(BUILD_DIR)/shader
 
@@ -32,11 +38,23 @@ $(call obj,3ds/gfx_c3d.c): $(SHADER_HDR)
 
 $(EXE): $(SHADER_OBJS)
 
-$(BUILD_DIR)/dkr.smdh:
+$(BUILD_DIR)/dkr.smdh: $(APP_ICON)
 	@$(TOOLS_BIN)/smdhtool --create "$(APP_TITLE)" "$(APP_DESCRIPTION)" "$(APP_AUTHOR)" $(APP_ICON) $@
 
 $(BUILD_DIR)/dkr.3dsx: $(EXE) $(BUILD_DIR)/dkr.smdh
 	@echo "3DSX $@"
 	@$(TOOLS_BIN)/3dsxtool $(EXE) $@ --smdh=$(BUILD_DIR)/dkr.smdh
+
+# The HOME menu banner: a flat 256x128 picture and a short sound, both original art (port/3ds/cia/README.md).
+$(BUILD_DIR)/dkr.bnr: $(CIA_DIR)/banner.png $(CIA_DIR)/banner.wav
+	@$(BANNERTOOL) makebanner -i $(CIA_DIR)/banner.png -a $(CIA_DIR)/banner.wav -o $@
+
+$(BUILD_DIR)/dkr.cia: $(EXE) $(BUILD_DIR)/dkr.smdh $(BUILD_DIR)/dkr.bnr $(CIA_DIR)/dkr.rsf
+	@echo "CIA $@"
+	@$(MAKEROM) -f cia -o $@ -elf $(EXE) -rsf $(CIA_DIR)/dkr.rsf -icon $(BUILD_DIR)/dkr.smdh \
+		-banner $(BUILD_DIR)/dkr.bnr -exefslogo -target t
+
+.PHONY: cia
+cia: $(BUILD_DIR)/dkr.cia
 
 endif
