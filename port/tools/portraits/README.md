@@ -20,6 +20,11 @@ in-game models, for the bottom screen.
 3. `portraits.py OUT` keys out the background (key.py), keeps the largest shape, crops each head (boxes in
    `SUBJECTS`) and frames it like the ROM's portraits.
 
+4. Optionally repaint each one with an image model (the 2026-10-26 set used SpriteCook: the capture as the image to
+   edit, a sheet of four ROM portraits as the style guide), then crop and frame it at 40x40 the same way.
+5. Copy them to `sdmc:/3ds/dkr/portraits/NAME.png` (tricky, bluey, bubbler, smokey, wizpig, taj). The game only takes
+   40x40 PNGs; anything else falls back to a name box. Keep them out of the repo: they are Rare's characters.
+
 The racers' in-game models are much plainer than the ROM's pre-rendered portraits, so those stay as they are.
 
 Needs Pillow, numpy and opencv-python-headless.

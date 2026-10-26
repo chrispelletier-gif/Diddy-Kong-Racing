@@ -87,6 +87,12 @@ direction arrows, WRONG WAY and the finish. The Race HUD page of the Settings me
 Bottom (the default), Both screens, or Top (the N64's HUD only); saved as `racehud=` (1, 2, 0). The profiler's
 readout takes the bottom screen's place while it is on.
 
+The ROM has no portraits for the bosses and Taj, and drawn ones of Rare's characters cannot be shipped here, so they
+come from your SD card: `sdmc:/3ds/dkr/portraits/` with `tricky.png`, `bluey.png`, `bubbler.png`, `smokey.png`,
+`wizpig.png` and `taj.png`, each a 40x40 PNG framed like the game's portraits (`port/tools/portraits` makes them from
+your ROM). A file that is missing, is not a PNG or is any other size is skipped (the log says so) and that racer gets
+a box with its initial instead.
+
 The game is one player only: a 3DS has one set of controls, so nobody else can join character select, and the magic
 codes that only matter with more players (DOUBLEVISION, JOINTVENTURE) are answered like wrong codes and left out of the
 code list. The 2 to 4 player code is all still there for local wireless play later (roadmap O9): building with
