@@ -1149,9 +1149,11 @@ static inline float rect_x(u32 field) {
 }
 
 static void texture_rectangle(u32 w0, u32 w1, s32 flip) {
-    float lrx = rect_x(w0 >> 12) * 0.25f;
-    float lry = (w0 & 0xFFF) * 0.25f;
     float ulx = rect_x(w1 >> 12) * 0.25f;
+    // The width, not the right edge, read as is: a rectangle across 512 pixels (the HUD sliding in from the right)
+    // would otherwise turn around and cover the screen.
+    float lrx = ulx + (((w0 >> 12) - (w1 >> 12)) & 0xFFF) * 0.25f;
+    float lry = (w0 & 0xFFF) * 0.25f;
     float uly = (w1 & 0xFFF) * 0.25f;
     s32 tile = (w1 >> 24) & 7;
     float s = (s16) (g.rdpHalf1 >> 16) * (1.0f / 32.0f);
