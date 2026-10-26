@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "plat/options.h"
 #include "plat/plat.h"
 #include "plat/settings.h"
 #include "audio/voices.h"
@@ -240,18 +241,30 @@ u32 port_audio_output_remaining_bytes(void) {
 
 enum { SOUND_ENGINE, SOUND_CORE, SOUND_RATE, SOUND_SMOOTH, SOUND_BUFFER, SOUND_ROWS };
 
+/* A player's build (plat.h PLAT_DEBUG_TOOLS) shows only smooth resampling; the rest are performance switches, kept at
+ * their defaults (settings.c). The page's functions number the rows shown; sound_row() gives the row of all of them. */
+static int sound_hidden(int row) {
+    return !PLAT_DEBUG_TOOLS && row != SOUND_SMOOTH;
+}
+
+static int sound_row(int i) {
+    return options_visible_row(SOUND_ROWS, sound_hidden, i);
+}
+
 int sound_option_count(void) {
-    return SOUND_ROWS;
+    return options_visible_count(SOUND_ROWS, sound_hidden);
 }
 
 const char *sound_option_label(int i) {
     static const char *const sLabels[SOUND_ROWS] = { "Sound engine (restart)", "Mixing core (restart)",
                                                      "Mixer rate (restart)", "Smooth resampling", "Sound buffer" };
+    i = sound_row(i);
     return (i >= 0 && i < SOUND_ROWS) ? sLabels[i] : "";
 }
 
 /* The rows the pause menu shows (plat/options.h): the others only change after a restart. */
 int sound_option_in_race(int i) {
+    i = sound_row(i);
     return i == SOUND_SMOOTH || i == SOUND_BUFFER;
 }
 
@@ -261,6 +274,7 @@ static int cpu_mixer_only(int i) {
 }
 
 void sound_option_value(int i, char *out, int size) {
+    i = sound_row(i);
     load_settings();
     if (cpu_mixer_only(i)) {
         snprintf(out, size, "CPU mixer only");
@@ -290,6 +304,7 @@ void sound_option_value(int i, char *out, int size) {
 
 void sound_option_change(int i, int step) {
     (void) step; // Every row has two values.
+    i = sound_row(i);
     load_settings();
     if (cpu_mixer_only(i)) {
         return;

@@ -2,6 +2,8 @@
 #
 #   make -C port TARGET=3ds    builds port/build/3ds/dkr.3dsx (needs devkitARM + libctru + citro3d)
 #   make -C port TARGET=host   builds port/build/host/dkr, a headless PC build used for testing
+#   RELEASE=1                  a build for players (port/build/3ds-release/): the Settings menus leave out the
+#                              performance switches and the debug tools (plat.h PLAT_DEBUG_TOOLS)
 #
 # Both builds need include/asset_enums.h, which the asset tool generates from your ROM:
 #   make -C tools dkr_assets_tool && ./tools/dkr_assets_tool extract -dkrv us.v77 &&
@@ -11,9 +13,10 @@ TARGET  ?= host
 REGION  ?= us
 VERSION ?= v77
 DEBUG   ?= 0
+RELEASE ?= 0
 
 ROOT      := ..
-BUILD_DIR := build/$(TARGET)
+BUILD_DIR := build/$(TARGET)$(if $(filter 1,$(RELEASE)),-release)
 
 ifeq ($(wildcard $(ROOT)/include/asset_enums.h),)
 $(error include/asset_enums.h is missing. Extract and build the assets from your ROM first (see port/README.md))
@@ -64,6 +67,9 @@ GAME_DEFINES += -DosGetTime=n64_osGetTime -D__assert=n64___assert $(EXTRA_DEFINE
 ifeq ($(PORT_MULTIPLAYER),1)
   GAME_DEFINES += -DPORT_MULTIPLAYER=1
 endif
+# RELEASE=1: the menus show only what players need; the tools stay compiled in (roadmap P14) but out of reach.
+RELEASE_DEFINES := $(if $(filter 1,$(RELEASE)),-DPORT_RELEASE=1)
+GAME_DEFINES += $(RELEASE_DEFINES)
 
 GAME_INCLUDES := -I$(ROOT) -I$(ROOT)/include -I$(ROOT)/include/libc -I$(ROOT)/include/PR -I$(ROOT)/include/sys \
                  -I$(ROOT)/src -I$(ROOT)/libultra -I$(ROOT)/libultra/src/gu -I$(ROOT)/libultra/src/libc \
@@ -109,7 +115,7 @@ ifeq ($(TARGET),3ds)
   CTRULIB   := $(DEVKITPRO)/libctru
   PORTLIBS  := $(DEVKITPRO)/portlibs/3ds
   # Identifies the build in bug reports.
-  PORT_BUILD_VERSION := $(shell git -c safe.directory='*' describe --always --dirty 2>/dev/null || echo unknown)
+  PORT_BUILD_VERSION := $(shell git -c safe.directory='*' describe --always --dirty 2>/dev/null || echo unknown)$(if $(filter 1,$(RELEASE)),-release)
   # The full commit, which the update (3ds/update_3ds.c) compares with the published builds.
   PORT_BUILD_COMMIT := $(shell git -c safe.directory='*' rev-parse HEAD 2>/dev/null)
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include -Iinclude -Isrc \
@@ -133,7 +139,7 @@ GAME_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu9
                -include port_swap.h -w -Werror=implicit-function-declaration
 PORT_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
                -Wall -Wno-unused-function -Wno-missing-braces -Werror=implicit-function-declaration
-SYS_CFLAGS  += $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu99 -Wall -Wno-unused-function
+SYS_CFLAGS  += $(OPT_FLAGS) $(COMMON_FLAGS) $(RELEASE_DEFINES) -std=gnu99 -Wall -Wno-unused-function
 
 #### Rules ####
 

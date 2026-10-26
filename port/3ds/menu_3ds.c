@@ -73,7 +73,8 @@ static void open_page(const MenuPage *page) {
 }
 
 /* The main page: anti-aliasing, frame rate, 16-bit buffers, mipmaps, colour boost, the screen page, the profiler, the
- * added pages, then the test run, updates and bug report. */
+ * added pages, then the test run, updates and bug report. A player's build (plat.h PLAT_DEBUG_TOOLS) shows only some
+ * (main_hidden), so the page's own functions number the rows shown and the row_* ones every row. */
 enum { MAIN_AA, MAIN_FPS, MAIN_FB16, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_SCREEN, MAIN_AHEAD, MAIN_PROFILER, MAIN_PAGES };
 
 /* Anti-aliasing in the order the row steps through (PLAT_AA_* values). */
@@ -83,11 +84,18 @@ static const char *const sAaNames[3] = { "Off", "4x", "2x" }; // By PLAT_AA_* va
 static const char *const sColourLevels[4] = { "Off", "Low", "Medium", "High" };
 static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
 
-static int main_count(void) {
+static int main_row_count(void) {
     return MAIN_PAGES + sPageCount + 3;
 }
 
-static const char *main_label(int i) {
+/* The performance switches and the debug tools: the test run, updates (which install test builds) and bug reports
+ * (which need a GitHub token). */
+static int main_hidden(int row) {
+    return !PLAT_DEBUG_TOOLS &&
+           (row == MAIN_FB16 || row == MAIN_AHEAD || row == MAIN_PROFILER || row >= MAIN_PAGES + sPageCount);
+}
+
+static const char *row_label(int i) {
     static const char *const sLast[3] = { "Test run", "Check for updates", "Send a bug report" };
     if (i == MAIN_AA) {
         return "Anti-aliasing";
@@ -111,7 +119,7 @@ static const char *main_label(int i) {
     return sLast[i - MAIN_PAGES - sPageCount];
 }
 
-static void main_value(int i, char *out, int size) {
+static void row_value(int i, char *out, int size) {
     if (i == MAIN_AA) {
         snprintf(out, size, "%s", sAaNames[plat_3ds_antialias_setting()]);
     } else if (i == MAIN_FPS) {
@@ -131,7 +139,7 @@ static void main_value(int i, char *out, int size) {
     }
 }
 
-static const char *main_hint(int i) {
+static const char *row_hint(int i) {
     static const char *const sLast[3] = { NULL, "Install a newer build from GitHub",
                                           "Log and snapshot (also SELECT+touch)" };
     if (i == MAIN_AA) {
@@ -159,7 +167,7 @@ static const char *main_hint(int i) {
     return sLast[i - MAIN_PAGES - sPageCount];
 }
 
-static void main_change(int i, int step) {
+static void row_change(int i, int step) {
     if (i == MAIN_AA) {
         int at;
         for (at = 0; at < 3 && sAaOrder[at] != plat_3ds_antialias_setting(); at++) {}
@@ -169,7 +177,8 @@ static void main_change(int i, int step) {
     } else if (i == MAIN_FB16) {
         plat_3ds_set_fb16_setting(!plat_3ds_fb16_setting());
     } else if (i == MAIN_MIPMAPS) {
-        plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + 3) % 3);
+        int modes = PLAT_DEBUG_TOOLS ? 3 : 2; // Show is for debugging.
+        plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + modes) % modes);
     } else if (i == MAIN_COLOUR) {
         plat_3ds_set_colour_setting((plat_3ds_colour_setting() + step + 4) % 4);
     } else if (i == MAIN_SCREEN) {
@@ -189,25 +198,46 @@ static void main_change(int i, int step) {
     }
 }
 
+static int main_count(void) {
+    return options_visible_count(main_row_count(), main_hidden);
+}
+
+static const char *main_label(int i) {
+    return row_label(options_visible_row(main_row_count(), main_hidden, i));
+}
+
+static void main_value(int i, char *out, int size) {
+    row_value(options_visible_row(main_row_count(), main_hidden, i), out, size);
+}
+
+static const char *main_hint(int i) {
+    return row_hint(options_visible_row(main_row_count(), main_hidden, i));
+}
+
+static void main_change(int i, int step) {
+    row_change(options_visible_row(main_row_count(), main_hidden, i), step);
+}
+
 static const MenuPage sMainPage = { "Settings", main_count, main_label, main_value, main_change, main_hint, NULL };
 
 /* The top screen (roadmap phase 6, gfx_c3d.c): widescreen, the 800 pixel mode and stereo 3D, each on or off, where
  * widescreen puts the race HUD (plat_hud_edges), and edge trimming (the guard band clip, a test toggle for the blue
- * patches in widescreen, issue #147). */
-enum { SCREEN_HUD = 3, SCREEN_GUARD_BAND = 4 };
+ * patches in widescreen, issue #147, which a player's build leaves out). As on the main page, the screen_row_* functions
+ * number every row. */
+enum { SCREEN_HUD = 3, SCREEN_GUARD_BAND = 4, SCREEN_ROWS = 5 };
 
-static int screen_count(void) {
-    return 5;
+static int screen_hidden(int row) {
+    return !PLAT_DEBUG_TOOLS && row == SCREEN_GUARD_BAND;
 }
 
-static const char *screen_label(int i) {
+static const char *screen_row_label(int i) {
     static const char *const sLabels[5] = { "Widescreen", "800 pixels", "Stereo 3D", "HUD", "Edge trimming" };
     return sLabels[i];
 }
 
 static const char *const sWideStyles[4] = { "Off", "Wide", "Balanced", "Zoomed" };
 
-static void screen_value(int i, char *out, int size) {
+static void screen_row_value(int i, char *out, int size) {
     if (i == 0) {
         snprintf(out, size, "%s", sWideStyles[plat_3ds_screen_setting(0)]);
     } else if (i == SCREEN_HUD) {
@@ -219,7 +249,7 @@ static void screen_value(int i, char *out, int size) {
     }
 }
 
-static const char *screen_hint(int i) {
+static const char *screen_row_hint(int i) {
     if (i == 0) {
         static const char *const sHints[4] = { "4:3 picture in the middle", "Most to the sides; edges stretch most",
                                                "Between Wide and Zoomed", "4:3's sides, less top; no extra stretch" };
@@ -234,7 +264,7 @@ static const char *screen_hint(int i) {
     return "With the 3D slider; no anti-aliasing in 3D";
 }
 
-static void screen_change(int i, int step) {
+static void screen_row_change(int i, int step) {
     if (i == 0) {
         plat_3ds_set_screen_setting(0, (plat_3ds_screen_setting(0) + step + 4) % 4);
     } else if (i == SCREEN_HUD) {
@@ -244,6 +274,26 @@ static void screen_change(int i, int step) {
     } else {
         plat_3ds_set_screen_setting(i, !plat_3ds_screen_setting(i));
     }
+}
+
+static int screen_count(void) {
+    return options_visible_count(SCREEN_ROWS, screen_hidden);
+}
+
+static const char *screen_label(int i) {
+    return screen_row_label(options_visible_row(SCREEN_ROWS, screen_hidden, i));
+}
+
+static void screen_value(int i, char *out, int size) {
+    screen_row_value(options_visible_row(SCREEN_ROWS, screen_hidden, i), out, size);
+}
+
+static const char *screen_hint(int i) {
+    return screen_row_hint(options_visible_row(SCREEN_ROWS, screen_hidden, i));
+}
+
+static void screen_change(int i, int step) {
+    screen_row_change(options_visible_row(SCREEN_ROWS, screen_hidden, i), step);
 }
 
 static const MenuPage sScreenPage = {
@@ -307,43 +357,50 @@ static const MenuPage sTestRunPage = {
 
 /*
  * The game's VIDEO OPTIONS (plat/options.h): the main page's anti-aliasing to colour boost rows, then the Screen
- * page's, then Render ahead. Every one can change mid-race, as here.
+ * page's, then Render ahead, less the ones a player's build hides. Every one can change mid-race, as here.
  */
-static int video_count(void) {
-    return MAIN_SCREEN + screen_count() + 1;
+enum { VIDEO_ROWS = MAIN_SCREEN + SCREEN_ROWS + 1 };
+
+/* The main page row a Video Options row (of all of them) stands for, or -1 for a Screen page row. */
+static int video_main_row(int row) {
+    return row < MAIN_SCREEN ? row : row == MAIN_SCREEN + SCREEN_ROWS ? MAIN_AHEAD : -1;
 }
 
-/* The main page row a Video Options row stands for, or -1 for a Screen page row. */
-static int video_main_row(int i) {
-    return i < MAIN_SCREEN ? i : i == MAIN_SCREEN + screen_count() ? MAIN_AHEAD : -1;
+static int video_hidden(int row) {
+    int main = video_main_row(row);
+    return main >= 0 ? main_hidden(main) : screen_hidden(row - MAIN_SCREEN);
+}
+
+static int video_count(void) {
+    return options_visible_count(VIDEO_ROWS, video_hidden);
 }
 
 static const char *video_label(int i) {
-    int row = video_main_row(i);
-    return row >= 0 ? main_label(row) : screen_label(i - MAIN_SCREEN);
+    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
+    return main >= 0 ? row_label(main) : screen_row_label(row - MAIN_SCREEN);
 }
 
 static void video_value(int i, char *out, int size) {
-    int row = video_main_row(i);
-    if (row >= 0) {
-        main_value(row, out, size);
+    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
+    if (main >= 0) {
+        row_value(main, out, size);
     } else {
-        screen_value(i - MAIN_SCREEN, out, size);
+        screen_row_value(row - MAIN_SCREEN, out, size);
     }
 }
 
 static void video_change(int i, int step) {
-    int row = video_main_row(i);
-    if (row >= 0) {
-        main_change(row, step);
+    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
+    if (main >= 0) {
+        row_change(main, step);
     } else {
-        screen_change(i - MAIN_SCREEN, step);
+        screen_row_change(row - MAIN_SCREEN, step);
     }
 }
 
 static const char *video_hint(int i) {
-    int row = video_main_row(i);
-    return row >= 0 ? main_hint(row) : screen_hint(i - MAIN_SCREEN);
+    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
+    return main >= 0 ? row_hint(main) : screen_row_hint(row - MAIN_SCREEN);
 }
 
 void menu_3ds_add_options(void) {

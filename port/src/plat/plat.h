@@ -13,6 +13,16 @@
 extern "C" {
 #endif
 
+/*
+ * Whether the Settings menus offer the debug tools (profiler, test runs, bug reports, updates) and the performance
+ * switches. A player's build (make RELEASE=1) leaves them out and the switches keep their defaults; the code stays in.
+ */
+#ifdef PORT_RELEASE
+#define PLAT_DEBUG_TOOLS 0
+#else
+#define PLAT_DEBUG_TOOLS 1
+#endif
+
 typedef struct PlatThread PlatThread;
 typedef void (*PlatThreadFunc)(void *arg);
 

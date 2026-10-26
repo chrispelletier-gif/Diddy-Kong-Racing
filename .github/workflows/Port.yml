@@ -55,10 +55,23 @@ jobs:
           path: include/asset_enums.h
           retention-days: 1
 
+  # Two builds: the debug one (the default; profiler, test runs, bug reports, updates and the performance switches in
+  # its menus), which the updater publishes, and the player's build (RELEASE=1), which leaves those out of the menus.
   build-3ds:
-    name: 3DS build
+    name: 3DS build (${{ matrix.variant }})
     needs: assets
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - variant: debug
+            make-flags: ""
+            out: port/build/3ds
+            artifact: dkr-3ds
+          - variant: release
+            make-flags: RELEASE=1
+            out: port/build/3ds-release
+            artifact: dkr-3ds-release
     # devkitARM with libctru and citro3d. To update, pull devkitpro/devkitarm:latest and use its digest.
     container: devkitpro/devkitarm@sha256:116afba8df8453961de2936ffab20dd441edf4d682856c1ec8b0e53d7ed0bbf5
     steps:
@@ -72,16 +85,16 @@ jobs:
           path: include
 
       - name: Build dkr.3dsx
-        run: make -C port TARGET=3ds -j"$(nproc)"
+        run: make -C port TARGET=3ds ${{ matrix.make-flags }} -j"$(nproc)"
 
       - name: Upload dkr.3dsx
         uses: actions/upload-artifact@v4
         with:
-          name: dkr-3ds-${{ github.sha }}
+          name: ${{ matrix.artifact }}-${{ github.sha }}
           # dkr.elf has the symbols for reading crash addresses.
           path: |
-            port/build/3ds/dkr.3dsx
-            port/build/3ds/dkr.elf
+            ${{ matrix.out }}/dkr.3dsx
+            ${{ matrix.out }}/dkr.elf
 
   # The game's "Check for updates" button (port/3ds/update_3ds.c) installs these: release 3ds-newest has the build of
   # the latest push to any branch, 3ds-master the latest build of master. Each holds dkr.3dsx and build.txt.
