@@ -1018,6 +1018,11 @@ Sprite *tex_load_sprite(s32 spriteID, s32 arg1) {
     allocSize += numTextures * 4;
     allocSize += (s32) align16((u8 *) 0x10);
     allocSize += (s32) align16((u8 *) (spriteAsset->numberOfFrames * 4));
+#ifdef AVOID_UB
+    // Each frame ends with two commands (pipe sync and end), but only one per frame was counted. A sprite with more
+    // frames than tiles (the spinning banana counter icon) wrote its last frame's end over its first vertices.
+    allocSize += spriteAsset->numberOfFrames * sizeof(Gfx);
+#endif
     sprite = (Sprite *) mempool_alloc(allocSize, COLOUR_TAG_MAGENTA);
     if (sprite == NULL) {
         if (cacheFull) {
@@ -1032,6 +1037,9 @@ Sprite *tex_load_sprite(s32 spriteID, s32 arg1) {
     gSpriteDLists = (Gfx *) ((s32) gSpriteTriangles + numTextures * 0x20); // 0x20 = sizeof(Triangle) * 2
     gSpriteVertices = (Vertex *) ((s32) gSpriteDLists + numTextures * 0x20 +
                                   spriteAsset->numberOfFrames * sizeof(Gfx)); // 0x20 = sizeof(Gfx) * 4
+#ifdef AVOID_UB
+    gSpriteVertices = (Vertex *) ((u8 *) gSpriteVertices + spriteAsset->numberOfFrames * sizeof(Gfx));
+#endif
     sprite->textures = (TextureHeader **) ((s32) gSpriteVertices + numTextures * sizeof(Vertex) * 4);
 
     allocFailed = FALSE;
