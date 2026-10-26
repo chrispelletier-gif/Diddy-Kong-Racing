@@ -10,6 +10,9 @@ this repository, compiled for ARM. The N64 hardware it expects is provided by a 
 
 Nothing from the game is distributed. The port reads every asset from your own ROM at runtime.
 
+This file is for developers: building, the debug build's tools, how the port works and how it is tested. Players
+should read the [main README](../README.md) instead, which covers installing and playing a release.
+
 ## What you need
 
 - A Diddy Kong Racing ROM. The US 1.0 version (`baserom.us.v77.z64`, SHA1
@@ -64,7 +67,8 @@ runs silently.
 | Circle Pad    | Control stick       | Steer                   |
 | A             | A                   | Accelerate              |
 | B             | B                   | Brake / reverse         |
-| L or ZL       | Z                   | Use item                |
+| L             | Z                   | Use item                |
+| ZL            | (port)              | Look behind             |
 | R or ZR       | R                   | Hop / drift             |
 | X             | C-Up                |                         |
 | Y             | C-Left              |                         |
@@ -311,7 +315,9 @@ A crash report gives `pc` and `lr`; with the `dkr.elf` of the same build (the `B
 
 CI publishes every 3DS build as a pre-release: `3ds-newest` is the debug build of the latest push to any branch,
 `3ds-master-debug` the debug build of master, and `3ds-master` the player build of master (the one to download; it has
-no Check for updates button). The updater only installs the two debug builds. Tap Settings, then Check for updates; the game lists both builds (the
+no Check for updates button). Public releases are separate, fixed releases tagged by version (`3ds-v0.1...`),
+with the player build's `.3dsx` and `.cia`; they don't change when master does. The updater only installs the two
+debug builds. Tap Settings, then Check for updates; the game lists both builds (the
 one running is marked "this") and offers master, newest or cancel. The chosen build is downloaded next to the
 running `.3dsx`, checked against its size and sha256, and replaces it; tap Quit to finish the update, or keep
 playing and the new build runs next time. It only works when the game was started from the SD card (not over
@@ -486,11 +492,16 @@ For sound in Azahar, put any file at `sdmc/3ds/dspfirm.cdc`; Azahar's emulated D
 
 ## Status
 
-- **Tested in Azahar:** the intro, attract mode and menus, the adventure hub and races.
-- **Performance in Azahar:** races run at the game's 30 fps cap in both Old 3DS and New 3DS mode, with time to
-  spare (see the profiler above).
-- **Untested:** real hardware. Azahar does not model CPU timing exactly, so expect the real frame rate to be lower,
-  especially on an Old 3DS.
+- **Real hardware:** played on a New 3DS since 2026-10-17. Races hold 30 fps with 4x anti-aliasing, and about 60 fps
+  with anti-aliasing off or 2x on most tracks (WizPig 1 and Walrus Cove 2 are GPU-bound at 60 fps with 2x).
+- **Tested by machine:** every track with every character (the full test run), the ten boss fights, and the host
+  build's frame regression on every push.
+- **Not yet checked end to end:** a complete Adventure playthrough.
 - **Known gaps:**
-  - Only the US 1.0 ROM is tested.
-  - Rumble isn't supported.
+  - Only the US 1.0 ROM is supported; other versions are planned.
+  - The Old 3DS hasn't been tried; the renderer counts on the New 3DS's extra core.
+  - One player only (see above); rumble isn't possible on a 3DS.
+
+Player defaults (the release build): anti-aliasing 4x, 30 fps, Balanced widescreen, 800 pixels and stereo 3D on,
+HUD at the screen edges, race HUD on the bottom screen, mipmaps on, colour boost off, Modern camera with the wall
+check, smooth resampling.

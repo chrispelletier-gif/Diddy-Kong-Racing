@@ -3,7 +3,7 @@
  * uses them is in src/racer.c (update_camera_car, update_camera_hovercraft, update_camera_plane and
  * update_player_camera), behind TARGET_PORT.
  *
- * The setting is kept as camera= in settings.txt: 0 the N64's own camera (the default), 1 Modern. DKR_CAMERA in
+ * The setting is kept as camera= in settings.txt: 0 the N64's own camera, 1 Modern (the default). DKR_CAMERA in
  * env.txt (or the environment on PC) sets it for a test run. The wall check (camera_wall_check in src/racer.c) is
  * camwall= (1, on, by default; 0 the N64's camera that passes into walls), DKR_CAMERA_WALLS for a test. The Settings menu changes it from its own thread while
  * the game reads it; it is a single int, so the game sees either the old value or the new one.
@@ -21,7 +21,7 @@ static volatile s32 sWallCheck = -1; // -1 until loaded.
 s32 port_modern_camera(void) {
     if (sModernCamera < 0) {
         const char *env = plat_getenv("DKR_CAMERA");
-        sModernCamera = env != NULL ? atoi(env) != 0 : settings_get("camera", 0) != 0;
+        sModernCamera = env != NULL ? atoi(env) != 0 : settings_get("camera", 1) != 0;
     }
     return sModernCamera;
 }

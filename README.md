@@ -1,219 +1,102 @@
-# Diddy Kong Racing
+# Diddy Kong Racing for Nintendo 3DS
 
-This repo contains a decompilation of Diddy Kong Racing for the N64. You will need to have a original copy of the ROM to extract the game's assets.
+An unofficial, native Nintendo 3DS version of Diddy Kong Racing, built from the community decompilation of the N64
+game. It isn't an emulator: the game's own code runs on the 3DS, drawn by the 3DS GPU, with widescreen, stereo 3D and
+a race HUD on the bottom screen.
 
-All versions are supported, and the US 1.0 version (SHA1 = 0cb115d8716dbbc2922fda38e533b9fe63bb9670) of the game is the default if not specified.
+**This is an early release (v0.1 alpha / release candidate).** It plays well on a New 3DS, but not every part of
+Adventure mode has been played through yet. Please report what you find (see [Reporting a problem](#reporting-a-problem)).
 
-<!-- README_SCORE_SUMMARY_BEGIN -->
-As of October 1, 2026, this is our current score:
+**No game files are included.** You need your own copy of the game: the port reads everything (models, textures,
+music, text) from your ROM when it starts.
 
-&emsp;&emsp;&emsp;&emsp;Decomp progress [us.v77]: 100.00%
+## What you need
 
-&emsp;&emsp;&emsp;&emsp;Documentation progress: 69.02%
-<!-- README_SCORE_SUMMARY_END -->
+- **A New Nintendo 3DS, New 3DS XL or New 2DS XL** with homebrew (the Homebrew Launcher, or custom firmware for the
+  .cia). The older 3DS, 3DS XL and 2DS models aren't supported yet.
+- **A Diddy Kong Racing ROM, US version 1.0** (SHA1 `0cb115d8716dbbc2922fda38e533b9fe63bb9670`). `.z64`, `.n64` and
+  `.v64` files all work. Other versions (US 1.1, PAL, Japan) will be supported in a later release; the game tells you
+  if your ROM is a different version.
+- **For sound:** the DSP firmware dump at `sdmc:/3ds/dspfirm.cdc`, the same file other homebrew uses (made with
+  [DSP1](https://github.com/zoogie/DSP1)). Without it the game runs silently.
 
----
+## Installing
 
+1. Download `dkr.3dsx` or `dkr.cia` from the [latest release](../../releases).
+2. Put your ROM on the SD card as `sdmc:/3ds/dkr/baserom.z64`. (Any name works if it's in `sdmc:/3ds/dkr/`,
+   `sdmc:/3ds/` or the root of the SD card.)
+3. Either:
+   - copy `dkr.3dsx` to `sdmc:/3ds/` and start it from the Homebrew Launcher, or
+   - install `dkr.cia` with FBI (or another installer) and start it from the HOME menu.
 
-## Setup
+The first start takes a little longer while the game checks the 3DS GPU once.
 
+### Optional: boss and Taj portraits
 
-### Dependencies
+The bottom-screen race HUD shows a portrait for every racer. The ROM only has portraits of the ten playable
+characters, and we can't ship Rare's artwork, so the bosses and Taj get a box with their initial unless you add
+portraits yourself: six 40x40 PNG files in `sdmc:/3ds/dkr/portraits/` named `tricky.png`, `bluey.png`, `bubbler.png`,
+`smokey.png`, `wizpig.png` and `taj.png`. Any other size or format is skipped.
 
-<details>
+## Playing
 
-<summary> Ubuntu / Debian based Linux distros </summary>
+| 3DS | Does |
+| --- | --- |
+| Circle Pad | Steer |
+| A | Accelerate |
+| B | Brake / reverse |
+| L | Use item (N64 Z) |
+| R or ZR | Hop / drift |
+| ZL | Look behind |
+| X / Y | C-Up / C-Left |
+| C-Stick (New 3DS) | C buttons |
+| D-Pad | D-Pad |
+| SELECT | N64 L |
+| START | Pause |
 
-`sudo apt install build-essential pkg-config git python3 python3-pip binutils-mips-linux-gnu python3-venv libpcre2-dev libpcre2-8-0`
+Buttons can be remapped, and the circle pad's deadzone, sensitivity and response curve changed, in **Settings >
+Controls**.
 
-- `build-essential` / `pkg-config` are helper packages needed for make.
-- `git` is used for version control.
-- `python3` is needed to run python scripts
-- `libpcre2-dev` and `libpcre2-8-0` are not technically required, but will speedup extracting/building some assets significantly.
-- `gcc-mips-linux-gnu` is optionally used if compiling NON_MATCHING with COMPILER=gcc
+**Settings** is the button at the bottom of the touch screen, and the same settings are also in the game's own Options
+menu (VIDEO, CAMERA and CONTROL OPTIONS) and the pause menu. What you can change:
+- **Picture:** anti-aliasing (4x, 2x or off), 30 or 60 fps, mipmaps, colour boost.
+- **Screen:** widescreen (Wide, Balanced or Zoomed), the sharper 800-pixel mode, stereo 3D (follows the 3D slider),
+  HUD at the screen edges or in the 4:3 area.
+- **Race HUD:** on the bottom screen (standings, map, item, lap times), on both screens, or the N64's HUD on top.
+- **Camera:** Modern (calmer, the default) or the original N64 camera, and whether the camera stops in front of walls.
+- **Sound:** smooth resampling.
+- **Intro logos:** shown, or skipped straight to the title screen. A, B or START also skips them.
 
-</details>
+60 fps works best with anti-aliasing off or at 2x; a few heavy levels drop back to 30 fps with 2x on.
 
-<details>
+Your saves are in `sdmc:/3ds/dkr/` (`eeprom.bin` is the game's save, `controllerpak.bin` holds ghosts), and your
+settings in `settings.txt` and `controls.txt` next to them. Back them up before trying a new build.
 
-<summary> Fedora based Linux distros </summary>
+The game is one player only: a 3DS has one set of controls.
 
-Most dependencies should already be installed by default (in fedora 44). Only thing needed was pcre2.
+## Known issues
 
-`sudo dnf install pcre2 pcre2-devel`
+- Only the US 1.0 ROM works for now.
+- New 3DS models only for now.
+- Boss and Taj portraits need the optional files above.
 
-</details>
+## Reporting a problem
 
+If the game crashes it writes `sdmc:/3ds/dkr/crash.txt` and its log to `log.txt`; once you start the game again
+they become `last_crash.txt` and `last_log.txt`. Please [open an issue](../../issues/new) saying what you were doing,
+which console you have and which release you downloaded, and attach those two files (from `sdmc:/3ds/dkr/`).
 
-<details>
+## Building it yourself
 
-<summary> Arch based Linux distros </summary>
+See [port/README.md](port/README.md): it covers the build, the debug build's tools, how the port works and how it is
+tested. The N64 decompilation this is built on is described in [doc/decompilation.md](doc/decompilation.md).
 
-`sudo pacman -Syu --needed base-devel pkgconf git python python-pip python-virtualenv pcre2 yay`
+## Credits and legal
 
-For binutils you should install this package from the AUR: https://aur.archlinux.org/packages/mips64-elf-binutils
+- The Diddy Kong Racing decompilation project and its contributors, whose work this port is built on.
+- [devkitPro](https://devkitpro.org/), libctru and citro3d, and the other libraries listed in [NOTICE.md](NOTICE.md).
 
-- `base-devel` / `pkgconf` are helper packages needed for make.
-- `git` is used for version control.
-- `python` is needed to run python scripts
-- `pcre2` is not technically required, but will speedup extracting/building some assets significantly.
-- `yay` is not required, but is useful for installing packages from the AUR like the binutils.
-    - `yay -Syu mips64-elf-binutils`
-
-    
-</details>
-
-<details>
-
-<summary> MacOS </summary>
-
-1. Install homebrew from here: https://brew.sh/
-2. Install make and pcre2 using homebrew: `brew install make pcre2`
-3. When running make, you MUST use `gmake` not `make`
-    - For example, instead of doing `make setup` you would use `gmake setup`.
-    
-</details>
-
-<details>
-
-<summary> Windows </summary>
-
-Windows is not natively supported. We recommend using a linux distro under the Windows Subsystem for Linux (WSL)
-
-</details>
-
-### Notes
-- gcc needs to be version 8.0 or higher.
-- make needs to be version 4.2 or higher.
-
-### Building
-
-1. Install the dependencies above for your system. Click on the text to reveal the instructions.
-2. Place the ROM file within the `baseroms` directory.  
-   **a.** The name of the ROM file does not matter. It will be detected automatically from an sha1 checksum.
-3. Grab tools: `git submodule update --init --recursive`
-4. Run `make setup` to install the IDO compiler, python venv, and packages required.
-5. Run `make extract` to run splat to extract all required files from the baserom.
-6. Run `make` in the main directory.  
-   **a.** Use the `-jN` argument to use `N` number of threads to speed up building. For example, if you have a system with 4 cores / 4 threads, you should do `make -j4`.
-
-Note: If you are on MacOS, remember to use `gmake` instead of `make`!
-
----
-
-### Building other versions
-
-To build other versions of the ROM, just specifcy the region and version in the make command. All examples are below:
-Baserom|REGION|VERSION|Command
----|--|---|-
-US 1.0 | US | v77 | `make REGION=us VERSION=v77`
-PAL 1.0 | PAL | v77 | `make REGION=pal VERSION=v77`
-JPN 1.0 | JPN | v79 | `make REGION=jpn VERSION=v79`
-US 1.1 | US | v80 | `make REGION=us VERSION=v80`
-PAL 1.1 | PAL | v80 | `make REGION=pal VERSION=v80`
-
-## Modding
-
-If you are modifying the code in the repo, then you should add `NON_MATCHING=1` to the make command.  
-Example: `make NON_MATCHING=1 -j4`
-
-The `NON_MATCHING` define will include the functions that don't exactly match one-to-one, but should be no different functionality-wise. If you do notice any bugs that occur in a `NON_MATCHING` build that are not in the vanilla game, then please file an issue describing the bug. It would be helpful if you can track down which function is causing the bug, but that is not required.
-
-## Style Guide
-
-The style guide for the project can be found here: https://docs.google.com/document/d/1euQf8nwynGcCZL1MfoMaLs-XRvx3ejjj8fIfykUZ-NQ
-
-If you see variables/functions/structs/etc. that doesn't follow these rules, then file an issue and we'll try to fix them.
-
-## Scripts
-
-There are some useful scripts that should be kept in mind when working on this repo.
-
----
-
-#### `./extract.sh <version>`
-
-This script will extract all the assets from a DKR ROM and place them into `/assets/` folder according to the config file within the `/extract-ver/` folder. The version parameter should either be `us_1.0`, `us_1.1`, `eu_1.0`, `eu_1.1`, or `jp`.
-
-Example: `./extract.sh us_1.0`
-
----
-
-#### `./diff.sh <function_name>`
-
-Compares the assembly output of a function from a built ROM to the base ROM. Useful for decompiling.
-
-Example: `./diff.sh menu_init`
-
----
-
-#### `./rename.sh <old_name> <new_name>`
-
-This script will rename an existing symbol, file name, and/or folder name within the repo with a new one.
-
-Example: `./rename.sh D_A4001000 SP_IMEM`
-
----
-
-#### `./score.sh`
-
-Prints out the current completion percentage of the decomp. You do need to have an `OK` build for this to work properly.
-
-The scoring is split into 2 sections:
-
-1. Assembly to C Decompilation (Adventure One)
-2. Cleanup and Documentation (Adventure Two)
-
-Show scores for Adventure One & Adventure Two: `./score.sh`  
-Show score for Adventure One only: `./score.sh -a 1`  
-Show score for Adventure Two only: `./score.sh -a 2`  
-Show score for another version (default: us.v77): `./score.sh -v VERSION`  
-Show score percentage summary: `./score.sh -s`  
-Show score without libultra progress in Adventure One: `./score.sh --nolib`  
-Show top files remaining (default: 10): `./score.sh -t TOP`  
-Show treemap view in a file (default: treemap.html): `./score.sh --treemap TREEMAP`  
-
-To make progress in Adventure 2, a function must be properly named (must not start with `func_`) and also include a doxygen comment above it.
-
-For example:
-
-```c
-/**
- * Returns 1 if Drumstick is available to use, or 0 if not.
- */
-s32 is_drumstick_unlocked(void) {
-    return gActiveMagicCodes & 2;
-}
-```
-
-<!-- README_SCORE_BEGIN -->
-As of October 1, 2026, this is our current score:
-```
- ==========================================
- ADVENTURE ONE (ASM -> C Decompilation) [us.v77]
- ------------ 100.0% Complete -------------
-        # Decompiled functions: 1852
-      # Handwritten ASM functions: 85
-         # GLOBAL_ASM remaining: 0
-        # NON_MATCHING functions: 0
-     # NON_EQUIVALENT WIP functions: 0
- -------------- Game Status ---------------
- Balloons: 47/47, Keys: 4/4, Trophies: 5/5
-   T.T. Amulets: 4/4, Wizpig Amulets: 4/4
- ------------------------------------------
-                 COMPLETED!
- ==========================================
-   ADVENTURE TWO (Cleanup & Documentation)
- ------------ 69.02% Complete -------------
-        # Documented functions: 1285
-       # Undocumented remaining: 278
-      # Functions named `func_*`: 143
-     # Functions without comments: 278
- -------------- Game Status ---------------
- Balloons: 33/47, Keys: 3/4, Trophies: 3/5
-   T.T. Amulets: 3/4, Wizpig Amulets: 3/4
- ------------------------------------------
- We are racing in Boulder Canyon. (Lap 2/3)
- ==========================================
-```
-<!-- README_SCORE_END -->
+This project is not affiliated with or endorsed by Nintendo or Rare. Diddy Kong Racing and its characters are
+trademarks of their respective owners. No game assets are distributed here; you need your own legally obtained copy
+of the game. The 3DS port is under the MIT License and the decompilation under CC0 (see [LICENSE.md](LICENSE.md)); the libraries
+in the built game have their own licences, listed in [NOTICE.md](NOTICE.md).
