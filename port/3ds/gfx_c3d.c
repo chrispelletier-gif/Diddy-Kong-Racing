@@ -86,6 +86,8 @@ typedef struct C3DTexture {
     int levels; // Mipmap levels after the first that tex holds (see mip_levels)
     int point;  // Point sampled, so the levels are never used
     int tinted; // The levels are tinted (the "Show" mipmap setting)
+    struct C3DTexture *vramPrev, *vramNext; // In sVramTextures while tex's memory is in VRAM
+    u32 vramBytes;                          // What it counts for in sVramTextureBytes
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
@@ -118,6 +120,7 @@ static int sFrameStarted;
 static int sDepthOnly;
 static int sClearing; // draw_clear_rect is drawing
 static int sFrameFirstDraw; // No draw yet in this frame's command list
+static int sDepthFillPending; // The frame's depth clear is a memory fill (see gfxb_clear_depth)
 static int sFrameCount, sFrameTriangles;
 /* For the hang report: the size of the last frame handed to the GPU. */
 static int sLastFrameTriangles;
@@ -170,19 +173,185 @@ static int full_flush(void) {
     return sFull;
 }
 
+/*
+ * GSPGPU_FlushDataCache asks the GSP service to write a range of the CPU's data cache out to memory for the GPU: an
+ * IPC round trip to another process each time (the vertices and each command list part every frame, every texture
+ * upload). svcFlushProcessDataCache does the same cache maintenance as a plain system call (roadmap item P24).
+ * DKR_SVC_FLUSH=1 uses it; the switch bench races it.
+ */
+static int sSvcFlush;
+
+static void gpu_flush(const void *data, u32 size) {
+    if (sSvcFlush) {
+        svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32) data, size);
+    } else {
+        GSPGPU_FlushDataCache(data, size);
+    }
+}
+
+/*
+ * Textures in VRAM (roadmap item P17). Every texture used to live in the linear heap in main memory, so the GPU
+ * fetched its texels over the bus the CPU uses too; VRAM is the GPU's own. With DKR_TEX_VRAM=1 a new texture goes to
+ * VRAM while that leaves VRAM_RESERVE free (room for the right eye's target when the 3D slider goes up), and to the
+ * linear heap otherwise. A render target that later finds no room (anti-aliasing turned up, 3D) moves every texture
+ * in VRAM back to the linear heap and tries again (evict_vram_textures), so the settings get the VRAM they always did.
+ */
+#define VRAM_RESERVE (TOP_WIDTH * TOP_HEIGHT * 8)
+static GPU_TEXCOLOR gpu_texcolor(int format);
+static void forget_gpu_state(void);
+
+static int in_vram(const void *data) {
+    return (u32) data >= OS_VRAM_VADDR && (u32) data < OS_VRAM_VADDR + OS_VRAM_SIZE;
+}
+static C3DTexture *sVramTextures; // Every texture whose memory is in VRAM, those sharing another's included
+static u32 sVramTextureBytes;
+static u8 *sStaging;
+static u32 sStagingSize;
+
+static void vram_link(C3DTexture *t) {
+    t->vramPrev = NULL;
+    t->vramNext = sVramTextures;
+    if (sVramTextures != NULL) {
+        sVramTextures->vramPrev = t;
+    }
+    sVramTextures = t;
+    t->vramBytes = t->shared ? 0 : C3D_TexCalcTotalSize(t->tex.size, t->levels);
+    sVramTextureBytes += t->vramBytes;
+}
+
+/* Called before a texture is deleted or moved out of VRAM. */
+static void vram_unlink(C3DTexture *t) {
+    if (t->vramPrev == NULL && sVramTextures != t) {
+        return; // Not in the list.
+    }
+    if (t->vramPrev != NULL) {
+        t->vramPrev->vramNext = t->vramNext;
+    } else {
+        sVramTextures = t->vramNext;
+    }
+    if (t->vramNext != NULL) {
+        t->vramNext->vramPrev = t->vramPrev;
+    }
+    t->vramPrev = t->vramNext = NULL;
+    sVramTextureBytes -= t->vramBytes;
+    t->vramBytes = 0;
+}
+
+/* Makes the texture's memory, in VRAM if the switch is on and there is room, else in the linear heap. */
+static int texture_init(C3DTexture *t, unsigned int pw, unsigned int ph, int levels, int format) {
+    C3D_TexInitParams params = { pw, ph, levels, gpu_texcolor(format), GPU_TEX_2D, false };
+    u32 bytes = C3D_TexCalcTotalSize(C3D_TexCalcLevelSize(pw * ph * gfx_texel_bytes(format), 0), levels);
+    if (plat_switch("DKR_TEX_VRAM", 0) && vramSpaceFree() >= bytes + VRAM_RESERVE) {
+        params.onVram = true;
+        if (C3D_TexInitWithParams(&t->tex, NULL, params)) {
+            return 1; // Listed in sVramTextures once its levels are known.
+        }
+        params.onVram = false;
+    }
+    return C3D_TexInitWithParams(&t->tex, NULL, params);
+}
+
+/*
+ * Where a texture's texels are to be written: the CPU writes VRAM a few bytes at a time and slowly, so a texture in
+ * VRAM is written in a buffer in main memory first (its tex.data points there until texture_write_end), and copied
+ * over in one go. Returns the texture's VRAM, or NULL when it is written in place.
+ */
+static u8 *texture_write_begin(C3DTexture *t) {
+    u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
+    u8 *vram = (u8 *) t->tex.data;
+    if (!in_vram(vram)) {
+        return NULL;
+    }
+    if (total > sStagingSize) {
+        u8 *buffer = realloc(sStaging, total);
+        if (buffer == NULL) {
+            return NULL; // Written straight into VRAM, slowly.
+        }
+        sStaging = buffer;
+        sStagingSize = total;
+    }
+    t->tex.data = sStaging;
+    return vram;
+}
+
+/* Puts the texture's own memory back, copying what was written from byte from on, and flushes it for the GPU. */
+static void texture_write_end(C3DTexture *t, u8 *vram, u32 from) {
+    u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
+    if (from >= total) {
+        if (vram != NULL) {
+            t->tex.data = vram;
+        }
+        return;
+    }
+    if (vram != NULL) {
+        memcpy(vram + from, sStaging + from, total - from);
+        t->tex.data = vram;
+    }
+    gpu_flush((u8 *) t->tex.data + from, total - from);
+}
+
+/*
+ * With the GPU idle: moves every texture in VRAM to the linear heap, for a render target that needs the room.
+ * Textures sharing another's memory follow it. Returns how many moved.
+ */
+static int evict_vram_textures(void) {
+    C3DTexture *t, *next;
+    void **from = NULL, **to = NULL;
+    int count = 0, moved = 0, i;
+
+    for (t = sVramTextures; t != NULL; t = t->vramNext) {
+        count++;
+    }
+    if (count == 0 || (from = malloc(count * sizeof(void *))) == NULL || (to = malloc(count * sizeof(void *))) == NULL) {
+        free(from);
+        return 0;
+    }
+    for (t = sVramTextures; t != NULL; t = next) {
+        u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
+        void *data;
+        next = t->vramNext;
+        if (t->shared || (data = linearAlloc(total)) == NULL) {
+            continue;
+        }
+        memcpy(data, t->tex.data, total);
+        gpu_flush(data, total);
+        vram_unlink(t);
+        from[moved] = t->tex.data;
+        to[moved++] = data;
+        vramFree(t->tex.data);
+        t->tex.data = data;
+    }
+    for (t = sVramTextures; t != NULL; t = next) {
+        next = t->vramNext;
+        for (i = 0; t->shared && i < moved; i++) {
+            if (t->tex.data == from[i]) {
+                vram_unlink(t);
+                t->tex.data = to[i];
+                break;
+            }
+        }
+    }
+    plat_log("textures: moved %d of %d from VRAM to main memory for a render target (%lu KB left in VRAM)", moved,
+             count, (unsigned long) (sVramTextureBytes / 1024));
+    free(from);
+    free(to);
+    forget_gpu_state();
+    return moved;
+}
+
 static void flush_new_vertices(void) {
     if (sVboFlushed > sVboUsed) {
         sVboFlushed = 0; // The buffer was started again.
     }
     if (sVboUsed > sVboFlushed) {
-        GSPGPU_FlushDataCache(sVbo + sVboFlushed, sVboUsed - sVboFlushed);
+        gpu_flush(sVbo + sVboFlushed, sVboUsed - sVboFlushed);
     }
     sVboFlushed = sVboUsed;
     if (sIboFlushed > sIboUsed) {
         sIboFlushed = 0;
     }
     if (sIboUsed > sIboFlushed && sIbo != NULL) {
-        GSPGPU_FlushDataCache(sIbo + sIboFlushed, (sIboUsed - sIboFlushed) * sizeof(u16));
+        gpu_flush(sIbo + sIboFlushed, (sIboUsed - sIboFlushed) * sizeof(u16));
     }
     sIboFlushed = sIboUsed;
 }
@@ -552,7 +721,7 @@ static void gpu_self_test(void) {
         for (i = 0; i < 3; i++) {
             sIbo[i] = (u16) (first + sOrder[i]);
         }
-        GSPGPU_FlushDataCache(sIbo, 3 * sizeof(u16));
+        gpu_flush(sIbo, 3 * sizeof(u16));
         C3D_DrawElements(GPU_TRIANGLES, 3, C3D_UNSIGNED_SHORT, sIbo);
     }
     gpu_test_end(sNames[12]);
@@ -568,8 +737,17 @@ static const char *aa_name(int aa) {
 
 /* A render target in the current buffer formats (sTargetFb16). */
 static C3D_RenderTarget *new_target(int width, int height) {
-    return C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
-                                  sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+    C3D_RenderTarget *target = NULL;
+    int tries;
+    // Textures in VRAM (P17) give way to a target: the second try is with them moved out.
+    for (tries = 0; tries < 2 && target == NULL; tries++) {
+        if (tries == 1 && evict_vram_textures() == 0) {
+            break;
+        }
+        target = C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
+                                        sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+    }
+    return target;
 }
 
 /*
@@ -886,7 +1064,7 @@ void gfxb_init(void) {
     }
     C3D_TexInit(&sWhiteTex, 8, 8, GPU_RGBA8);
     C3D_TexUpload(&sWhiteTex, white);
-    GSPGPU_FlushDataCache(sWhiteTex.data, 8 * 8 * 4);
+    gpu_flush(sWhiteTex.data, 8 * 8 * 4);
 
     C3D_DepthMap(true, -1.0f, 0.0f);
     gpu_self_test();
@@ -1285,7 +1463,7 @@ static void capture_pending_frame(void) {
     }
     pixels = linearAlloc(w * h * 4);
     if (pixels != NULL) {
-        GSPGPU_FlushDataCache(pixels, w * h * 4);
+        gpu_flush(pixels, w * h * 4);
         C3D_SyncDisplayTransfer((u32 *) sTarget->frameBuf.colorBuf,
                                 GX_BUFFER_DIM(TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX), pixels,
                                 GX_BUFFER_DIM(w, h),
@@ -1780,6 +1958,7 @@ void gfxb_3ds_shutdown(void) {
 static void process_pending_frees(FrameSlot *slot) {
     int i;
     for (i = 0; i < slot->numFrees; i++) {
+        vram_unlink(slot->frees[i]);
         if (!slot->frees[i]->shared) {
             C3D_TexDelete(&slot->frees[i]->tex);
         }
@@ -1858,10 +2037,12 @@ static void wait_for_gpu(int measure) {
  * The experimental switches the switch bench (roadmap P29) flips between races, read again at the start of a frame
  * when one changes: DKR_GPU_SPLIT (command list splits before blended draws, P19; 0 off, the default, 1 before
  * blending, 2 on every state change; see drain_before_draw), DKR_LINE_WATCH and DKR_RECENT_FRAMES (the white-line
- * diagnostics, P28) and DKR_EARLY_DEPTH (the early depth test, P20).
+ * diagnostics, P28), DKR_EARLY_DEPTH (the early depth test, P20), DKR_SVC_FLUSH (cache flushes as a system call,
+ * P24, see gpu_flush) and DKR_DEPTH_FILL (the depth clear as a memory fill, P18, see gfxb_clear_depth). DKR_TEX_VRAM
+ * (P17) is read when a texture is made instead, as the switch bench sets it while a level loads its textures.
  */
 static int sSwitchEpoch = -1;
-static int sSplitMode, sEarlyDepth;
+static int sSplitMode, sEarlyDepth, sDepthFill;
 
 static void read_switches(void) {
     int recent, i;
@@ -1872,6 +2053,8 @@ static void read_switches(void) {
     sSplitMode = plat_switch("DKR_GPU_SPLIT", 0);
     sLineWatch = plat_switch("DKR_LINE_WATCH", 0);
     sEarlyDepth = plat_switch("DKR_EARLY_DEPTH", 0) != 0;
+    sSvcFlush = plat_switch("DKR_SVC_FLUSH", 0) != 0;
+    sDepthFill = plat_switch("DKR_DEPTH_FILL", 0) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -1885,6 +2068,9 @@ static void read_switches(void) {
     plat_log("switches: command list split %s, line watch %d, recent frames %s (%d slots), early depth test %s",
              sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes", sLineWatch,
              sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off");
+    plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s",
+             sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
+             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off");
 }
 
 void gfxb_start_frame(void) {
@@ -1938,9 +2124,10 @@ void gfxb_start_frame(void) {
     sMipmapsShown = sMipmapSetting == 2;
     sColourBoost = sColourSetting;
     sFrameFirstDraw = 1;
+    sDepthFillPending = 0;
     if (sFrameStarted < 0) {
         static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
-        draw_clear_rect(sFullScreen, 0, 1);
+        gfxb_clear_depth(sFullScreen);
     }
     sFrameStarted = 1;
 }
@@ -2044,9 +2231,9 @@ void gfxb_end_frame(void) {
         int i;
 
         if (full_flush()) {
-            GSPGPU_FlushDataCache(sVbo, sVboUsed);
+            gpu_flush(sVbo, sVboUsed);
             if (sIboUsed > 0) {
-                GSPGPU_FlushDataCache(sIbo, sIboUsed * sizeof(u16));
+                gpu_flush(sIbo, sIboUsed * sizeof(u16));
             }
         } else {
             flush_new_vertices();
@@ -2061,6 +2248,14 @@ void gfxb_end_frame(void) {
                      "vertices, %d format changes", sFrameCount, sFrameTriangles, plat_time_ns() / 1000000ULL,
                      usage * 100.0f, sMaxUsage * 100.0f, sDrainSplits, sVboUsed / 1024, sVfmtSwitches);
         }
+        {
+            static u32 sLoggedVramBytes;
+            if (sVramTextureBytes != sLoggedVramBytes) {
+                sLoggedVramBytes = sVramTextureBytes;
+                plat_log("textures in VRAM: %lu KB, %lu KB of VRAM free", (unsigned long) (sVramTextureBytes / 1024),
+                         (unsigned long) (vramSpaceFree() / 1024));
+            }
+        }
         if (sOverlap) {
             // Built while the GPU drew the last frame: wait for it now, then hand this one over.
             unsigned long long start = prof_enabled() ? plat_time_ns() : 0;
@@ -2071,8 +2266,20 @@ void gfxb_end_frame(void) {
         }
         // C3D_FrameBegin set citro3d's own command buffer: carry on in the slot's, where the frame is.
         GPUCMD_SetBuffer(tail, tailSize, tailOffset);
+        if (sDepthFillPending) {
+            // With the GPU idle: the fill runs before the frame's command list in the GPU queue.
+            C3D_RenderTargetClear(sTarget, C3D_CLEAR_DEPTH, 0, 0);
+            if (sStereo) {
+                C3D_RenderTargetClear(sTargetRight, C3D_CLEAR_DEPTH, 0, 0);
+            }
+        }
         for (i = 0; i < slot->numParts; i++) {
-            GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
+            if (sSvcFlush) {
+                gpu_flush(slot->partAddr[i], slot->partWords[i] * 4);
+                GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, 0);
+            } else {
+                GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
+            }
         }
         sTarget->used = true;
         if (sStereo) {
@@ -2334,7 +2541,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
     int format = gpu_format(tex);
     int levels = mip_levels(tex, pw, ph);
     unsigned int bytes = gfx_texel_bytes(format);
-    u8 *data;
+    u8 *data, *vram;
     unsigned int tx, ty;
     int i;
 
@@ -2344,12 +2551,10 @@ void gfxb_texture_upload(GfxTexture *tex) {
     }
     if (t == NULL) {
         t = calloc(1, sizeof(C3DTexture));
-        if (t != NULL && levels > 0 &&
-            !C3D_TexInitWithParams(&t->tex, NULL,
-                                   (C3D_TexInitParams) { pw, ph, levels, gpu_texcolor(format), GPU_TEX_2D, false })) {
+        if (t != NULL && !texture_init(t, pw, ph, levels, format)) {
             levels = 0; // No room for the levels: try one.
         }
-        if (t == NULL || (levels == 0 && !C3D_TexInit(&t->tex, pw, ph, gpu_texcolor(format)))) {
+        if (t == NULL || (levels == 0 && !texture_init(t, pw, ph, 0, format))) {
             static int sFailures;
             gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
             if ((sFailures++ % 50) == 0) {
@@ -2360,11 +2565,15 @@ void gfxb_texture_upload(GfxTexture *tex) {
             return;
         }
         t->levels = levels;
+        if (in_vram(t->tex.data)) {
+            vram_link(t);
+        }
         tex->backendData = t;
     }
     // Swizzled straight into the texture's memory in 8x8 tiles, top row first (the GPU samples t = 0 from the start
-    // of the data). No temporary buffer: when the heap was short, skipping the upload left whatever the memory held
-    // before, such as an old solid black texture.
+    // of the data). No temporary buffer (except for VRAM, see texture_write_begin): when the heap was short, skipping
+    // the upload left whatever the memory held before, such as an old solid black texture.
+    vram = texture_write_begin(t);
     data = (u8 *) t->tex.data;
     for (ty = 0; ty < ph; ty += 8) {
         for (tx = 0; tx < pw; tx += 8) {
@@ -2381,9 +2590,9 @@ void gfxb_texture_upload(GfxTexture *tex) {
     if (t->levels > 0 && !upload_mip_levels(t, tex, format)) {
         t->levels = 0; // Out of memory for the temporary image: the levels hold nothing, so they aren't used.
     }
+    texture_write_end(t, vram, 0);
     set_texture_filter(t, tex->filter == GFX_FILTER_POINT);
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
-    GSPGPU_FlushDataCache(data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
     forget_gpu_state();
 }
 
@@ -2442,6 +2651,7 @@ void gfxb_texture_free(GfxTexture *tex) {
         int capacity = slot->freesCapacity ? slot->freesCapacity * 2 : 256;
         C3DTexture **list = realloc(slot->frees, capacity * sizeof(C3DTexture *));
         if (list == NULL) {
+            vram_unlink(t);
             if (!t->shared) {
                 C3D_TexDelete(&t->tex); // Out of memory: delete now and risk a glitch.
             }
@@ -2463,6 +2673,11 @@ void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
     // The same memory with another sampler setting: only the C3D_Tex's parameters differ.
     *t = *s;
     t->shared = 1;
+    t->vramPrev = t->vramNext = NULL;
+    t->vramBytes = 0;
+    if (in_vram(t->tex.data)) {
+        vram_link(t); // Moved with its memory by evict_vram_textures.
+    }
     set_texture_filter(t, dst->filter == GFX_FILTER_POINT);
     dst->backendData = t;
 }
@@ -2939,8 +3154,11 @@ static int bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV)
     if (t != NULL && t->levels > 0 && t->tinted != sMipmapsShown && tex->pixels != NULL) {
         // The Show setting changed since the levels were built. The GPU may still be drawing the last frame with
         // them, which can show one frame of mixed levels.
+        u8 *vram = texture_write_begin(t);
         if (upload_mip_levels(t, tex, gpu_format(tex))) {
-            GSPGPU_FlushDataCache(t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
+            texture_write_end(t, vram, t->tex.size); // Only the levels after the first were written.
+        } else {
+            texture_write_end(t, vram, C3D_TexCalcTotalSize(t->tex.size, t->levels)); // Nothing to copy.
         }
         t->tinted = sMipmapsShown;
     }
@@ -3633,7 +3851,24 @@ void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, uns
     draw_clear_rect(rect, (r << 24) | (g << 16) | (b << 8) | a, 0);
 }
 
+/*
+ * Each frame starts with a depth clear drawn over the whole screen, and the game draws its own right after (roadmap
+ * item P18): two passes over every pixel. With DKR_DEPTH_FILL=1, a whole-screen depth clear before anything else is
+ * drawn becomes one memory fill of the depth buffer instead, queued ahead of the frame's command list in
+ * gfxb_end_frame. A depth-only fill was blamed for hanging a real New 3DS after the first frame in October, but that
+ * hang turned out to be the vertex shader, which hung the GPU with plain drawn clears too; this still needs hardware
+ * to prove it. Other depth clears (part of the screen, or after a draw) are drawn.
+ */
 void gfxb_clear_depth(const short rect[4]) {
-    // Always drawn: a memory fill of the depth buffer alone hangs a real 3DS (see gfxb_start_frame).
+    // The game's own clear leaves out the bottom row (its scissor ends at 239), which the frame's first clear has
+    // just cleared anyway.
+    if (sDepthFill && sFrameFirstDraw && rect[0] <= 0 && rect[1] <= 0 && rect[2] >= GFX_SCREEN_WIDTH - 1 &&
+        rect[3] >= GFX_SCREEN_HEIGHT - 1) {
+        sDepthFillPending = 1;
+        if (sEarlyDepth && !sStereo) {
+            GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+        }
+        return;
+    }
     draw_clear_rect(rect, 0, 1);
 }

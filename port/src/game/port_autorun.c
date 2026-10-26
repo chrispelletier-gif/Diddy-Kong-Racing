@@ -144,10 +144,14 @@ typedef struct BenchSwitch {
     s8 usual, test;
 } BenchSwitch;
 
-/* Nothing to compare right now: command list splits (P19) were measured and are off by default (#153), early depth
- * (P20) was tried and dropped (#155), and the white-line diagnostics (P28) cost about 1 ms of GPU time a frame and are
- * off for good. The bench says so instead of racing. The list ends with an empty entry, so it may be otherwise empty. */
+/* Command list splits (P19) were measured and are off by default (#153), early depth (P20) was tried and dropped
+ * (#155), and the white-line diagnostics (P28) are off for good. Now: textures in VRAM (P17), the depth clear as a
+ * memory fill (P18) and cache flushes as a system call (P24). The list ends with an empty entry, so it may be
+ * otherwise empty (the bench then says there is nothing to test). */
 static const BenchSwitch sSwitches[] = {
+    { "textures in VRAM (P17)", { "DKR_TEX_VRAM", NULL }, 0, 1 },
+    { "depth clear as a memory fill (P18)", { "DKR_DEPTH_FILL", NULL }, 0, 1 },
+    { "cache flush as a system call (P24)", { "DKR_SVC_FLUSH", NULL }, 0, 1 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
