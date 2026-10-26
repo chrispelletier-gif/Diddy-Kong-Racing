@@ -1,12 +1,14 @@
 /*
  * Updates from the bottom screen. CI (.github/workflows/Port.yml) publishes every 3DS build as a GitHub release:
  * "3ds-master-debug" is the newest debug build of master, "3ds-newest" the newest debug build of any branch ("3ds-master"
- * is master's player build, which has no updater, so this never installs it). Each has dkr.3dsx and build.txt (commit,
- * branch, date, size and sha256 of dkr.3dsx).
+ * is master's player build, which has no updater, so this never installs it). Each has dkr.3dsx, dkr.cia and build.txt
+ * (commit, branch, date, size and sha256 of dkr.3dsx, cia_size and cia_sha256 of dkr.cia).
  *
- * Tapping "Check for updates" reads both build.txt files and offers them. The chosen dkr.3dsx is downloaded next to
- * the running one, checked against its size and sha256, and then replaces it; the new build runs the next time the
- * game starts. For a private repository the token in sdmc:/3ds/dkr/bugreport.txt (the bug report one) is used; it
+ * Tapping "Check for updates" reads both build.txt files and offers them. Started from the Homebrew Launcher, the
+ * chosen dkr.3dsx is downloaded next to the running one, checked against its size and sha256, and then replaces it.
+ * Installed as a .cia, dkr.cia is downloaded to sdmc:/3ds/dkr/update.cia, checked the same way and installed over the
+ * running title through the system's installer (AM), as FBI updates itself. Either way the new build runs the next time
+ * the game starts. For a private repository the token in sdmc:/3ds/dkr/bugreport.txt (the bug report one) is used; it
  * needs read access to the repository's contents.
  *
  * The rest of the bottom screen's panel lives here too. A player's build (plat.h PLAT_DEBUG_TOOLS) has the panel but
@@ -36,6 +38,7 @@
 #define CONFIG_PATH "sdmc:/3ds/dkr/bugreport.txt"
 #define DEFAULT_REPO "chrispelletier-gif/Diddy-Kong-Racing"
 #define MAX_DOWNLOAD (16 * 1024 * 1024)
+#define CIA_DOWNLOAD_PATH "sdmc:/3ds/dkr/update.cia"
 
 void plat_3ds_set_buttons(const char *const *labels, int count);
 void plat_3ds_panel_text(const char *text);
@@ -68,8 +71,11 @@ typedef struct Channel {
     char date[32];
     unsigned long size;
     char sha256[72];
-    char buildUrl[256];  /* Where to read build.txt and dkr.3dsx; for a private repository the API's asset URLs. */
+    char buildUrl[256];  /* Where to read build.txt, dkr.3dsx and dkr.cia; for a private repository the API's asset URLs. */
     char binaryUrl[256];
+    unsigned long ciaSize;
+    char ciaSha256[72];
+    char ciaUrl[256];
 } Channel;
 
 typedef struct Config {
@@ -78,6 +84,7 @@ typedef struct Config {
 } Config;
 
 static char sSelfPath[256];
+static int sIsCia; // Installed as a .cia rather than started from the Homebrew Launcher.
 static volatile int sStarted;
 static volatile int sState;
 static volatile int sTappedButton = -1; // Or TAP_MENU, at sTapX, sTapY.
@@ -427,11 +434,16 @@ static int check_channel(const Config *config, Channel *channel, char *error, si
             !find_asset_url(text, "dkr.3dsx", channel->binaryUrl, sizeof(channel->binaryUrl))) {
             return 0;
         }
+        if (!find_asset_url(text, "dkr.cia", channel->ciaUrl, sizeof(channel->ciaUrl))) {
+            channel->ciaUrl[0] = '\0';
+        }
     } else {
         snprintf(channel->buildUrl, sizeof(channel->buildUrl), "https://github.com/%s/releases/download/%s/build.txt",
                  config->repo, channel->tag);
         snprintf(channel->binaryUrl, sizeof(channel->binaryUrl),
                  "https://github.com/%s/releases/download/%s/dkr.3dsx", config->repo, channel->tag);
+        snprintf(channel->ciaUrl, sizeof(channel->ciaUrl), "https://github.com/%s/releases/download/%s/dkr.cia",
+                 config->repo, channel->tag);
     }
 
     memset(&download, 0, sizeof(download));
@@ -455,8 +467,16 @@ static int check_channel(const Config *config, Channel *channel, char *error, si
     read_field(text, "sha256", channel->sha256, sizeof(channel->sha256));
     read_field(text, "size", size, sizeof(size));
     channel->size = strtoul(size, NULL, 10);
+    read_field(text, "cia_sha256", channel->ciaSha256, sizeof(channel->ciaSha256));
+    read_field(text, "cia_size", size, sizeof(size));
+    channel->ciaSize = strtoul(size, NULL, 10);
     if (channel->commit[0] == '\0' || channel->sha256[0] == '\0' || channel->size == 0) {
         snprintf(error, errorSize, "%s/build.txt is incomplete", channel->tag);
+        return -1;
+    }
+    if (sIsCia && (channel->ciaUrl[0] == '\0' || channel->ciaSha256[0] == '\0' || channel->ciaSize == 0)) {
+        // Builds from before the .cia was published.
+        snprintf(error, errorSize, "no .cia in this build");
         return -1;
     }
     channel->found = 1;
@@ -472,7 +492,7 @@ static int check(void) {
     char error[200];
     int i, found = 0;
 
-    if (sSelfPath[0] == '\0') {
+    if (sSelfPath[0] == '\0' && !sIsCia) {
         plat_status("Update: the game was not started from the SD card");
         return 0;
     }
@@ -517,35 +537,35 @@ static void draw_choices(void) {
     draw_buttons(labels, 3);
 }
 
-static int install(Channel *channel) {
+/* Downloads url to path, checking it against size and sha256. Returns 1 if it arrived whole. */
+static int download_verified(const char *url, unsigned long size, const char *sha256, const char *path,
+                             const char *label) {
     Config config;
     Download download;
-    char error[200], newPath[272], oldPath[272], digest[65];
+    char error[200], digest[65];
     unsigned char hash[32];
     long status;
     int i;
 
     load_config(&config);
-    snprintf(newPath, sizeof(newPath), "%s.new", sSelfPath);
-    snprintf(oldPath, sizeof(oldPath), "%s.old", sSelfPath);
     memset(&download, 0, sizeof(download));
-    download.expected = channel->size;
+    download.expected = size;
     download.lastPercent = -5;
-    download.file = fopen(newPath, "wb");
+    download.file = fopen(path, "wb");
     if (download.file == NULL) {
-        plat_status("Update: cannot write %s", newPath);
+        plat_status("Update: cannot write %s", path);
         return 0;
     }
     setvbuf(download.file, NULL, _IOFBF, 64 * 1024);
     mbedtls_sha256_init(&download.sha);
     mbedtls_sha256_starts_ret(&download.sha, 0);
 
-    show_busy("Downloading %s...", channel->label);
+    show_busy("Downloading %s...", label);
     error[0] = '\0';
     if (net_3ds_begin(error, sizeof(error)) != 0) {
         status = 0;
     } else {
-        status = http_get(&config, channel->binaryUrl, 1, &download, error, sizeof(error));
+        status = http_get(&config, url, 1, &download, error, sizeof(error));
         net_3ds_end();
     }
     mbedtls_sha256_finish_ret(&download.sha, hash);
@@ -557,18 +577,97 @@ static int install(Channel *channel) {
     for (i = 0; i < 32; i++) {
         snprintf(digest + i * 2, 3, "%02x", hash[i]);
     }
-    if (status == 200 && download.written != channel->size) {
-        snprintf(error, sizeof(error), "got %lu of %lu bytes", download.written, channel->size);
+    if (status == 200 && download.written != size) {
+        snprintf(error, sizeof(error), "got %lu of %lu bytes", download.written, size);
         status = 0;
-    } else if (status == 200 && strcmp(digest, channel->sha256) != 0) {
+    } else if (status == 200 && strcmp(digest, sha256) != 0) {
         snprintf(error, sizeof(error), "the download is damaged (sha256 differs)");
         status = 0;
     } else if (status != 200 && status != 0) {
         snprintf(error, sizeof(error), "GitHub said %ld", status);
     }
     if (status != 200) {
-        remove(newPath);
+        remove(path);
         plat_status("Update failed: %s", error);
+        return 0;
+    }
+    return 1;
+}
+
+/* Installs the downloaded .cia over the running title. Returns 0 (and leaves the installed one as it was) on failure. */
+static int install_cia_file(const char *path, char *error, size_t errorSize) {
+    static u8 buffer[64 * 1024];
+    Handle handle;
+    FILE *file;
+    u64 offset = 0;
+    size_t length;
+    Result res;
+
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        snprintf(error, errorSize, "cannot read %s", path);
+        return 0;
+    }
+    res = amInit();
+    if (R_FAILED(res)) {
+        fclose(file);
+        snprintf(error, errorSize, "the installer did not start (0x%08lX)", (unsigned long) res);
+        return 0;
+    }
+    res = AM_StartCiaInstall(MEDIATYPE_SD, &handle);
+    if (R_SUCCEEDED(res)) {
+        while ((length = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+            u32 written = 0;
+            res = FSFILE_Write(handle, &written, offset, buffer, (u32) length, 0);
+            if (R_FAILED(res) || written != length) {
+                res = R_FAILED(res) ? res : -1;
+                break;
+            }
+            offset += length;
+        }
+        if (R_SUCCEEDED(res) && ferror(file)) {
+            res = -1;
+        }
+        if (R_SUCCEEDED(res)) {
+            res = AM_FinishCiaInstall(handle);
+        } else {
+            AM_CancelCIAInstall(handle);
+        }
+    }
+    amExit();
+    fclose(file);
+    if (R_FAILED(res)) {
+        snprintf(error, errorSize, "the install failed (0x%08lX)", (unsigned long) res);
+        return 0;
+    }
+    return 1;
+}
+
+static int install(Channel *channel) {
+    char error[200], newPath[272], oldPath[272];
+
+    if (sIsCia) {
+        if (!download_verified(channel->ciaUrl, channel->ciaSize, channel->ciaSha256, CIA_DOWNLOAD_PATH,
+                               channel->label)) {
+            return 0;
+        }
+        show_busy("Installing %s...", channel->label);
+        error[0] = '\0';
+        if (!install_cia_file(CIA_DOWNLOAD_PATH, error, sizeof(error))) {
+            remove(CIA_DOWNLOAD_PATH);
+            plat_status("Update failed: %s", error);
+            return 0;
+        }
+        remove(CIA_DOWNLOAD_PATH);
+        plat_log("update: installed %s (%s) as a .cia", channel->commit, channel->branch);
+        plat_status("Installed %.7s (%.20s).", channel->commit, channel->branch);
+        plat_status("It runs the next time the game starts.");
+        return 1;
+    }
+
+    snprintf(newPath, sizeof(newPath), "%s.new", sSelfPath);
+    snprintf(oldPath, sizeof(oldPath), "%s.old", sSelfPath);
+    if (!download_verified(channel->binaryUrl, channel->size, channel->sha256, newPath, channel->label)) {
         return 0;
     }
 
@@ -767,8 +866,9 @@ void update_3ds_race_changed(int racing) {
     }
 }
 
-/* selfPath: the running dkr.3dsx (argv[0] from the Homebrew Launcher), or NULL if not known. */
+/* selfPath: the running dkr.3dsx (argv[0] from the Homebrew Launcher), or NULL if not known (always for a .cia). */
 void update_3ds_start(const char *selfPath) {
+    sIsCia = !envIsHomebrew();
     // Only a file on the SD card can be replaced (3dslink, for one, sends the program over the network).
     if (selfPath != NULL && strncmp(selfPath, "sdmc:/", 6) == 0) {
         snprintf(sSelfPath, sizeof(sSelfPath), "%s", selfPath);
