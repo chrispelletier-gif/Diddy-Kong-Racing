@@ -1,7 +1,7 @@
 # Icon, banner and .cia settings
 
 - `../icon.png` (48x48): the HOME menu / Homebrew Launcher icon, used for both `dkr.3dsx` (SMDH) and `dkr.cia`.
-- `banner.png` (256x128) and `banner.wav` (about 2 s, 16-bit stereo 44.1 kHz like other working homebrew banners; a 32 kHz mono 2.9 s file played as repeated beeps on hardware): the HOME menu banner and its sound, made into `dkr.bnr` by
+- `banner.png` (256x128) and `banner.wav` (2.9 s, 16-bit stereo 44.1 kHz like other working homebrew banners; a 32 kHz mono 2.9 s file played as repeated beeps on hardware): the HOME menu banner and its sound, made into `dkr.bnr` by
   bannertool.
 - `dkr.rsf`: makerom settings (title ID 000400000D4B5200, SD card access, New 3DS 804 MHz + 124 MB mode).
 
