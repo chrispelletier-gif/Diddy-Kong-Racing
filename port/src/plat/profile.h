@@ -24,7 +24,7 @@ enum ProfStage {
     PROF_VSYNC,      /* Game thread: waiting for the retrace that paces the frame rate. */
     PROF_RDP,        /* Renderer: display list interpretation and GPU command submission. */
     PROF_TEXTURE,    /* Renderer: texture decoding and upload. */
-    PROF_GPU_WAIT,   /* Renderer: waiting for the GPU to finish the previous frame. */
+    PROF_GPU_WAIT,   /* Renderer: waiting for the GPU to finish the previous frame, or the screen to show it. */
     PROF_AUDIO,      /* Audio tasks (synthesis). */
     PROF_GPU_DRAW,   /* The GPU's drawing time (3DS only). */
     PROF_STAGE_COUNT
@@ -61,7 +61,31 @@ void prof_render_task(unsigned long long totalNs);
  * (what is left of PROF_RDP is the display list walk), and within them the guard band clipping, the GPU settings and
  * the vertex and index writes. Logged with the profile line as averages per rendered frame.
  */
-enum ProfPart { PROF_PART_BACKEND, PROF_PART_CLIP, PROF_PART_STATE, PROF_PART_WRITE, PROF_PART_COUNT };
+enum ProfPart {
+    PROF_PART_BACKEND,
+    PROF_PART_CLIP,
+    PROF_PART_STATE,
+    PROF_PART_WRITE,
+    /*
+     * The display list walk (gfx_rdp.c, P26): the rest of PROF_RDP between the start of the display list and the end
+     * of the frame, by what it was doing. Each part leaves out the others nested in it, the backend's draws
+     * (PROF_PART_BACKEND) and texture decoding (PROF_TEXTURE).
+     */
+    PROF_PART_WALK_COMMANDS,  /* Reading the commands, and the ones that only set state (modes, tiles, colours) */
+    PROF_PART_WALK_MATRICES,  /* G_MTX */
+    PROF_PART_WALK_VERTICES,  /* G_VTX: transforms and fog */
+    PROF_PART_WALK_TRIANGLES, /* G_TRIN: shared vertex lookup, finished vertices, texture coordinates */
+    PROF_PART_WALK_RECTS,     /* Texture and fill rectangles */
+    PROF_PART_WALK_DRAWSTATE, /* build_draw_state: blend, combiner, depth settings */
+    PROF_PART_WALK_TEXTURES,  /* lookup_texture: hashing the texture and finding it in the cache */
+    PROF_PART_WALK_FRAMEEND,  /* Ending the frame (gfxb_end_frame) */
+    PROF_PART_WALK_TIMER,     /* The walk's own clock reads, taken out of the parts above and of PROF_RDP */
+    /* Waits within the frame end (3DS), shown apart from it: for the GPU to finish the frame before (part of
+     * PROF_GPU_WAIT), and for the screen to show it (DKR_PRESENT_WAIT, also counted as PROF_GPU_WAIT). */
+    PROF_PART_END_GPU_WAIT,
+    PROF_PART_PRESENT_WAIT,
+    PROF_PART_COUNT
+};
 void prof_part(int part, unsigned long long ns);
 
 /* Statistics over a span of frames (a race, or the last second for the overlay). */
