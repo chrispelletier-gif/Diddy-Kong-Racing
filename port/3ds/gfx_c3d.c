@@ -3148,9 +3148,12 @@ static void set_draw_state(const GfxDrawState *state) {
         sGpu.depthFunc = depthFunc;
         sGpu.depthMask = depthMask;
     }
-    // Early depth (P20) only where the depth test is the usual one: it would hide what a draw without the test (the
-    // sky, the HUD) puts in front. Not in 3D, where both eyes' draws share the one early depth buffer.
-    early = sEarlyDepth && !sStereo && !sDepthOnly && depthEnable && depthFunc == GPU_GEQUAL;
+    // Early depth (P20) only for solid draws with the usual depth test and depth writes: it would hide what a draw
+    // without the test (the sky, the HUD) puts in front, and a cutout (alpha test: fences, trees) or blended draw
+    // marks its whole triangles in the early depth buffer, gaps included, which left black blocks behind the fences
+    // of Jungle Falls on a New 3DS. Not in 3D, where both eyes' draws share the one early depth buffer.
+    early = sEarlyDepth && !sStereo && !sDepthOnly && depthEnable && depthFunc == GPU_GEQUAL &&
+            depthMask == GPU_WRITE_ALL && !state->alphaTest && !IS_BLENDED(state->blend);
     if (!sGpu.known || early != sGpu.earlyDepth) {
         C3D_EarlyDepthTest(early, GPU_EARLYDEPTH_GEQUAL, 0);
         sGpu.earlyDepth = early;
