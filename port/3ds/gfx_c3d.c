@@ -904,7 +904,8 @@ static char sCapturePath[256];
  * Recent frames for bug reports. A glitch that lasts a second is gone by the time the snapshot is taken, so every
  * RECENT_EVERY-th frame the screen's picture is copied, exactly as it was shown, into a ring of RECENT_SLOTS
  * (about a second), both eyes in 3D. The slots are taken at start-up, before textures fill linear memory. A snapshot keeps the two that look most like they hold a bright vertical
- * line (a screen column is a row of the rotated picture). DKR_RECENT_FRAMES=0 turns it off.
+ * line (a screen column is a row of the rotated picture). Off unless DKR_RECENT_FRAMES=1: it was for the white
+ * vertical line, since fixed (the banana counter icon's sprite overran its buffer).
  */
 #define RECENT_SLOTS 8
 #define RECENT_EVERY 3 // Odd, so the ring holds both even and odd frames
@@ -1055,7 +1056,7 @@ static void allocate_recent_frames(void) {
     const char *env = plat_getenv("DKR_RECENT_FRAMES");
     sRecentCount = 0;
     // Leave most of linear memory for textures (each slot is 576 KB).
-    while (env == NULL || atoi(env) != 0) {
+    while (env != NULL && atoi(env) != 0) {
         if (sRecentCount == RECENT_SLOTS || linearSpaceFree() < RECENT_MAX_BYTES + 14 * 1024 * 1024) {
             break;
         }
@@ -1073,7 +1074,7 @@ static void allocate_recent_frames(void) {
  * into it) is checked for a bright vertical line, sampling every 8th pixel down each screen column. The first one
  * found sends a bug report by itself, so its snapshot (the next frame's draws, while the line is still there) shows
  * what drew it. Every frame, so a line shown only on odd or only on even frames is caught too; races score up to
- * about 12 of 30. DKR_LINE_WATCH=0 turns it off.
+ * about 12 of 30. Off unless DKR_LINE_WATCH=1 (or 2), as the line is fixed.
  */
 #define LINE_WATCH_SAMPLES (TOP_HEIGHT / 8)
 #define LINE_WATCH_FOUND (LINE_WATCH_SAMPLES / 2)
@@ -1135,7 +1136,7 @@ static void watch_for_line(void) {
     int e, where, score;
     if (sLineWatch < 0) {
         const char *env = plat_getenv("DKR_LINE_WATCH");
-        sLineWatch = env != NULL ? atoi(env) : 1;
+        sLineWatch = env != NULL ? atoi(env) : 0;
     }
     if (!sLineWatch || sRecentScreenRows == 0 || sRecentFrozen) {
         return;
@@ -3135,10 +3136,10 @@ static void set_draw_state(const GfxDrawState *state) {
         sGpu.cull = cull;
     }
     if (!sGpu.known || memcmp(state->scissor, sGpu.scissor, sizeof(sGpu.scissor)) != 0 ||
-        state->flat != sGpu.scissorFlat) {
+        (state->flat != 0) != sGpu.scissorFlat) {
         set_scissor(state->scissor, state->flat);
         memcpy(sGpu.scissor, state->scissor, sizeof(sGpu.scissor));
-        sGpu.scissorFlat = state->flat;
+        sGpu.scissorFlat = state->flat != 0;
     }
 }
 
