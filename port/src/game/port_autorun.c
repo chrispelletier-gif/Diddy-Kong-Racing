@@ -12,6 +12,7 @@
  *   DKR_AUTORUN_LOOP=1              Start over after the last race, forever.
  *   DKR_AUTORUN_RESTART=1           Start from the first race instead of resuming.
  *   DKR_AUTORUN_SNAPSHOT=1          Also save a snapshot (GPU and reference images) after each race finishes.
+ *   DKR_AUTORUN_TIME_TRIAL=1        Race in time trial (alone, with the ghosts) instead of against the field.
  *
  * The GPU benchmark is a short run instead: the heaviest races of the hardware test runs, each raced once with every
  * render setting of sBenchConfigs (anti-aliasing 4x, 2x or off, 32 or 16-bit buffers, 30 or 60 fps), with the
@@ -894,6 +895,12 @@ s32 port_autorun_title(void) {
     sLingerRetraces = 0;
     show_status();
     return port_autorun_setup_race(race->track, race->character, race->vehicle);
+}
+
+/* DKR_AUTORUN_TIME_TRIAL: the races are time trials (src/menu.c, port_autorun_setup_race). */
+s32 port_autorun_time_trial(void) {
+    const char *env = plat_getenv("DKR_AUTORUN_TIME_TRIAL");
+    return env != NULL && port_atoi(env) != 0;
 }
 
 /* Nonzero while the player's kart is driven by the AI. */

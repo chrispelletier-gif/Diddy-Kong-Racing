@@ -64,6 +64,12 @@ void controls_last_stick(int *rawX, int *rawY, int *outX, int *outY);
  * Option list for the settings menu. Each option has a label and a value text; change steps it by -1 or +1 (wrapping
  * round) and saves controls.txt. The "Reset" option puts every setting back to its default on any step.
  */
+/*
+ * For the bottom screen's controls card: the console buttons that do an action, as "R / ZR" (actions: CTRL_N64_*;
+ * any C button for CTRL_N64_CU | CTRL_N64_CL...), or "" when none does.
+ */
+void controls_keys_for(unsigned short actions, char *out, int size);
+
 int controls_option_count(void);
 const char *controls_option_label(int index);
 void controls_option_value(int index, char *out, int size);

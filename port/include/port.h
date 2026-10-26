@@ -192,12 +192,17 @@ s32 port_autorun_enabled(void);
 s32 port_autorun_active(void);
 s32 port_autorun_title(void);
 s32 port_autorun_drives(void);
+s32 port_autorun_time_trial(void);
 s32 port_autorun_quit_race(void);
 void port_autorun_request(s32 start);
 s32 port_autorun_switch_count(void);
 void port_autorun_frame(s32 updateRate);
 /* Sets up a one player tracks mode race as the menus would, and returns the menu result that starts it (menu.c). */
 s32 port_autorun_setup_race(s32 levelId, s32 character, s32 vehicle);
+/* What the menu has highlighted, for the bottom screen (menu.c). */
+enum { PORT_MENU_FOCUS_NONE, PORT_MENU_FOCUS_FILE, PORT_MENU_FOCUS_TRACK };
+struct Settings;
+s32 port_menu_focus(s32 *levelId, s32 *vehicle, struct Settings **file, char **name);
 
 /*
  * Camera options (port/src/game/port_camera.c). The Modern chase camera (Settings > Camera, saved as camera= in
@@ -223,7 +228,7 @@ void port_set_camera_wall_check(s32 on);
  * port_race_hud_hides says which HUD elements (HUD_*, or -1 for the track map) src/game_ui.c leaves off the top screen.
  */
 void port_race_hud_frame(s32 updateRate);
-void port_race_hud_map(s32 spriteIndex);
+void port_race_hud_map(void *model, s32 spriteIndex);
 s32 port_race_hud_hides(s32 element);
 s32 port_race_hud_setting(void);
 void port_set_race_hud_setting(s32 value);

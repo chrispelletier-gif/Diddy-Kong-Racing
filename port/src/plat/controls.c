@@ -281,6 +281,21 @@ void controls_last_stick(int *rawX, int *rawY, int *outX, int *outY) {
     *outY = sLastOut[1];
 }
 
+void controls_keys_for(unsigned short actions, char *out, int size) {
+    // Before controls.txt is read (by the input thread), the default layout.
+    const unsigned short *map = sLoaded ? sSettings.map : sLayouts[0].map;
+    int key, length = 0;
+    out[0] = '\0';
+    for (key = 0; key < CTRL_KEY_COUNT && size > 0; key++) {
+        if (map[key] & actions) {
+            length += snprintf(out + length, size - length, "%s%s", length > 0 ? " / " : "", sKeyNames[key]);
+            if (length >= size) {
+                break;
+            }
+        }
+    }
+}
+
 int controls_option_count(void) {
     return OPT_COUNT;
 }

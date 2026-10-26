@@ -3702,11 +3702,34 @@ s32 port_autorun_setup_race(s32 levelId, s32 character, s32 vehicle) {
     init_racer_headers();
     gPlayerSelectVehicle[PLAYER_ONE] = vehicle;
     set_level_default_vehicle(vehicle);
-    set_time_trial_enabled(FALSE);
+    set_time_trial_enabled(port_autorun_time_trial());
     gTrackIdToLoad = levelId;
     gTrackSpecifiedWithTrackIdToLoad = 1;
     music_change_on();
     return gNumberOfActivePlayers;
+}
+#endif
+
+#ifdef TARGET_PORT
+/**
+ * The 3DS bottom screen's menu companions (port_race_hud.c): on the file select menu, the save file highlighted
+ * (PORT_MENU_FOCUS_FILE, with its progress in *file and its name in *name); on the tracks menu, the track and the
+ * vehicle (PORT_MENU_FOCUS_TRACK); otherwise PORT_MENU_FOCUS_NONE.
+ */
+s32 port_menu_focus(s32 *levelId, s32 *vehicle, Settings **file, char **name) {
+    if (gCurrentMenuId == MENU_FILE_SELECT && gMenuStage == 0 && gSaveFileIndex >= 0 &&
+        gSaveFileIndex < NUMBER_OF_SAVE_FILES && gSavefileInfo[gSaveFileIndex].isStarted &&
+        gSavefileData[gSaveFileIndex] != NULL) {
+        *file = gSavefileData[gSaveFileIndex];
+        *name = gSavefileInfo[gSaveFileIndex].name;
+        return PORT_MENU_FOCUS_FILE;
+    }
+    if (gCurrentMenuId == MENU_TRACK_SELECT && gTrackIdForPreview >= 0) {
+        *levelId = gTrackIdForPreview;
+        *vehicle = gSelectedTrackX >= 0 ? gPlayerSelectVehicle[PLAYER_ONE] : leveltable_vehicle_default(gTrackIdForPreview);
+        return PORT_MENU_FOCUS_TRACK;
+    }
+    return PORT_MENU_FOCUS_NONE;
 }
 #endif
 
