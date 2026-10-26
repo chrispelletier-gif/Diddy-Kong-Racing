@@ -810,6 +810,11 @@ void texrect_draw_scaled(Gfx **dList, DrawTexture *element, f32 xPos, f32 yPos, 
     s32 yPos4x;
     s32 width;
     s32 height;
+#ifdef TARGET_PORT
+    s32 wideMargin = 0;
+#else
+#define wideMargin 0
+#endif
 
     height = fb_size();
     width = GET_VIDEO_WIDTH(height) * 4;
@@ -828,6 +833,12 @@ void texrect_draw_scaled(Gfx **dList, DrawTexture *element, f32 xPos, f32 yPos, 
 
     bFlipX = flags & TEXRECT_FLIP_X;
     bFlipY = flags & TEXRECT_FLIP_Y;
+#ifdef TARGET_PORT
+    if (flags & TEXRECT_PORT_WIDE) {
+        // The wide screen's margins are the N64 screen's width * (aspect - 1) / 2 each side.
+        wideMargin = (s32) (width * (plat_aspect_scale() - 1.0f) * 0.5f);
+    }
+#endif
     xScale *= 4;
     yScale *= 4;
     xPos4x = xPos * 4;
@@ -846,14 +857,14 @@ void texrect_draw_scaled(Gfx **dList, DrawTexture *element, f32 xPos, f32 yPos, 
             lry = yPos4x - (s32) (element[i].yOffset * yScale);
             uly = lry - (s32) (tex->height * yScale);
         }
-        if (ulx < width && uly < height) {
+        if (ulx < width + wideMargin && uly < height) {
             if (!bFlipX) {
                 lrx = (s32) (tex->width * xScale) + ulx;
             }
             if (!bFlipY) {
                 lry = (s32) (tex->height * yScale) + uly;
             }
-            if (lrx > 0 && lry > 0 && ulx < lrx && uly < lry) {
+            if (lrx > -wideMargin && lry > 0 && ulx < lrx && uly < lry) {
                 dsdx = ((tex->width - 1) << 12) / (lrx - ulx);
                 if (bFlipX) {
                     s = (tex->width - 1) << 5;
@@ -868,9 +879,9 @@ void texrect_draw_scaled(Gfx **dList, DrawTexture *element, f32 xPos, f32 yPos, 
                 } else {
                     t = 0;
                 }
-                if (ulx < 0) {
-                    s += (-ulx * dsdx) >> 7;
-                    ulx = 0;
+                if (ulx < -wideMargin) {
+                    s += ((-wideMargin - ulx) * dsdx) >> 7;
+                    ulx = -wideMargin;
                 }
                 if (uly < 0) {
                     t += (-uly * dtdy) >> 7;
@@ -886,3 +897,6 @@ void texrect_draw_scaled(Gfx **dList, DrawTexture *element, f32 xPos, f32 yPos, 
     gDPPipeSync((*dList)++);
     gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
 }
+#ifndef TARGET_PORT
+#undef wideMargin
+#endif
