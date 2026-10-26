@@ -34,9 +34,10 @@ make -C port TARGET=3ds -j8
 The result is `port/build/3ds/dkr.3dsx`, a debug build: its Settings menu has the profiler, the test runs, bug
 reports, updates and the performance switches (16-bit buffers, render ahead, edge trimming, the sound engine's
 switches). `make -C port TARGET=3ds RELEASE=1` builds the one for players, `port/build/3ds-release/dkr.3dsx`, whose
-menus offer only the settings a player needs; the hidden switches keep their defaults, SELECT + touch does nothing and
-the tools' code is still in (`PLAT_DEBUG_TOOLS` in `port/src/plat/plat.h`). CI builds both; the updater installs debug
-builds.
+menus offer only the settings a player needs; the hidden switches keep their defaults. The debug tools are left out of
+it altogether (`PLAT_DEBUG_TOOLS` in `port/src/plat/plat.h`, `port/src/release/`): no profiler, test runs, bug reports,
+updater or reference renderer, so it links without curl, mbedTLS and zlib and is about a third smaller. A crash still
+writes `sdmc:/3ds/dkr/crash.txt`. CI builds both; the updater installs debug builds.
 
 ## Installing
 
