@@ -77,6 +77,7 @@ static volatile int sState;
 static volatile int sTappedButton = -1; // Or TAP_MENU, at sTapX, sTapY.
 static volatile int sTapX, sTapY;
 #define TAP_MENU -2
+#define TAP_REFRESH -3 // Not a tap: a race started or ended, so the idle buttons change.
 static LightEvent sTapEvent;
 static Channel sChannels[2] = { { "3ds-master", "master" }, { "3ds-newest", "newest" } };
 static int sChosen;
@@ -101,15 +102,29 @@ static void draw_text_button(const char *label) {
 }
 
 static int sTestRunShown = -1; // Whether the idle buttons include "Stop test".
+static volatile int sRacing;    // A race is on, with its HUD on the bottom screen: Pause comes first.
+static int sRacingShown;
+
+/* What the idle buttons do. */
+enum { IDLE_PAUSE, IDLE_SETTINGS, IDLE_STOP_TEST };
+static int sIdleActions[3];
 
 static void draw_home(void) {
-    static const char *const sRunning[2] = { "Settings", "Stop test" };
+    const char *labels[3];
+    int count = 0;
     sTestRunShown = port_autorun_enabled() != 0;
-    if (sTestRunShown) {
-        draw_buttons(sRunning, 2);
-    } else {
-        draw_text_button("Settings");
+    sRacingShown = sRacing;
+    if (sRacingShown) {
+        sIdleActions[count] = IDLE_PAUSE;
+        labels[count++] = "Pause";
     }
+    sIdleActions[count] = IDLE_SETTINGS;
+    labels[count++] = "Settings";
+    if (sTestRunShown) {
+        sIdleActions[count] = IDLE_STOP_TEST;
+        labels[count++] = "Stop test";
+    }
+    draw_buttons(labels, count);
 }
 
 static void draw_menu_buttons(void) {
@@ -589,7 +604,8 @@ static void update_thread(void *arg) {
         // Every two seconds without a tap, the test run's buttons and rows are brought up to date (a run ends by
         // itself).
         if (LightEvent_WaitTimeout(&sTapEvent, 2000000000LL) != 0) {
-            if (sState == STATE_IDLE && sTestRunShown != (port_autorun_enabled() != 0)) {
+            if (sState == STATE_IDLE &&
+                (sTestRunShown != (port_autorun_enabled() != 0) || sRacingShown != sRacing)) {
                 draw_home();
             } else if (sState == STATE_MENU) {
                 menu_3ds_refresh();
@@ -597,13 +613,24 @@ static void update_thread(void *arg) {
             continue;
         }
         button = sTappedButton;
+        if (button == TAP_REFRESH) {
+            if (sState == STATE_IDLE && sRacingShown != sRacing) {
+                draw_home();
+            }
+            continue;
+        }
         if (button == TAP_MENU && sState != STATE_MENU) {
             continue; // The menu closed before this tap was seen.
         }
         switch (sState) {
             case STATE_IDLE:
+                if (button < 0 || button >= sButtonCount) {
+                    break;
+                }
                 plat_request_ui_sound(PLAT_UI_SOUND_SELECT);
-                if (button == 0) {
+                if (sIdleActions[button] == IDLE_PAUSE) {
+                    plat_request_game_pause();
+                } else if (sIdleActions[button] == IDLE_SETTINGS) {
                     sState = STATE_MENU;
                     menu_3ds_open();
                     draw_menu_buttons();
@@ -679,6 +706,15 @@ static void update_thread(void *arg) {
                 plat_3ds_request_quit();
                 break;
         }
+    }
+}
+
+/* From the game thread (plat_set_race_hud) when a race with the bottom screen's HUD starts or ends. */
+void update_3ds_race_changed(int racing) {
+    sRacing = racing;
+    if (sStarted) {
+        sTappedButton = TAP_REFRESH;
+        LightEvent_Signal(&sTapEvent);
     }
 }
 
