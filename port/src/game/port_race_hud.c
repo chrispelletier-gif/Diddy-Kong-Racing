@@ -27,8 +27,10 @@
 #include "plat/settings.h"
 #include <stdlib.h>
 
-/* The bottom screen's side (bottom_screen.c on the 3DS; the host build keeps the last one for its preview). */
+/* The bottom screen's side (plat_3ds.c; on PC bottom_preview.c draws it for DKR_BOTTOM_RACE). */
 void plat_set_race_hud(const RaceHud *hud);
+/* Whether there is a bottom screen to show the race HUD on. */
+int plat_race_hud_screen(void);
 
 extern s32 gMinimapDotOffsetX;
 
@@ -47,12 +49,8 @@ enum { RACE_HUD_TOP, RACE_HUD_BOTTOM, RACE_HUD_BOTH };
 s32 port_race_hud_setting(void) {
     if (sSetting < 0) {
         const char *env = plat_getenv("DKR_RACE_HUD");
-#ifdef __3DS__
-        s32 fallback = RACE_HUD_BOTTOM;
-#else
-        // No bottom screen on PC: the N64's HUD, unless its pictures are wanted (DKR_BOTTOM_RACE).
-        s32 fallback = plat_getenv("DKR_BOTTOM_RACE") != NULL ? RACE_HUD_BOTTOM : RACE_HUD_TOP;
-#endif
+        // Without a bottom screen (PC, unless DKR_BOTTOM_RACE wants its pictures) the N64's HUD.
+        s32 fallback = plat_race_hud_screen() ? RACE_HUD_BOTTOM : RACE_HUD_TOP;
         s32 value = env != NULL ? atoi(env) : settings_get("racehud", fallback);
         sSetting = (value < RACE_HUD_TOP || value > RACE_HUD_BOTH) ? fallback : value;
     }

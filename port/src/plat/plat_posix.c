@@ -69,6 +69,10 @@ void plat_rom_loaded(void) {
 }
 
 /* The race HUD of the 3DS bottom screen (port_race_hud.c): only drawn for DKR_BOTTOM_RACE. */
+int plat_race_hud_screen(void) {
+    return getenv("DKR_BOTTOM_RACE") != NULL;
+}
+
 void plat_set_race_hud(const RaceHud *hud) {
     const char *dir = getenv("DKR_BOTTOM_RACE");
     if (dir != NULL && hud != NULL) {
