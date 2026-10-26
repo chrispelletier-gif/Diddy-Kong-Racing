@@ -317,8 +317,15 @@ static void show_overlay(void) {
                          s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
             }
+            // The frame end's waits are shown apart from its work.
+            perFrame[PROF_PART_WALK_FRAMEEND] -=
+                perFrame[PROF_PART_END_GPU_WAIT] + perFrame[PROF_PART_PRESENT_WAIT];
+            if (perFrame[PROF_PART_WALK_FRAMEEND] < 0.0) {
+                perFrame[PROF_PART_WALK_FRAMEEND] = 0.0;
+            }
             port_log("display list walk: %.2f ms (commands %.2f, matrices %.2f, vertices %.2f, triangles %.2f, "
-                     "rectangles %.2f, draw state %.2f, texture lookups %.2f, frame end %.2f), timer %.2f ms taken out",
+                     "rectangles %.2f, draw state %.2f, texture lookups %.2f, frame end %.2f), waits at the frame "
+                     "end: GPU %.2f, screen %.2f ms, timer %.2f ms taken out",
                      perFrame[PROF_PART_WALK_COMMANDS] + perFrame[PROF_PART_WALK_MATRICES] +
                          perFrame[PROF_PART_WALK_VERTICES] + perFrame[PROF_PART_WALK_TRIANGLES] +
                          perFrame[PROF_PART_WALK_RECTS] + perFrame[PROF_PART_WALK_DRAWSTATE] +
@@ -327,6 +334,7 @@ static void show_overlay(void) {
                      perFrame[PROF_PART_WALK_VERTICES], perFrame[PROF_PART_WALK_TRIANGLES],
                      perFrame[PROF_PART_WALK_RECTS], perFrame[PROF_PART_WALK_DRAWSTATE],
                      perFrame[PROF_PART_WALK_TEXTURES], perFrame[PROF_PART_WALK_FRAMEEND],
+                     perFrame[PROF_PART_END_GPU_WAIT], perFrame[PROF_PART_PRESENT_WAIT],
                      perFrame[PROF_PART_WALK_TIMER]);
         }
     }

@@ -972,6 +972,7 @@ static int sPresentWait = -1;
 static unsigned int sPresentWaits;
 
 static void wait_for_present(void) {
+    unsigned long long start;
     int i;
     if (sPresentWait < 0) {
         const char *env = plat_getenv("DKR_PRESENT_WAIT");
@@ -981,9 +982,16 @@ static void wait_for_present(void) {
         return;
     }
     sPresentWaits++;
+    start = plat_time_ns();
     // Polled, at most two refreshes: the next VBlank shows it.
     for (i = 0; i < 70 && gspIsPresentPending(GSP_SCREEN_TOP); i++) {
         svcSleepThread(500 * 1000);
+    }
+    if (prof_enabled()) {
+        // Waiting, like waiting for the GPU, not renderer work.
+        unsigned long long ns = plat_time_ns() - start;
+        prof_add(PROF_GPU_WAIT, ns);
+        prof_part(PROF_PART_PRESENT_WAIT, ns);
     }
 }
 
@@ -2055,7 +2063,11 @@ void gfxb_end_frame(void) {
         }
         if (sOverlap) {
             // Built while the GPU drew the last frame: wait for it now, then hand this one over.
+            unsigned long long start = prof_enabled() ? plat_time_ns() : 0;
             wait_for_gpu(1);
+            if (start != 0) {
+                prof_part(PROF_PART_END_GPU_WAIT, plat_time_ns() - start);
+            }
         }
         // C3D_FrameBegin set citro3d's own command buffer: carry on in the slot's, where the frame is.
         GPUCMD_SetBuffer(tail, tailSize, tailOffset);
