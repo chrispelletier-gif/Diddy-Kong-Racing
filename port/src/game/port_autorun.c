@@ -144,18 +144,13 @@ typedef struct BenchSwitch {
     s8 usual, test;
 } BenchSwitch;
 
-/* Command list splits (P19) were measured and are off by default (#153), early depth (P20) was tried and dropped
- * (#155), and the white-line diagnostics (P28) are off for good. Now: textures in VRAM (P17), the depth clear as a
- * memory fill (P18), cache flushes as a system call (P24), VFP vector vertex transforms (P27), and the old per-draw
- * settings path (P23) and the old edge trimming (P22) against the cheaper ones. The list ends with an empty entry, so it may be otherwise empty (the
- * bench then says there is nothing to test). */
+/* Nothing to compare right now. Command list splits (P19) are off by default (#153), early depth (P20) was dropped
+ * (#155), the white-line diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches: the
+ * depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
+ * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
+ * transforms (P27) gained nothing and stay off. The bench says so instead of racing. The list ends with an empty
+ * entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
-    { "textures in VRAM (P17)", { "DKR_TEX_VRAM", NULL }, 0, 1 },
-    { "depth clear as a memory fill (P18)", { "DKR_DEPTH_FILL", NULL }, 0, 1 },
-    { "cache flush as a system call (P24)", { "DKR_SVC_FLUSH", NULL }, 0, 1 },
-    { "VFP vector vertex transforms (P27)", { "DKR_VFP_VECTORS", NULL }, 0, 1 },
-    { "per-draw settings the old way (P23 off)", { "DKR_FAST_STATE", NULL }, 1, 0 },
-    { "edge trimming clips everything (P22 off)", { "DKR_FAST_CLIP", NULL }, 1, 0 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

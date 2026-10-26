@@ -182,7 +182,8 @@ static int full_flush(void) {
  * GSPGPU_FlushDataCache asks the GSP service to write a range of the CPU's data cache out to memory for the GPU: an
  * IPC round trip to another process each time (the vertices and each command list part every frame, every texture
  * upload). svcFlushProcessDataCache does the same cache maintenance as a plain system call (roadmap item P24).
- * DKR_SVC_FLUSH=1 uses it; the switch bench races it.
+ * DKR_SVC_FLUSH=1 uses it. Switch bench #176 measured no difference (since P19 there are only a few a frame), so it
+ * stays off.
  */
 static int sSvcFlush;
 
@@ -204,6 +205,7 @@ static void gpu_flush(const void *data, u32 size) {
  * (anti-aliasing turned up, 3D) has every texture copied back to the linear heap and tries again
  * (evict_vram_textures), so the settings get the VRAM they always did. A texture written again gets new linear
  * memory first, as the CPU writes it (and the "Show" mipmap setting leaves the levels of one in VRAM as they were).
+ * Switch bench #176 measured no gain from it (the GPU's time isn't in texel fetches), so it stays off.
  */
 #define VRAM_RESERVE (TOP_WIDTH * TOP_HEIGHT * 8)
 #define PROMOTE_PER_FRAME 16
@@ -2043,8 +2045,9 @@ static void wait_for_gpu(int measure) {
  * when one changes: DKR_GPU_SPLIT (command list splits before blended draws, P19; 0 off, the default, 1 before
  * blending, 2 on every state change; see drain_before_draw), DKR_LINE_WATCH and DKR_RECENT_FRAMES (the white-line
  * diagnostics, P28), DKR_EARLY_DEPTH (the early depth test, P20), DKR_SVC_FLUSH (cache flushes as a system call,
- * P24, see gpu_flush) and DKR_DEPTH_FILL (the depth clear as a memory fill, P18, see gfxb_clear_depth). DKR_TEX_VRAM
- * (P17) is read when a texture is made instead, as the switch bench sets it while a level loads its textures.
+ * P24, see gpu_flush) and DKR_DEPTH_FILL (the depth clear as a memory fill, P18, on by default, see
+ * gfxb_clear_depth). DKR_TEX_VRAM (P17) is read when a texture is made instead, as the switch bench sets it while a
+ * level loads its textures.
  */
 static int sSwitchEpoch = -1;
 static int sSplitMode, sEarlyDepth, sDepthFill;
@@ -2061,7 +2064,7 @@ static void read_switches(void) {
     sLineWatch = plat_switch("DKR_LINE_WATCH", 0);
     sEarlyDepth = plat_switch("DKR_EARLY_DEPTH", 0) != 0;
     sSvcFlush = plat_switch("DKR_SVC_FLUSH", 0) != 0;
-    sDepthFill = plat_switch("DKR_DEPTH_FILL", 0) != 0;
+    sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
@@ -4009,11 +4012,12 @@ void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, uns
 
 /*
  * Each frame starts with a depth clear drawn over the whole screen, and the game draws its own right after (roadmap
- * item P18): two passes over every pixel. With DKR_DEPTH_FILL=1, a whole-screen depth clear before anything else is
- * drawn becomes one memory fill of the depth buffer instead, queued ahead of the frame's command list in
- * gfxb_end_frame. A depth-only fill was blamed for hanging a real New 3DS after the first frame in October, but that
- * hang turned out to be the vertex shader, which hung the GPU with plain drawn clears too; this still needs hardware
- * to prove it. Other depth clears (part of the screen, or after a draw) are drawn.
+ * item P18): two passes over every pixel. Instead, a whole-screen depth clear before anything else is drawn becomes
+ * one memory fill of the depth buffer, queued ahead of the frame's command list in gfxb_end_frame. A depth-only fill
+ * was blamed for hanging a real New 3DS after the first frame in October, but that hang turned out to be the vertex
+ * shader, which hung the GPU with plain drawn clears too; switch bench #176 ran it on a New 3DS without trouble and
+ * saved 0.4-1.6 ms of GPU time a frame. Other depth clears (part of the screen, or after a draw) are drawn.
+ * DKR_DEPTH_FILL=0 draws them all, as before.
  */
 void gfxb_clear_depth(const short rect[4]) {
     // The game's own clear leaves out the bottom row (its scissor ends at 239), which the frame's first clear has
