@@ -1896,12 +1896,12 @@ static void wait_for_gpu(int measure) {
 
 /*
  * The experimental switches the switch bench (roadmap P29) flips between races, read again at the start of a frame
- * when one changes: DKR_GPU_SPLIT (command list splits before blended draws, P19; 0 off, 1 before blending, 2 on every
- * state change), DKR_LINE_WATCH and DKR_RECENT_FRAMES (the white-line diagnostics, P28) and DKR_EARLY_DEPTH (the
- * early depth test, P20).
+ * when one changes: DKR_GPU_SPLIT (command list splits before blended draws, P19; 0 off, the default, 1 before
+ * blending, 2 on every state change; see drain_before_draw), DKR_LINE_WATCH and DKR_RECENT_FRAMES (the white-line
+ * diagnostics, P28) and DKR_EARLY_DEPTH (the early depth test, P20).
  */
 static int sSwitchEpoch = -1;
-static int sSplitMode = 1;
+static int sSplitMode;
 
 static void read_switches(void) {
     int recent, i;
@@ -1909,7 +1909,7 @@ static void read_switches(void) {
         return;
     }
     sSwitchEpoch = gPlatSwitchEpoch;
-    sSplitMode = plat_switch("DKR_GPU_SPLIT", 1);
+    sSplitMode = plat_switch("DKR_GPU_SPLIT", 0);
     sLineWatch = plat_switch("DKR_LINE_WATCH", 0);
     sEarlyDepth = plat_switch("DKR_EARLY_DEPTH", 0) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
@@ -3049,11 +3049,11 @@ static void set_scissor(const short rect[4], int flat) {
  * written. Flushing the framebuffer between them (DKR_FB_FLUSH=1, or 2 for every draw) did not help.
  *
  * DKR_GPU_SPLIT ends the command list before such a draw and starts a new one, which the GPU only begins once it has
- * finished the previous list: 1 (the default) before a blended draw that follows an unblended one, 2 whenever the
- * blending, alpha test or depth settings change, 0 never. This fixed the letter but not the shadows, which come later
- * in a race frame than the first 12 splits allowed. The GPU's command queue holds 32 entries a frame and a frame needs
- * 3 of its own, so at most MAX_DRAIN_SPLITS are made; past SMALL_DRAWS_ONLY, only for draws of a few triangles, which
- * are the ones that showed the problem.
+ * finished the previous list: 1 before a blended draw that follows an unblended one, 2 whenever the blending, alpha
+ * test or depth settings change, 0 (the default, see below) never. This fixed the letter but not the shadows, which
+ * come later in a race frame than the first 12 splits allowed. The GPU's command queue holds 32 entries a frame and a
+ * frame needs 3 of its own, so at most MAX_DRAIN_SPLITS are made; past SMALL_DRAWS_ONLY, only for draws of a few
+ * triangles, which are the ones that showed the problem.
  */
 #define MAX_DRAIN_SPLITS 24
 #define SMALL_DRAWS_ONLY 16
@@ -3064,13 +3064,19 @@ static void set_scissor(const short rect[4], int flat) {
  * writing the settings of the first blended draw twice fixes it (an empty triangle before it only sometimes did): the
  * GPU seems to miss some of the settings written right after an unblended draw. Both the split and the second write
  * are done.
+ *
+ * With the settings written twice the splits turned out not to be needed, and they cost a lot: the switch bench
+ * (issue #152, 60 fps) raced the three heaviest tracks with them off at the same average GPU and renderer times, but
+ * with no frame over 17 ms instead of 33-50 ms. So since roadmap P19 they are off by default (DKR_GPU_SPLIT=0), with
+ * the second write kept; DKR_GPU_SPLIT=1 puts them back.
  */
 
 /*
  * The log behind the character select screen came and went from frame to frame on a New 3DS (issue #25). It is the
  * first draw after the screen clears, which are full screen draws with fog, depth and culling off, and the sky drawn
  * after it would cover it wherever the GPU drew it without its depth settings. So the draw after a clear rectangle is treated like
- * the first blended draw above: the command list is split before it and its settings are written twice.
+ * the first blended draw above: its settings are written twice (and with DKR_GPU_SPLIT=1 the command list is split
+ * before it).
  * DKR_AFTER_CLEAR=0 leaves that out, for testing.
  */
 #define KEY_CLEAR (1u << 19)
