@@ -88,7 +88,7 @@ float plat_fov_tan_scale(void) {
         sStyle = env != NULL ? atoi(env) : 0;
         sStyle = sStyle >= 0 && sStyle <= 3 ? sStyle : 0;
     }
-    return sTanScale[sStyle && plat_zoomed_view() ? 3 : sStyle];
+    return sTanScale[sStyle];
 }
 
 float plat_camera_fov(float fovy) {

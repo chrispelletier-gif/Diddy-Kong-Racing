@@ -416,8 +416,9 @@ void hud_init_element(void) {
             gHudOffsetX = SCREEN_WIDTH;
 #ifdef TARGET_PORT
             // The HUD waits off the right of the N64's picture until it slides in; a wide screen shows past that edge,
-            // so it starts past the wide one instead (else the race position peeks in there during the intro).
-            gHudOffsetX += (s32) ((SCREEN_WIDTH / 2) * (plat_aspect_scale() - 1.0f) + 1.0f);
+            // so it starts past the wide one instead (else the race position peeks in there during the intro), and by
+            // as much again for the left pieces that "HUD: Screen edges" moves left (hud_edge_shift).
+            gHudOffsetX += (s32) (SCREEN_WIDTH * (plat_aspect_scale() - 1.0f) + 1.0f);
 #endif
             gHudBounceMag = 2.0f;
         } else {

@@ -200,13 +200,6 @@ float plat_camera_fov(float fovy);
 /* What the style multiplies tan(fovy / 2) by: 1 for Wide, below 1 for the narrower ones (plat_camera_fov). */
 float plat_fov_tan_scale(void);
 /*
- * Forces the "Zoomed" style while on, whatever the setting, for screens whose 3D scenery was only built as wide as the
- * N64's 4:3 picture (Player Select: wider, its planters end and the trees stand in front of the log). The game thread
- * sets it each frame (src/thread3_main.c).
- */
-void plat_set_zoomed_view(int on);
-int plat_zoomed_view(void);
-/*
  * Widescreen HUD placement (Settings > Screen > HUD, settings.txt "hudedges", else DKR_HUD_EDGES, on by default): 1
  * moves the race HUD's left and right pieces out to the wide screen's edges (src/game_ui.c), 0 keeps it in the 4:3
  * middle.

@@ -327,11 +327,6 @@ void main_game_loop(void) {
         }
     }
 
-#ifdef TARGET_PORT
-    extern s32 gCurrentMenuId;
-    // Player Select's scenery ends just past the 4:3 picture's sides, so widescreen shows it with the Zoomed style.
-    plat_set_zoomed_view(gGameMode == GAMEMODE_MENU && gCurrentMenuId == MENU_CHARACTER_SELECT);
-#endif
     switch (gGameMode) {
         case GAMEMODE_INTRO: // Pre-boot screen
             mode_intro();
