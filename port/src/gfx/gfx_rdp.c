@@ -26,7 +26,7 @@ typedef struct RspVertex {
     u8 r, g, b, a;
     u8 fog;
     u8 fogValid; // The fog factor is only worked out while G_FOG is set (see load_vertices)
-    u8 flat;     // Loaded with an orthographic matrix: drawn flat on the screen (GfxDrawState.flat)
+    u8 flat;     // Loaded with an orthographic matrix: drawn flat on the screen (1, or GFX_FLAT_PLACED for a sprite)
 } RspVertex;
 
 typedef struct Tile {
@@ -854,9 +854,10 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     // Billboard (sprite) vertices are offsets in clip space, sized for the N64's camera; on the port's wider (G3) or
     // narrower (the widescreen style's field of view) camera they are scaled to keep their size next to the 3D world.
     // Their matrix has no perspective, but they belong with their anchor: the 3D world's, or, anchored by the HUD's
-    // or a menu's orthographic matrix (the Save Options balloons, the banana counter), the flat 4:3 picture.
+    // or a menu's orthographic matrix (the Save Options balloons, the banana counter), the flat 4:3 picture, where
+    // they never stretch to a wide screen's edge as they pass the N64 one (GFX_FLAT_PLACED).
     float bbScaleY = 1.0f, bbScaleX = 1.0f;
-    u8 bbFlat = g.verts[0].flat;
+    u8 bbFlat = g.verts[0].flat ? GFX_FLAT_PLACED : 0;
     if (g.billboard && !bbFlat) {
         bbScaleY = 1.0f / plat_fov_tan_scale();
         bbScaleX = bbScaleY / plat_aspect_scale();
@@ -989,6 +990,7 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         const Triangle *t = &tris[i];
         const TexCoords *uv[3] = { &t->uv0, &t->uv1, &t->uv2 };
         u8 idx[3] = { t->vi0, t->vi1, t->vi2 };
+        u8 flat0, flat1, flat2;
         u16 *out;
 
         if (idx[0] >= MAX_VERTICES || idx[1] >= MAX_VERTICES || idx[2] >= MAX_VERTICES) {
@@ -996,7 +998,10 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         }
         // Backface culling: flag 0x40 means double sided. The game mirrors the viewport for mirror mode.
         state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : frontCull;
-        state.flat = g.verts[idx[0]].flat && g.verts[idx[1]].flat && g.verts[idx[2]].flat;
+        flat0 = g.verts[idx[0]].flat;
+        flat1 = g.verts[idx[1]].flat;
+        flat2 = g.verts[idx[2]].flat;
+        state.flat = (flat0 && flat1 && flat2) ? (flat0 | flat1 | flat2) : 0; // 1, or GFX_FLAT_PLACED (3) if a sprite
         if ((state.cullMode | (state.flat << 2)) == batchedKey && sBatchCount > 0 && batch_has_room()) {
             // Only the culling and flatness change from one triangle to the next, so the batch's state is still this
             // one.
