@@ -488,10 +488,12 @@ void render_text_string(Gfx **dList, DialogueBoxBackground *box, char *text, Ali
                 newTempY = (yAlignmentDiff * 4) + textureUly;
                 textureS *= 32;
                 textureT *= 32;
+#ifndef TARGET_PORT // Past the left edge the wide screen still shows it (the port reads a negative x).
                 if ((textureUlx < 0) && (textureLrx > 0)) {
                     textureS += (-textureUlx) * 8;
                     textureUlx = 0;
                 }
+#endif
                 if ((textureUly <= (0 - 1)) && (newTempY > 0)) {
                     textureT += -textureUly * 8;
                     textureUly = 0;

@@ -227,6 +227,9 @@ void port_set_logic_rate(s32 updateRate);
 extern const char *volatile gPortGameStage;
 /* What the sound thread is doing (for the 3DS watchdog's stall report). */
 extern const char *volatile gPortAudioStage;
+/* Sound events thrown away on a full queue, and handler runs that found their queue empty (libultra/src/audio/event.c). */
+extern volatile u32 gPortAudioEventsDropped;
+extern volatile u32 gPortAudioQueueEmpty;
 void port_describe_game_state(char *buffer, s32 size);
 
 /* Logging. */

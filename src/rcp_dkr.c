@@ -554,6 +554,22 @@ void bgdraw_texture_init(TextureHeader *tex1, TextureHeader *tex2, u32 shiftX) {
     gTexBGShiftX = shiftX * 4;
 }
 
+#ifdef TARGET_PORT
+/**
+ * One row of bgdraw_texture's tiles, carried on past the sides of the N64 screen to the edges of a wide one (the port
+ * reads a negative rectangle x), instead of cut at the sides.
+ */
+static void bgdraw_row(Gfx **dList, s32 xOffset, s32 uly, s32 texWidth, s32 texHeight) {
+    s32 margin = (s32) ((SCREEN_WIDTH / 2) * (plat_aspect_scale() - 1.0f) + 1.0f) << 2;
+    s32 ulx;
+
+    for (ulx = -xOffset; ulx > -margin; ulx -= texWidth) {}
+    for (; ulx < (SCREEN_WIDTH << 2) + margin; ulx += texWidth) {
+        gSPTextureRectangle((*dList)++, ulx, uly, ulx + texWidth, uly + texHeight, G_TX_RENDERTILE, 0, 0, 1024, 1024);
+    }
+}
+#endif
+
 /**
  * Seems to render the background screen after a race finishes while you're at the menu deciding what to do next.
  * Official Name: rcpMosaicClear
@@ -583,6 +599,9 @@ void bgdraw_texture(Gfx **dList) {
         texWidth = gTexBGTex1->width << 2;
         texHeight = gTexBGTex1->height << 2;
         for (xOffset = 0, uly = 0; uly < videoHeight; uly += texHeight) {
+#ifdef TARGET_PORT
+            bgdraw_row(dList, xOffset, uly, texWidth, texHeight);
+#else
             for (ulx = -xOffset; ulx < videoWidth; ulx += texWidth) {
                 if (ulx < 0) {
                     gSPTextureRectangle((*dList)++, 0, uly, ulx + texWidth, uly + texHeight, G_TX_RENDERTILE,
@@ -592,6 +611,7 @@ void bgdraw_texture(Gfx **dList) {
                                         1024, 1024);
                 }
             }
+#endif
             xOffset = (xOffset + gTexBGShiftX) & (texWidth - 1);
         }
     } else {
@@ -604,6 +624,9 @@ void bgdraw_texture(Gfx **dList) {
         texHeight = gTexBGTex1->height << 2;
         sumTextureHeights = (gTexBGTex2->height << 2) + texHeight;
         for (xOffset = 0; uly < videoHeight; uly += sumTextureHeights) {
+#ifdef TARGET_PORT
+            bgdraw_row(dList, xOffset, uly, texWidth, texHeight);
+#else
             for (ulx = -xOffset; ulx < videoWidth; ulx += texWidth) {
                 if (ulx < 0) {
                     gSPTextureRectangle((*dList)++, 0, uly, ulx + texWidth, uly + texHeight, G_TX_RENDERTILE,
@@ -613,6 +636,7 @@ void bgdraw_texture(Gfx **dList) {
                                         1024, 1024);
                 }
             }
+#endif
             xOffset = (xOffset + gTexBGShiftX) & (texWidth - 1);
         }
 
@@ -624,6 +648,9 @@ void bgdraw_texture(Gfx **dList) {
         uly = texHeight;
         texHeight = gTexBGTex2->height << 2;
         for (xOffset = 0; uly < videoHeight; uly += sumTextureHeights) {
+#ifdef TARGET_PORT
+            bgdraw_row(dList, xOffset, uly, texWidth, texHeight);
+#else
             for (ulx = -xOffset; ulx < videoWidth; ulx += texWidth) {
                 if (ulx < 0) {
                     gSPTextureRectangle((*dList)++, 0, uly, ulx + texWidth, uly + texHeight, G_TX_RENDERTILE,
@@ -633,6 +660,7 @@ void bgdraw_texture(Gfx **dList) {
                                         1024, 1024);
                 }
             }
+#endif
             xOffset = (xOffset + gTexBGShiftX) & (texWidth - 1);
         }
     }
@@ -731,6 +759,12 @@ void texrect_draw(Gfx **dList, DrawTexture *element, s32 xPos, s32 yPos, u8 red,
         uly = (element[i].yOffset << 2) + yPos;
         lrx = (tex->width << 2) + ulx;
         lry = (tex->height << 2) + uly;
+#ifdef TARGET_PORT
+        // Past the left edge the wide screen still shows it, so it isn't cut there (the port reads a negative x).
+        if (lrx > -(256 << 2) && lry > 0) {
+            s = 0;
+            t = 0;
+#else
         if (lrx > 0 && lry > 0) {
             s = 0;
             t = 0;
@@ -738,6 +772,7 @@ void texrect_draw(Gfx **dList, DrawTexture *element, s32 xPos, s32 yPos, u8 red,
                 s = -(ulx << 3);
                 ulx = 0;
             }
+#endif
             if (uly < 0) {
                 t = -(uly << 3);
                 uly = 0;

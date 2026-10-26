@@ -150,6 +150,14 @@ ALMicroTime sndp_voice_handler(void *node) {
                 break;
         }
         sndp->nextDelta = alEvtqNextEvent(&sndp->evtq, &sndp->nextEvent);
+#ifdef TARGET_PORT
+        // An empty queue (the API event lost on a full one) would spin here forever; start it again a frame from now.
+        if (sndp->nextEvent.type == (s16) -1) {
+            gPortAudioQueueEmpty++;
+            sndp->nextEvent.type = AL_SNDP_API_EVT;
+            sndp->nextDelta = sndp->frameTime;
+        }
+#endif
 
     } while (sndp->nextDelta == 0);
 #ifdef TARGET_PORT

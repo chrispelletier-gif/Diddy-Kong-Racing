@@ -478,6 +478,39 @@ static void voice_start(Voice *v, s32 ch) {
                     v->ratio * (f32) sSynthRate, v->mix);
 }
 
+/*
+ * After the console comes back from the HOME menu or sleep, the DSP has been unloaded and reloaded. Whether a channel
+ * went on with its sample after that is up to the firmware and libctru's bookkeeping of it; the voices that were
+ * playing are restarted from a known point instead: a looping sample from its loop (a held note or an engine goes
+ * on sounding), a one-shot sample is dropped (it would have ended anyway). Called by the backend from its frame
+ * thread once the DSP is back.
+ */
+static u32 sResyncs;
+
+void pv_resync(void) {
+    s32 i, restarted = 0, dropped = 0;
+    for (i = 0; i < PV_CHANNELS; i++) {
+        Voice *v = &sVoices[i];
+        if (!v->playing || v->sample == NULL) {
+            pv_backend_stop(i); // whatever the DSP may have carried over on an idle channel
+            continue;
+        }
+        if (v->sample->loopCount != 0) {
+            static const f32 sSilence[PV_MIX_COUNT];
+            pv_backend_play(i, NULL, 0, v->sample->loop, v->sample->loopCount, v->ratio * (f32) sSynthRate,
+                            sMuted ? sSilence : v->mix);
+            restarted++;
+        } else {
+            v->playing = FALSE;
+            pv_backend_stop(i);
+            dropped++;
+        }
+    }
+    sResyncs++;
+    plat_log("voices: resumed, %d looping voices restarted, %d one-shot voices dropped", (int) restarted,
+             (int) dropped);
+}
+
 static void apply_event(const Event *ev) {
     Voice *v = &sVoices[ev->voice];
     s32 ch = ev->voice;
@@ -565,6 +598,20 @@ void pv_frame_tick(void) {
     }
     plat_sem_wait(sLock);
     now = played_samples();
+    if (sClockStarted && (double) (sQueuedBytes / 4) - now > (double) sSynthRate / 4) {
+        /*
+         * The game is more than 0.25 s ahead of the output. The game's sound thread goes on synthesizing while the
+         * HOME menu holds the DSP (its audio tasks need no RSP, so the paused renderer does not hold it), and its
+         * frames are sized to a minimum of nearly real time, so it never drains the lead again: every later sound
+         * would play that much late, and the event ring would overflow. The output skips to the game's time.
+         */
+        double behind = (double) (sQueuedBytes / 4) - now;
+        sFrame0 = pv_backend_frames() - (u32) ((double) (sQueuedBytes / 4) * PV_OUTPUT_RATE /
+                                               ((double) sSynthRate * PV_FRAME_SAMPLES));
+        now = played_samples();
+        plat_log("voices: the output was %.0f ms behind the game (the DSP was held): skipped ahead, %d events pending",
+                 behind * 1000.0 / sSynthRate, (int) sEventCount);
+    }
     // Events whose time has come, in the order they were queued; later ones wait (they stay in order).
     n = 0;
     for (i = 0; i < sEventCount; i++) {
@@ -646,6 +693,21 @@ void pv_frame_tick(void) {
 const char *pv_describe(void) {
     static char sText[32];
     sprintf(sText, "dsp/%dv", (int) sPeakPlaying);
+    return sText;
+}
+
+/* For bug reports: the engine's state and counters in one line. */
+const char *pv_status(void) {
+    static char sText[160];
+    s32 i, playing = 0;
+    for (i = 0; i < PV_CHANNELS; i++) {
+        playing += sVoices[i].playing ? 1 : 0;
+    }
+    sprintf(sText, "%d playing (peak %d), %u events late by %.0f avg %.0f max samples, %u dropped, %u pending, "
+                   "%s, %u resumes, aux frames %u/%u",
+            (int) playing, (int) sPeakPlaying, (unsigned) sLateCount, sLateCount ? sLateSum / sLateCount : 0.0,
+            sLateMax, (unsigned) sEventsDropped, (unsigned) sEventCount, sMuted ? "muted" : "unmuted",
+            (unsigned) sResyncs, (unsigned) sAuxFrames[0], (unsigned) sAuxFrames[1]);
     return sText;
 }
 

@@ -108,7 +108,7 @@ typedef struct GfxDrawState {
     unsigned char fogEnabled;       /* Blend towards fog colour using vertex alpha */
     short fogMul, fogOffset;        /* Fog factor = clamp(z / w * fogMul + fogOffset, 0, 255), for per pixel fog */
     unsigned char cullMode;         /* 0 none, 1 back faces, 2 front faces (in screen space, CCW front) */
-    unsigned char flat;             /* Drawn flat on the screen: rectangles and orthographic triangles (see gfx_flat_x) */
+    unsigned char flat;             /* Drawn flat on the screen: rectangles and orthographic triangles (gfx_flat_mode) */
     GfxTexture *textures[2];
     short scissor[4];       /* x0, y0, x1, y1 (exclusive) */
 } GfxDrawState;
@@ -119,17 +119,35 @@ typedef struct GfxDrawState {
  * the middle, except where it reaches an edge of the N64 screen: fades, backgrounds and full screen fills are
  * stretched out to the edges of the wide one. gfx_flat_x takes a flat vertex's clip x (or a rectangle edge's, with
  * w = 1) to clip x on the wide screen, the 4:3 picture being `narrow` of its width (0.8 for 400 pixels).
+ * The `mode`:
+ *  - GFX_FLAT_STRETCH (untextured draws) also stretches what lies past an edge, as the shapes of screen wipes do.
+ *  - GFX_FLAT_KEEP (textured triangles, full width textured rectangles) keeps its shape past an edge, as the Save
+ *    Options boxes sliding off the screen must (the wide screen shows a little more of them).
+ *  - GFX_FLAT_PLACED (textured rectangles narrower than the screen: letters, icons, background tiles) never
+ *    stretches: a letter that happens to end at the edge, or an icon the game cut off there, stays its own size.
  */
-static inline float gfx_flat_x(float x, float w, float narrow) {
+#define GFX_FLAT_STRETCH 1
+#define GFX_FLAT_KEEP 2
+#define GFX_FLAT_PLACED 3
+static inline float gfx_flat_x(float x, float w, float narrow, int mode) {
     // Within a pixel and a half of the edge: the game's scissor often ends at x = 319, and a full screen draw
     // clipped to it must still reach the edge (the race finish backgrounds left the old picture at the right).
-    float edge = 0.99f * (w < 0.0f ? -w : w);
-    return (x >= edge || x <= -edge) ? x : x * narrow;
+    float aw = w < 0.0f ? -w : w, ax = x < 0.0f ? -x : x;
+    return (mode != GFX_FLAT_PLACED && ax >= 0.99f * aw && (mode == GFX_FLAT_STRETCH || ax <= 1.01f * aw)) ? x
+                                                                                                         : x * narrow;
+}
+
+/* The flat mode of a draw for gfx_flat_x: 0 when not flat. GfxDrawState.flat is 1, or GFX_FLAT_PLACED. */
+static inline int gfx_flat_mode(const GfxDrawState *state) {
+    return !state->flat                         ? 0
+           : state->flat == GFX_FLAT_PLACED     ? GFX_FLAT_PLACED
+           : state->textures[0] != NULL         ? GFX_FLAT_KEEP
+                                                : GFX_FLAT_STRETCH;
 }
 
 /* The same for an x in N64 screen pixels, returned in pixels of a screen `width` wide. */
 static inline float gfx_flat_px(float x, float narrow, float width) {
-    return (gfx_flat_x(x / (GFX_SCREEN_WIDTH / 2.0f) - 1.0f, 1.0f, narrow) + 1.0f) * (width / 2.0f);
+    return (gfx_flat_x(x / (GFX_SCREEN_WIDTH / 2.0f) - 1.0f, 1.0f, narrow, GFX_FLAT_STRETCH) + 1.0f) * (width / 2.0f);
 }
 
 /* Backend entry points. */

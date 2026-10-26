@@ -153,12 +153,24 @@ void audio_init(OSSched *sc) {
     synth_config.outputRate = 0;
     synth_config.heap = &gALHeap;
     amCreateAudioMgr(&synth_config, 12, sc);
+#ifdef TARGET_PORT
+    // Four times the events: at 60 fps the game posts twice as many per sound frame, and after a hitch it can post a
+    // few frames' worth before the sound thread runs. A full queue loses events, the music's own among them.
+    gMusicPlayer = sound_seqplayer_init(24, 120 * 4);
+    set_voice_limit(gMusicPlayer, 18);
+    gJinglePlayer = sound_seqplayer_init(16, 50 * 4);
+#else
     gMusicPlayer = sound_seqplayer_init(24, 120);
     set_voice_limit(gMusicPlayer, 18);
     gJinglePlayer = sound_seqplayer_init(16, 50);
+#endif
     gMusicSequenceData = mempool_alloc_safe(seqLength, COLOUR_TAG_CYAN);
     gJingleSequenceData = mempool_alloc_safe(seqLength, COLOUR_TAG_CYAN);
+#ifdef TARGET_PORT
+    audConfig.maxEvents = 150 * 4;
+#else
     audConfig.maxEvents = 150;
+#endif
     audConfig.maxSounds = 32;
     audConfig.maxChannels = AUDIO_CHANNELS;
     audConfig.numGroups = 1;

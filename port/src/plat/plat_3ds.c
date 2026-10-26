@@ -492,6 +492,8 @@ void plat_log_keep(void) {
 }
 
 /* Snapshots get a log file of their own: some ways of copying files off the SD card kept serving an old log.txt. */
+extern volatile u32 gPortAudioEventsDropped, gPortAudioQueueEmpty;
+
 void plat_log_copy_to(const char *path) {
     FILE *file = (path != NULL) ? fopen(path, "w") : NULL;
     FILE *old;
@@ -504,11 +506,13 @@ void plat_log_copy_to(const char *path) {
     }
     if (file != NULL) {
         struct mallinfo info = mallinfo();
-        plat_log("free memory: gpu %lu KB, heap %lu KB; texture failures %u, sound gaps %u, drops %u",
+        plat_log("free memory: gpu %lu KB, heap %lu KB; texture failures %u, sound gaps %u, drops %u, sound events "
+                 "dropped %lu, empty sound queues %lu",
                  (unsigned long) (linearSpaceFree() / 1024),
                  (unsigned long) ((info.fordblks + (__ctru_heap_size - info.arena)) / 1024),
                  gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED], gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN],
-                 gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED]);
+                 gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED], (unsigned long) gPortAudioEventsDropped,
+                 (unsigned long) gPortAudioQueueEmpty);
     }
 }
 
@@ -540,6 +544,9 @@ static void screen_copy(int first, int end) {
     u16 width, height;
     u16 *fb = (u16 *) gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &width, &height);
     int x, y;
+    if ((u32) fb >= OS_VRAM_VADDR && (u32) fb < OS_VRAM_VADDR + OS_VRAM_SIZE) {
+        return; // DKR_VRAM_SCREEN=1 (a test): the CPU may not write VRAM, so the bottom screen stays blank.
+    }
     for (x = 0; x < BS_WIDTH; x++) {
         u16 *column = fb + x * 240 + 239;
         for (y = first; y < end; y++) {
@@ -727,7 +734,9 @@ void port_describe_rcp(char *buffer, long size);
 static void log_stall_state(int seconds, unsigned idlePct, unsigned renderIdlePct) {
     char text[512];
     snprintf(text, sizeof(text), "stalled %d s: game core idle %u%%, render core idle %u%%, %lu done messages waiting, "
-             "%lu event messages lost\n", seconds, idlePct, renderIdlePct, gPortEventsWaiting, gPortEventsDropped);
+             "%lu event messages lost, %lu sound events dropped, %lu empty sound queues\n", seconds, idlePct,
+             renderIdlePct, gPortEventsWaiting, gPortEventsDropped, (unsigned long) gPortAudioEventsDropped,
+             (unsigned long) gPortAudioQueueEmpty);
     log_line("watchdog: ", text);
     port_describe_game_state(text, sizeof(text));
     log_line("watchdog: ", text);
@@ -806,6 +815,19 @@ static void watchdog(void *arg) {
             snprintf(line[1], sizeof(line[1]), "gap %u drop %u tex %u gpu %lu.%luM heap %lu.%luM",
                      now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED],
                      now[PLAT_COUNTER_TEXTURE_FAILED], gpuFree / 10, gpuFree % 10, heapFree / 10, heapFree % 10);
+        }
+        {
+            // A full sound event queue loses events (and, before the fix in csplayer.c, froze the game).
+            static u32 sLoggedDropped, sLoggedEmpty;
+            u32 dropped = gPortAudioEventsDropped, empty = gPortAudioQueueEmpty;
+            if (dropped != sLoggedDropped || empty != sLoggedEmpty) {
+                char text[96];
+                snprintf(text, sizeof(text), "sound events dropped %lu, empty sound queues %lu\n",
+                         (unsigned long) dropped, (unsigned long) empty);
+                log_line("watchdog: ", text);
+                sLoggedDropped = dropped;
+                sLoggedEmpty = empty;
+            }
         }
         {
             // Idle time is only counted while the profiler runs (a test run turns it on); 0 otherwise.
