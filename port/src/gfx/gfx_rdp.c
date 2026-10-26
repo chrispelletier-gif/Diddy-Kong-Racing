@@ -933,6 +933,18 @@ typedef struct SharedVertex {
 } SharedVertex;
 static SharedVertex sShared[MAX_VERTICES];
 
+/* Whether a flat triangle reaches both sides of the N64 screen (a full screen picture), as gfx_flat_x sees them. */
+static s32 flat_triangle_spans_screen(const u8 idx[3], const Viewport *vp) {
+    s32 k, left = FALSE, right = FALSE;
+    for (k = 0; k < 3; k++) {
+        const RspVertex *v = &g.verts[idx[k]];
+        float x = v->x * vp->scaleX + v->w * vp->transX, edge = 0.99f * (v->w < 0.0f ? -v->w : v->w);
+        left |= x <= -edge;
+        right |= x >= edge;
+    }
+    return left && right;
+}
+
 static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
@@ -1002,6 +1014,11 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         flat1 = g.verts[idx[1]].flat;
         flat2 = g.verts[idx[2]].flat;
         state.flat = (flat0 && flat1 && flat2) ? (flat0 | flat1 | flat2) : 0; // 1, or GFX_FLAT_PLACED (3) if a sprite
+        if (state.flat == 1 && tex0 && !flat_triangle_spans_screen(idx, &vp)) {
+            // Textured and narrower than the screen (a menu's wooden box): on a wide screen it keeps its shape as it
+            // slides past the N64 edge, rather than a corner near the edge snapping out to the wide one's.
+            state.flat = GFX_FLAT_PLACED;
+        }
         if ((state.cullMode | (state.flat << 2)) == batchedKey && sBatchCount > 0 && batch_has_room()) {
             // Only the culling and flatness change from one triangle to the next, so the batch's state is still this
             // one.
@@ -1132,9 +1149,11 @@ static inline float rect_x(u32 field) {
 }
 
 static void texture_rectangle(u32 w0, u32 w1, s32 flip) {
-    float lrx = rect_x(w0 >> 12) * 0.25f;
-    float lry = (w0 & 0xFFF) * 0.25f;
     float ulx = rect_x(w1 >> 12) * 0.25f;
+    // The width, not the right edge, read as is: a rectangle across 512 pixels (the HUD sliding in from the right)
+    // would otherwise turn around and cover the screen.
+    float lrx = ulx + (((w0 >> 12) - (w1 >> 12)) & 0xFFF) * 0.25f;
+    float lry = (w0 & 0xFFF) * 0.25f;
     float uly = (w1 & 0xFFF) * 0.25f;
     s32 tile = (w1 >> 24) & 7;
     float s = (s16) (g.rdpHalf1 >> 16) * (1.0f / 32.0f);
