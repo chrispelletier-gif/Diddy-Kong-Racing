@@ -31,6 +31,8 @@ int plat_3ds_colour_setting(void);
 void plat_3ds_set_screen_setting(int which, int on);
 int plat_3ds_screen_setting(int which);
 int plat_3ds_wide800_supported(void);
+void plat_3ds_set_guard_band_setting(int on);
+int plat_3ds_guard_band_setting(void);
 long port_autorun_enabled(void);
 void port_autorun_request(long start);
 int prof_user_enabled(void);
@@ -188,13 +190,16 @@ static void main_change(int i, int step) {
 
 static const MenuPage sMainPage = { "Settings", main_count, main_label, main_value, main_change, main_hint, NULL };
 
-/* The top screen (roadmap phase 6, gfx_c3d.c): widescreen, the 800 pixel mode and stereo 3D, each on or off. */
+/* The top screen (roadmap phase 6, gfx_c3d.c): widescreen, the 800 pixel mode and stereo 3D, each on or off, and
+ * edge trimming (the guard band clip, a test toggle for the blue patches in widescreen, issue #147). */
+enum { SCREEN_GUARD_BAND = 3 };
+
 static int screen_count(void) {
-    return 3;
+    return 4;
 }
 
 static const char *screen_label(int i) {
-    static const char *const sLabels[3] = { "Widescreen", "800 pixels", "Stereo 3D" };
+    static const char *const sLabels[4] = { "Widescreen", "800 pixels", "Stereo 3D", "Edge trimming" };
     return sLabels[i];
 }
 
@@ -203,6 +208,8 @@ static const char *const sWideStyles[4] = { "Off", "Wide", "Balanced", "Zoomed" 
 static void screen_value(int i, char *out, int size) {
     if (i == 0) {
         snprintf(out, size, "%s", sWideStyles[plat_3ds_screen_setting(0)]);
+    } else if (i == SCREEN_GUARD_BAND) {
+        snprintf(out, size, "%s", plat_3ds_guard_band_setting() ? "On" : "Off");
     } else {
         snprintf(out, size, "%s", plat_3ds_screen_setting(i) ? "On" : "Off");
     }
@@ -215,6 +222,8 @@ static const char *screen_hint(int i) {
         return sHints[plat_3ds_screen_setting(0)];
     } else if (i == 1) {
         return plat_3ds_wide800_supported() ? "Sharper picture while 3D is off" : "Not on this console (2DS)";
+    } else if (i == SCREEN_GUARD_BAND) {
+        return "Cuts triangles far off screen (test)";
     }
     return "With the 3D slider; no anti-aliasing in 3D";
 }
@@ -222,6 +231,8 @@ static const char *screen_hint(int i) {
 static void screen_change(int i, int step) {
     if (i == 0) {
         plat_3ds_set_screen_setting(0, (plat_3ds_screen_setting(0) + step + 4) % 4);
+    } else if (i == SCREEN_GUARD_BAND) {
+        plat_3ds_set_guard_band_setting(!plat_3ds_guard_band_setting());
     } else {
         plat_3ds_set_screen_setting(i, !plat_3ds_screen_setting(i));
     }
