@@ -874,9 +874,9 @@ static void draw_status(const State *s) {
 /*
  * During a race (race_hud.h) the top area shows the race in the layout chosen from the mockups ("standings tower"):
  *   x 4-92     the racers in race order, each as the game's portrait with the time gap to the player
- *   x 96-186   the item held (twice size), then the bananas and the last and best lap times
+ *   x 96-186   the item held, then the bananas and the last and best lap times
  *   x 190-316  the position, lap and race time, then the track's map with every racer on it
- * Everything is the game's own art at its own size (or exactly twice), so nothing is blurred. The panels and the map,
+ * Everything is the game's own art at its own size, so nothing is blurred. The panels and the map,
  * which only change with the track, are drawn once into sRaceBase; each update draws the rest over a copy of it.
  */
 #define RACE_ROWS_Y 200
@@ -919,6 +919,88 @@ static float sMapScale;
 static unsigned short sRaceBase[BS_WIDTH * RACE_ROWS_Y];
 static int sRaceBaseMade;
 
+/*
+ * The banana counter's sprite is one picture in two pieces (the stem and upper half, then the lower curve), each
+ * placed by its offset in the sprite.
+ */
+static void load_banana(void) {
+    Picture part[2];
+    int x[2], y[2], i, x0, y0, x1, y1, px, py;
+    for (i = 0; i < 2; i++) {
+        if (!load_texture_frame(ASSET_TEX2D_HUD_BANANAICON_0 + i, 0, &part[i], &x[i], &y[i])) {
+            if (i == 1) {
+                free(part[0].rgba);
+            }
+            return;
+        }
+    }
+    x0 = x[0] < x[1] ? x[0] : x[1];
+    y0 = y[0] < y[1] ? y[0] : y[1];
+    x1 = x[0] + part[0].width > x[1] + part[1].width ? x[0] + part[0].width : x[1] + part[1].width;
+    y1 = y[0] + part[0].height > y[1] + part[1].height ? y[0] + part[0].height : y[1] + part[1].height;
+    sBanana.width = x1 - x0;
+    sBanana.height = y1 - y0;
+    sBanana.rgba = calloc((unsigned long) sBanana.width * sBanana.height, 4);
+    for (i = 0; i < 2; i++) {
+        for (py = 0; sBanana.rgba != NULL && py < part[i].height; py++) {
+            for (px = 0; px < part[i].width; px++) {
+                const unsigned char *t = part[i].rgba + (py * part[i].width + px) * 4;
+                if (t[3] != 0) {
+                    memcpy(sBanana.rgba + ((y[i] - y0 + py) * sBanana.width + x[i] - x0 + px) * 4, t, 4);
+                }
+            }
+        }
+        free(part[i].rgba);
+    }
+}
+
+/*
+ * The ROM's colons are two short bars a single dark row apart (the small one's are 2x1 pixels), which read as "=" on
+ * this screen. These are two dots shaded like the digits: each row takes the colours of the same row of the digit 1
+ * (its lit edge, middle and shaded edge), with the digits' dark edge and the two dark rows under them. top is the
+ * first lit row of each dot, so the pair sits around the middle of the digits.
+ */
+static void load_colon(const Picture *digit, Picture *out, int dot, int top0, int top1) {
+    int x, y, d, size = dot + 2;
+    if (digit->rgba == NULL) {
+        return;
+    }
+    out->width = size;
+    out->height = digit->height;
+    out->rgba = calloc((unsigned long) out->width * out->height, 4);
+    for (d = 0; out->rgba != NULL && d < 2; d++) {
+        int top = d ? top1 : top0;
+        for (y = top - 1; y <= top + dot + 1 && y < out->height; y++) {
+            int first = -1, last = -1, i;
+            const unsigned char *row = digit->rgba + y * digit->width * 4;
+            // The lit run of the digit's row.
+            for (i = 0; i < digit->width; i++) {
+                if (row[i * 4 + 3] != 0 && row[i * 4] + row[i * 4 + 1] + row[i * 4 + 2] > 120) {
+                    if (first < 0) {
+                        first = i;
+                    }
+                    last = i;
+                }
+            }
+            for (x = 0; x < size; x++) {
+                unsigned char *o = out->rgba + (y * out->width + x) * 4;
+                int edgeX = x == 0 || x == size - 1, edgeY = y == top - 1 || y >= top + dot;
+                if (edgeX && edgeY) {
+                    // Rounded corners, like the digits'.
+                    continue;
+                }
+                if (edgeX || edgeY || first < 0) {
+                    o[0] = o[1] = o[2] = 0;
+                } else {
+                    int at = x == 1 ? first : x == dot ? last : (first + last) / 2;
+                    memcpy(o, row + at * 4, 3);
+                }
+                o[3] = 255;
+            }
+        }
+    }
+}
+
 static void load_race_art(void) {
     // The portraits are in a different order from the characters (Character in enums.h).
     static const int sPortraitOfCharacter[10] = { 0, 1, 2, 4, 3, 5, 6, 7, 8, 9 };
@@ -940,15 +1022,15 @@ static void load_race_art(void) {
     for (i = 0; i < 4; i++) {
         load_texture_frame(ASSET_TEX2D_HUD_PLACENUMBERSUFFIXES, i, &sSuffixes[i], NULL, NULL);
     }
-    load_texture(ASSET_TEX2D_HUD_COLON, &sColon);
-    load_texture(ASSET_TEX2D_HUD_COLONSMALL, &sSmallColon);
+    load_colon(&sDigits[1], &sColon, 3, 2, 9);
+    load_colon(&sSmallDigits[1], &sSmallColon, 2, 2, 7);
     load_texture(ASSET_TEX2D_HUD_FORWARDSLASH, &sSlash);
     load_texture(ASSET_TEX2D_HUD_LAP, &sLapLabel);
     load_texture(ASSET_TEX2D_HUD_TIME, &sTimeLabel);
     load_texture(ASSET_TEX2D_HUD_FINALSMALL, &sFinalLabel);
     load_texture(ASSET_TEX2D_HUD_LAPSMALL, &sLapSmallLabel);
     load_texture(ASSET_TEX2D_HUD_FINISHSMALL, &sFinishLabel);
-    load_texture(ASSET_TEX2D_HUD_BANANAICON_0, &sBanana);
+    load_banana();
     load_texture(ASSET_TEX2D_HUD_XSMALL, &sTimes);
 }
 
@@ -1030,7 +1112,7 @@ static int race_time(int x, int y, int frames, int small) {
     for (i = 0; i < 6; i++) {
         x = piece(&set[digits[i]], x, y, 1);
         if (i == 1 || i == 3) {
-            x = piece(colon, x, y + (small ? 3 : 4), 1);
+            x = piece(colon, x, y, 1);
         }
     }
     return x;
@@ -1288,14 +1370,14 @@ static void draw_tower(const RaceHud *hud) {
 
 static void draw_item(const RaceHud *hud) {
     int index = hud->item * 3 + hud->itemLevel;
+    // The slot, then the item at the N64's own size (40 pixels, as sharp as the art is) in it.
+    box(117, 24, 165, 72, (Colour) { 0, 0, 20, 60 }, (Colour) { 140, 180, 255, 70 });
     if (hud->item < 0 || index < 0 || index >= 15 || sItems[index].rgba == NULL) {
-        // No item: the slot, empty.
-        box(121, 20, 161, 60, (Colour) { 0, 0, 20, 60 }, (Colour) { 140, 180, 255, 70 });
         return;
     }
-    picture_scaled(&sItems[index], 101, 8, 2, 1);
+    picture_scaled(&sItems[index], 121, 28, 1, 1);
     if (hud->itemCount > 1 && hud->itemCount <= 10) {
-        piece(&sItemCounts[hud->itemCount - 1], 160, 68, 0);
+        piece(&sItemCounts[hud->itemCount - 1], 150, 60, 0);
     }
 }
 
@@ -1330,10 +1412,10 @@ static void draw_standing(const RaceHud *hud) {
 static void draw_bananas_and_laps(const RaceHud *hud) {
     int x, best = -1, i, last = hud->lapsTimed - 2;
     char label[16];
-    picture_scaled(&sBanana, MIDDLE_X0 + 8, LOWER_Y0 + 4, 1, 1);
-    x = piece(&sTimes, MIDDLE_X0 + 38, LOWER_Y0 + 20, 2);
-    x = piece(&sDigits[(hud->bananas / 10) % 10], x, LOWER_Y0 + 17, 1);
-    piece(&sDigits[hud->bananas % 10], x, LOWER_Y0 + 17, 0);
+    picture_scaled(&sBanana, MIDDLE_X0 + 6, LOWER_Y0 + 3, 1, 1);
+    x = piece(&sTimes, MIDDLE_X0 + 42, LOWER_Y0 + 17, 2);
+    x = piece(&sDigits[(hud->bananas / 10) % 10], x, LOWER_Y0 + 14, 1);
+    piece(&sDigits[hud->bananas % 10], x, LOWER_Y0 + 14, 0);
     // The last finished lap (or the lap so far, on the first) and the best finished lap.
     for (i = 0; i < hud->lapsTimed - 1 && i < RACE_HUD_LAPS; i++) {
         if (best < 0 || hud->lapTimes[i] < best) {
@@ -1342,12 +1424,12 @@ static void draw_bananas_and_laps(const RaceHud *hud) {
     }
     if (last >= 0) {
         snprintf(label, sizeof(label), "Lap %d", last + 1);
-        text(FONT_SMALL, MIDDLE_X0 + 8, LOWER_Y0 + 48, label, HINT, 1);
-        race_time(MIDDLE_X0 + 8, LOWER_Y0 + 60, hud->lapTimes[last], 1);
+        text(FONT_SMALL, MIDDLE_X0 + 44, LOWER_Y0 + 42, label, HINT, 1);
+        race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[last], 1);
     } else if (hud->lapsTimed > 0) {
         snprintf(label, sizeof(label), "Lap %d", hud->lapsTimed);
-        text(FONT_SMALL, MIDDLE_X0 + 8, LOWER_Y0 + 48, label, HINT, 1);
-        race_time(MIDDLE_X0 + 8, LOWER_Y0 + 60, hud->lapTimes[hud->lapsTimed - 1], 1);
+        text(FONT_SMALL, MIDDLE_X0 + 44, LOWER_Y0 + 42, label, HINT, 1);
+        race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[hud->lapsTimed - 1], 1);
     }
     text(FONT_SMALL, MIDDLE_X0 + 8, LOWER_Y0 + 76, "Best lap", HINT, 1);
     if (best >= 0) {

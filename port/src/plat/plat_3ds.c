@@ -684,6 +684,10 @@ void update_3ds_race_changed(int racing);
  * The race HUD (race_hud.h), from the game thread once a frame, or NULL after a race. The screen's thread draws the
  * newest one when it gets to it; the panel's buttons change (Pause joins Settings) when a race starts or ends.
  */
+int plat_race_hud_screen(void) {
+    return 1;
+}
+
 void plat_set_race_hud(const RaceHud *hud) {
     static int sRacing;
     static RaceHud sLast;
