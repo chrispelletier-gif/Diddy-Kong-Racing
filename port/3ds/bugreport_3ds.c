@@ -707,6 +707,7 @@ static void send_test_results(void) {
     add_file(&report, "gpu_bench_results.csv");
     add_file(&report, "quick_test_results.csv");
     add_file(&report, "boss_test_results.csv");
+    add_file(&report, "switch_bench_results.csv");
     add_file(&report, "autorun_problems.txt");
     add_file(&report, "env.txt");
     plat_log_recent(recent, sizeof(recent));

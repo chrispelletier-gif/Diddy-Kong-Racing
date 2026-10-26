@@ -242,13 +242,13 @@ static const MenuPage sScreenPage = {
     "Screen", screen_count, screen_label, screen_value, screen_change, screen_hint, "Changes show from the next frame"
 };
 
-/* The test run (port_autorun.c): stop the one running, or start one of its four kinds. */
+/* The test run (port_autorun.c): stop the one running, or start one of its five kinds. */
 static int test_count(void) {
-    return port_autorun_enabled() ? 1 : 4;
+    return port_autorun_enabled() ? 1 : 5;
 }
 
 static const char *test_label(int i) {
-    static const char *const sStart[4] = { "Full test", "Quick test", "Boss fights", "GPU bench" };
+    static const char *const sStart[5] = { "Full test", "Quick test", "Boss fights", "GPU bench", "Switch bench" };
     return port_autorun_enabled() ? "Stop the test run" : sStart[i];
 }
 
@@ -259,8 +259,9 @@ static void test_value(int i, char *out, int size) {
 }
 
 static const char *test_hint(int i) {
-    static const char *const sStart[4] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
-                                           "All 10 boss races once, ~30 minutes", "3 heavy tracks x 8 GPU settings, ~50 min" };
+    static const char *const sStart[5] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
+                                           "All 10 boss races once, ~30 minutes", "3 heavy tracks x 8 GPU settings, ~50 min",
+                                           "3 heavy tracks x 4 switch sets, ~25 min" };
     return port_autorun_enabled() ? "The results so far go out as a report" : sStart[i];
 }
 
@@ -269,8 +270,9 @@ static void test_change(int i, int step) {
     if (port_autorun_enabled()) {
         port_autorun_request(0);
     } else {
-        // port_autorun_request: 1 the full run, 3 the quick test, 4 the boss fights, 2 the GPU benchmark.
-        static const long sRequests[4] = { 1, 3, 4, 2 };
+        // port_autorun_request: 1 the full run, 3 the quick test, 4 the boss fights, 2 the GPU benchmark, 5 the switch
+        // bench.
+        static const long sRequests[5] = { 1, 3, 4, 2, 5 };
         port_autorun_request(sRequests[i]);
     }
     // The run turns on or off at the game's next frame.

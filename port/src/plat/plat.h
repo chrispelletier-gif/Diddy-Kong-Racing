@@ -84,6 +84,17 @@ int plat_snprintf(char *buf, size_t size, const char *fmt, ...) __attribute__((f
 /* Returns an environment variable / configuration value, or NULL. */
 const char *plat_getenv(const char *name);
 
+/*
+ * Experimental switches (roadmap P29): a number from the environment / env.txt, or fallback when it isn't set, unless
+ * the switch bench has overridden it for a race with plat_override_switch (value -1 drops the override, and
+ * plat_clear_switch_overrides drops them all). gPlatSwitchEpoch counts the changes, so code that keeps a switch's
+ * value reads it again when the epoch moves on (the renderer does at the start of each frame).
+ */
+int plat_switch(const char *name, int fallback);
+void plat_override_switch(const char *name, int value);
+void plat_clear_switch_overrides(void);
+extern volatile int gPlatSwitchEpoch;
+
 /* Scripted input (DKR_INPUT) for automated tests. Returns nonzero when a script is set. */
 int plat_input_script(int poll, unsigned short *buttons, signed char *stickX, signed char *stickY);
 

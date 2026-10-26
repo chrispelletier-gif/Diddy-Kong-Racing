@@ -206,6 +206,7 @@ static struct {
     u8 blend;
     u8 alphaTest, alphaRef;
     u8 depthEnable, depthFunc, depthMask;
+    u8 earlyDepth;
     u8 decal;
     u8 cull;
     short scissor[4];
@@ -914,6 +915,7 @@ static char sCapturePath[256];
 static u8 *sRecent[RECENT_SLOTS];
 static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS], sRecentBpp[RECENT_SLOTS], sRecentEyes[RECENT_SLOTS];
 static int sRecentCount, sRecentNext, sRecentFrozen;
+static int sRecentOn; // DKR_RECENT_FRAMES (read_switches)
 
 /* Called before C3D_FrameEnd with the screen buffer the frame's display transfer will write (the back buffer until
  * citro3d swaps it in once the GPU is done), and after it to queue the copy. */
@@ -1052,21 +1054,19 @@ static void log_timing(void) {
     }
 }
 
+/* Takes the ring's slots, as many as fit; called at start-up, or when the switch bench turns the ring on. Slots once
+ * taken are kept. */
 static void allocate_recent_frames(void) {
-    const char *env = plat_getenv("DKR_RECENT_FRAMES");
-    sRecentCount = 0;
     // Leave most of linear memory for textures (each slot is 576 KB).
-    while (env != NULL && atoi(env) != 0) {
-        if (sRecentCount == RECENT_SLOTS || linearSpaceFree() < RECENT_MAX_BYTES + 14 * 1024 * 1024) {
-            break;
-        }
+    while (sRecentCount < RECENT_SLOTS && linearSpaceFree() >= RECENT_MAX_BYTES + 14 * 1024 * 1024) {
         sRecent[sRecentCount] = linearAlloc(RECENT_MAX_BYTES);
         if (sRecent[sRecentCount] == NULL) {
             break;
         }
         sRecentFrame[sRecentCount++] = -1;
     }
-    plat_log("recent frames for bug reports: %d slots, one frame in %d", sRecentCount, RECENT_EVERY);
+    plat_log("recent frames for bug reports: %d slots, one frame in %d (%lu KB of linear memory left)", sRecentCount,
+             RECENT_EVERY, (unsigned long) (linearSpaceFree() / 1024));
 }
 
 /*
@@ -1079,7 +1079,7 @@ static void allocate_recent_frames(void) {
 #define LINE_WATCH_SAMPLES (TOP_HEIGHT / 8)
 #define LINE_WATCH_FOUND (LINE_WATCH_SAMPLES / 2)
 void bugreport_request(void);
-static int sLineWatch = -1, sLineReported, sLineLogged, sLineBest, sLineBestColumn;
+static int sLineWatch, sLineReported, sLineLogged, sLineBest, sLineBestColumn;
 
 /* How much a picture looks like it holds a bright vertical line: the most pixels in one screen column (a row here)
  * that are clearly brighter than the columns 3 to each side, checking every step-th pixel down it. */
@@ -1134,10 +1134,6 @@ static void watch_for_line(void) {
     u8 *eyes[3] = { sRecentScreen, sRecentRight, sShownScreen };
     static const char *const names[3] = { "left eye", "right eye", "shown picture" };
     int e, where, score;
-    if (sLineWatch < 0) {
-        const char *env = plat_getenv("DKR_LINE_WATCH");
-        sLineWatch = env != NULL ? atoi(env) : 0;
-    }
     if (!sLineWatch || sRecentScreenRows == 0 || sRecentFrozen) {
         return;
     }
@@ -1189,7 +1185,7 @@ static void record_recent_frame(void) {
     u8 *slot;
 
     record_timing();
-    if (sRecentCount <= 0 || sRecentFrozen || sFrameCount % RECENT_EVERY != 0 || sRecentScreen == NULL ||
+    if (!sRecentOn || sRecentCount <= 0 || sRecentFrozen || sFrameCount % RECENT_EVERY != 0 || sRecentScreen == NULL ||
         bytes == 0 || bytes > RECENT_MAX_BYTES) {
         return;
     }
@@ -1537,7 +1533,9 @@ static void alloc_frame_slots(void) {
              (unsigned long) (sCmdWords * 4 / 1024), (unsigned long) (linearSpaceFree() / 1024));
     sVbo = sSlots[0].vbo;
     sIbo = sSlots[0].ibo;
-    allocate_recent_frames();
+    if (plat_switch("DKR_RECENT_FRAMES", 0)) {
+        allocate_recent_frames();
+    }
 }
 
 /* Ends the part of the command list so far, which the GPU then finishes before it starts on the rest. */
@@ -1848,6 +1846,39 @@ static void wait_for_gpu(int measure) {
     }
 }
 
+/*
+ * The experimental switches the switch bench (roadmap P29) flips between races, read again at the start of a frame
+ * when one changes: DKR_GPU_SPLIT (command list splits before blended draws, P19; 0 off, 1 before blending, 2 on every
+ * state change), DKR_LINE_WATCH and DKR_RECENT_FRAMES (the white-line diagnostics, P28) and DKR_EARLY_DEPTH (the
+ * early depth test, P20).
+ */
+static int sSwitchEpoch = -1;
+static int sSplitMode = 1, sEarlyDepth;
+
+static void read_switches(void) {
+    int recent, i;
+    if (sSwitchEpoch == gPlatSwitchEpoch) {
+        return;
+    }
+    sSwitchEpoch = gPlatSwitchEpoch;
+    sSplitMode = plat_switch("DKR_GPU_SPLIT", 1);
+    sLineWatch = plat_switch("DKR_LINE_WATCH", 0);
+    sEarlyDepth = plat_switch("DKR_EARLY_DEPTH", 0) != 0;
+    recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
+    if (recent && sRecentCount == 0) {
+        allocate_recent_frames();
+    }
+    if (recent != sRecentOn) {
+        for (i = 0; i < sRecentCount; i++) {
+            sRecentFrame[i] = -1; // Old pictures, from before it was turned off.
+        }
+        sRecentOn = recent;
+    }
+    plat_log("switches: command list split %s, line watch %d, recent frames %s (%d slots), early depth test %s",
+             sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes", sLineWatch,
+             sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off");
+}
+
 void gfxb_start_frame(void) {
     FrameSlot *slot;
     // No vblank throttling here: the emulated VI already paces the game.
@@ -1893,6 +1924,7 @@ void gfxb_start_frame(void) {
     C3D_SetFrameBuf(&sTarget->frameBuf);
     bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
+    read_switches();
     forget_gpu_state();
     sMipmapsUsed = sMipmapSetting != 0;
     sMipmapsShown = sMipmapSetting == 2;
@@ -3001,7 +3033,7 @@ static void set_scissor(const short rect[4], int flat) {
 /* Returns whether the draw's settings are to be written twice: a draw whose blending or depth settings differ from
  * the draw before, or the first draw of a frame. */
 static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
-    static int sFlushMode = -1, sSplitMode = -1, sAfterClear = -1, sRewrite = -1;
+    static int sFlushMode = -1, sAfterClear = -1, sRewrite = -1;
     static unsigned int sLastKey = ~0u;
     unsigned int key;
     int split, first;
@@ -3009,11 +3041,8 @@ static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
     if (sFlushMode < 0) {
         const char *env = plat_getenv("DKR_FB_FLUSH");
         sFlushMode = env != NULL ? atoi(env) : 0;
-        env = plat_getenv("DKR_GPU_SPLIT");
-        sSplitMode = env != NULL ? atoi(env) : 1;
-        plat_log("framebuffer flush between draws: %s; command list split: %s",
-                 sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always",
-                 sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes");
+        plat_log("framebuffer flush between draws: %s",
+                 sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always");
         env = plat_getenv("DKR_AFTER_CLEAR");
         sAfterClear = env != NULL ? atoi(env) : 1;
         env = plat_getenv("DKR_REWRITE");
@@ -3078,7 +3107,7 @@ static int apply_alpha_diagnostic(const GfxDrawState *state) {
 
 static void set_draw_state(const GfxDrawState *state) {
     static int sNoCull = -1;
-    u8 depthEnable, depthFunc, depthMask, cull;
+    u8 depthEnable, depthFunc, depthMask, cull, early;
 
     if (!sGpu.known || state->blend != sGpu.blend) {
         switch (state->blend) {
@@ -3118,6 +3147,13 @@ static void set_draw_state(const GfxDrawState *state) {
         sGpu.depthEnable = depthEnable;
         sGpu.depthFunc = depthFunc;
         sGpu.depthMask = depthMask;
+    }
+    // Early depth (P20) only where the depth test is the usual one: it would hide what a draw without the test (the
+    // sky, the HUD) puts in front. Not in 3D, where both eyes' draws share the one early depth buffer.
+    early = sEarlyDepth && !sStereo && !sDepthOnly && depthEnable && depthFunc == GPU_GEQUAL;
+    if (!sGpu.known || early != sGpu.earlyDepth) {
+        C3D_EarlyDepthTest(early, GPU_EARLYDEPTH_GEQUAL, 0);
+        sGpu.earlyDepth = early;
     }
     if (!sGpu.known || state->decal != sGpu.decal) {
         // Widescreen's camera cuts 4 times closer (CAMERA_NEAR), which spreads depth 4 times as far: decals are pulled
@@ -3561,6 +3597,10 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
     sDepthOnly = depthOnly;
     sClearing = 1;
     gfxb_draw_triangles(&state, v, 2);
+    if (depthOnly && sEarlyDepth && !sStereo) {
+        // The early depth buffer is cleared with the depth buffer, to the farthest depth (0, as in the depth buffer).
+        GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+    }
     sDepthOnly = 0;
     sClearing = 0;
 }
