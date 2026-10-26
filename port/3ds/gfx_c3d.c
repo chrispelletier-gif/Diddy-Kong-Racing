@@ -3186,10 +3186,12 @@ void C3Di_UpdateContext(void);
  * lap, are cut down to a band twice the screen's size before they reach the GPU, as the N64 does (its guard band).
  * The 3DS's GPU can draw such triangles with stray lines of pixels, here a white line down the middle of the screen.
  * Flat draws are cut before gfx_flat_x widens them, which moves the texture a little only on what crosses the band.
- * DKR_GUARD_BAND=0 = old. */
+ * Off by default: the white line turned out to be the banana counter's sprite overrunning its display list (PR #136),
+ * and on hardware the trimmed triangles lost the hub's grass in Wide and Balanced (#147), though the cut is exact on
+ * the PC. Settings > Screen > Edge trimming On (or DKR_GUARD_BAND=1) turns it on. */
 #define GUARD_BAND 2.0f
 
-static int sGuardBand = -1;
+static volatile int sGuardBand = -1; // Settings > Screen > Edge trimming (settings.txt "guardband"), else DKR_GUARD_BAND
 static GfxVertex *sClipVerts;
 static u16 *sClipIndices;
 static u8 *sClipOutside; // For each vertex of the draw: outside the guard band
@@ -3241,6 +3243,20 @@ static int grow(void **buf, int *capacity, int needed, size_t size) {
     return 1;
 }
 
+/* The Screen page's Edge trimming row: 1 trims to the guard band, 0 sends triangles as the game made them. */
+void plat_3ds_set_guard_band_setting(int on) {
+    sGuardBand = on != 0;
+    settings_set("guardband", sGuardBand);
+}
+
+int plat_3ds_guard_band_setting(void) {
+    if (sGuardBand < 0) {
+        const char *env = plat_getenv("DKR_GUARD_BAND");
+        sGuardBand = settings_get("guardband", env != NULL && atoi(env) != 0) != 0;
+    }
+    return sGuardBand;
+}
+
 /*
  * Clips the triangles that leave the guard band to it. Each vertex is tested once; when none is outside, the draw is
  * left as it is. Otherwise the vertices are copied, and the clipped triangles' new corners added after them, into
@@ -3253,11 +3269,7 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
     const u16 *idx = *indices;
     int i, j, k, n, plane, count = *numTriangles * 3, used, usedIdx, any = 0;
 
-    if (sGuardBand < 0) {
-        const char *env = plat_getenv("DKR_GUARD_BAND");
-        sGuardBand = env == NULL || atoi(env) != 0;
-    }
-    if (!sGuardBand || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
+    if (!plat_3ds_guard_band_setting() || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
         return;
     }
     for (i = 0; i < *numVerts; i++) {
