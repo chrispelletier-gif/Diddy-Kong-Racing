@@ -190,7 +190,6 @@ AccessControlInfo:
     - mcu::HWC
   SystemSaveDataId1       : 0x00020300
   SystemSaveDataId2       : 0x00020400
-  Affinity                : 0
 
 SystemControlInfo:
   SaveDataSize            : 0KB
