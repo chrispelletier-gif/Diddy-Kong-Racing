@@ -27,6 +27,9 @@
 #include "video.h"
 #include "waves.h"
 #include "weather.h"
+#ifdef TARGET_PORT
+#include "port.h"
+#endif
 
 // Maximum size for a level model is 522.5 KiB
 #define LEVEL_MODEL_MAX_SIZE 0x82A00
@@ -332,6 +335,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
     if (gCurrentLevelHeader2->race_type == RACETYPE_CUTSCENE_1 || gCurrentLevelHeader2->unkBD) {
         gAntiAliasing = TRUE;
     }
+
     if (gCurrentLevelHeader2->skyDome == -1) {
         i = (gCurrentLevelHeader2->unkA4->width << 9) - 1;
         gCurrentLevelHeader2->unkA8 =
@@ -376,9 +380,21 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         apply_fog(gSceneCurrentPlayerID);
         gDPPipeSync(gTrackDL++);
         set_active_camera(gSceneCurrentPlayerID);
+#ifdef TARGET_PORT
+        port_portrait_camera(cam_get_active_camera());
+        if (port_portrait_active()) {
+            gSPFogPosition(gTrackDL++, 996, 1000); // No fog or shadows on the portrait.
+            gDisableShadows = TRUE;
+        }
+#endif
         viewport_main(&gTrackDL, &gTrackMtxPtr);
         func_8002A31C();
         // Show detailed skydome in single player.
+#ifdef TARGET_PORT
+        if (port_portrait_active()) {
+            mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
+        } else
+#endif
         if (numViewports < 2) {
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
             if (gCurrentLevelHeader2->skyDome == -1) {
@@ -396,11 +412,18 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         initialise_player_viewport_vars(updateRate);
         weather_clip_planes(-1, -512);
         // Show weather effects in single player.
-        if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2) {
+        if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2
+#ifdef TARGET_PORT
+            && !port_portrait_active()
+#endif
+        ) {
             weather_update(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, &gTrackTriPtr, tempUpdateRate);
         }
         lensflare_override(cam_get_active_camera());
         lensflare_render(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, cam_get_active_camera());
+#ifdef TARGET_PORT
+        if (!port_portrait_active())
+#endif
         hud_render_player(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, get_racer_object_by_port(gSceneCurrentPlayerID),
                           updateRate);
     }
@@ -1908,6 +1931,11 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
     s32 endPos;
     s32 batchFlags;
     s32 textureFlags;
+#ifdef TARGET_PORT
+    if (port_portrait_active()) {
+        return; // The portrait camera shows the model alone.
+    }
+#endif
     //! @bug: batchInfo is uninitalized
     numberVertices = (batchInfo + 1)->verticesOffset - batchInfo->verticesOffset;
     segment = &gCurrentLevelModel->segments[segmentId];

@@ -3698,6 +3698,11 @@ void render_object(Gfx **dList, Mtx **mtx, Vertex **verts, Object *obj) {
     if (obj->trans.flags & (OBJ_FLAGS_INVISIBLE | OBJ_FLAGS_SHADOW_ONLY)) {
         return;
     }
+#ifdef TARGET_PORT
+    if (port_portrait_hides(obj)) {
+        return;
+    }
+#endif
     update_object_stack_trace(OBJECT_DRAW, obj->objectID);
     gObjectCurrDisplayList = *dList;
     gObjectCurrMatrix = *mtx;

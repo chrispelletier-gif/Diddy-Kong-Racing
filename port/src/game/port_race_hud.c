@@ -174,6 +174,27 @@ static s32 gap(s32 index, s32 playerIndex, s32 checkpoints) {
 }
 
 /* Once a game frame (src/thread3_main.c), with the number of retraces it took. */
+/* The boss or Taj a racer is, by its vehicle (gBossVehicles in objects.c; Taj rides the carpet in his challenges). */
+static s8 special_racer(Object_Racer *r) {
+    switch (r->vehicleID) {
+        case VEHICLE_TRICKY:
+            return RACE_HUD_TRICKY;
+        case VEHICLE_BLUEY:
+            return RACE_HUD_BLUEY;
+        case VEHICLE_SMOKEY:
+        case VEHICLE_PTERODACTYL:
+            return RACE_HUD_SMOKEY;
+        case VEHICLE_BUBBLER:
+            return RACE_HUD_BUBBLER;
+        case VEHICLE_WIZPIG:
+        case VEHICLE_ROCKET:
+            return RACE_HUD_WIZPIG;
+        case VEHICLE_CARPET:
+            return is_taj_challenge() ? RACE_HUD_TAJ : RACE_HUD_NOT_SPECIAL;
+    }
+    return RACE_HUD_NOT_SPECIAL;
+}
+
 void port_race_hud_frame(s32 updateRate) {
     static const RaceHud sEmpty;
     static RaceHud hud;
@@ -235,6 +256,11 @@ void port_race_hud_frame(s32 updateRate) {
             }
             out = &hud.racers[hud.racerCount++];
             out->character = r->characterId;
+            out->special = special_racer(r);
+            if (out->special == RACE_HUD_NOT_SPECIAL && r->vehicleID >= VEHICLE_BOSSES) {
+                // A boss vehicle with no portrait of its own: its characterId is a stand-in, not its face.
+                out->character = -1;
+            }
             out->player = racers[i] == player;
             out->gap = (r->racerIndex >= 0 && r->racerIndex < RACE_HUD_RACERS)
                            ? gap(r->racerIndex, me->racerIndex, checkpoints)

@@ -13,8 +13,21 @@
 /* A gap of a whole lap or more is sent as this plus the number of laps. */
 #define RACE_HUD_LAPPED 0x40000000
 
+/* Racers the ROM has no portrait for: the bosses and Taj (RaceHudRacer.special). */
+enum {
+    RACE_HUD_NOT_SPECIAL = -1,
+    RACE_HUD_TRICKY,
+    RACE_HUD_BLUEY,
+    RACE_HUD_BUBBLER,
+    RACE_HUD_SMOKEY,
+    RACE_HUD_WIZPIG,
+    RACE_HUD_TAJ,
+    RACE_HUD_SPECIALS
+};
+
 typedef struct RaceHudRacer {
     signed char character; /* The game's Character (enums.h). */
+    signed char special;   /* A boss or Taj (drawn instead of character), or RACE_HUD_NOT_SPECIAL. */
     signed char player;    /* The player's own kart. */
     /*
      * Where the racer is on the track's map: pixels of the map sprite (y down), times 4, relative to the sprite's

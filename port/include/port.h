@@ -224,6 +224,17 @@ s32 port_race_hud_setting(void);
 void port_set_race_hud_setting(s32 value);
 
 /*
+ * Portrait camera (port/src/game/port_portrait.c, DKR_PORTRAIT): a test helper that frames one model alone, for drawing
+ * portraits from the game's 3D models. src/tracks.c places the camera and leaves out the track and sky; render_object
+ * leaves out every other object.
+ */
+struct Object;
+struct Camera;
+s32 port_portrait_active(void);
+s32 port_portrait_hides(struct Object *obj);
+void port_portrait_camera(struct Camera *cam);
+
+/*
  * The port's settings in the game's menus (src/menu.c, plat/options.h): fills in the Options menu's rows when the
  * menu text is loaded, and says whether a category's page is open (over the Options menu or the pause menu).
  */

@@ -1001,6 +1001,66 @@ static void load_colon(const Picture *digit, Picture *out, int dot, int top0, in
     }
 }
 
+
+/*
+ * The bosses' and Taj's portraits. The ROM has none, and drawn ones cannot be shipped, so they are the player's own:
+ * 40x40 PNGs like the game's portraits (frame included), in sdmc:/3ds/dkr/portraits (port/tools/portraits makes
+ * them). A file that is missing, is not a PNG or is any other size is not used, and that racer gets a name box.
+ */
+#define PORTRAIT_SIZE 40
+#define PORTRAIT_FILE_MAX (256 * 1024)
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#define STBI_MAX_DIMENSIONS PORTRAIT_SIZE
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wall"
+#pragma GCC diagnostic ignored "-Wextra"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#include "third_party/stb_image.h"
+#pragma GCC diagnostic pop
+
+static const char *const sSpecialNames[RACE_HUD_SPECIALS] = { "tricky", "bluey", "bubbler", "smokey", "wizpig", "taj" };
+static Picture sSpecialPortraits[RACE_HUD_SPECIALS]; /* Halved to 20x20; rgba NULL: the name box. */
+
+static void load_special_portrait(int index, Picture *out) {
+    char path[256];
+    unsigned char *file, *rgba;
+    long size;
+    int w, h, channels;
+    FILE *f;
+    snprintf(path, sizeof(path), "%s/portraits/%s.png", plat_data_dir(), sSpecialNames[index]);
+    if ((f = fopen(path, "rb")) == NULL) {
+        return;
+    }
+    file = NULL;
+    if (fseek(f, 0, SEEK_END) == 0 && (size = ftell(f)) > 0 && size <= PORTRAIT_FILE_MAX && fseek(f, 0, SEEK_SET) == 0 &&
+        (file = malloc(size)) != NULL && fread(file, 1, size, f) == (size_t) size) {
+        // The size is checked from the header before anything is decoded.
+        if (!stbi_info_from_memory(file, (int) size, &w, &h, &channels) || w != PORTRAIT_SIZE || h != PORTRAIT_SIZE) {
+            plat_log("portrait %s: not a %dx%d PNG, using the name box\n", path, PORTRAIT_SIZE, PORTRAIT_SIZE);
+        } else if ((rgba = stbi_load_from_memory(file, (int) size, &w, &h, &channels, 4)) == NULL ||
+                   w != PORTRAIT_SIZE || h != PORTRAIT_SIZE) {
+            plat_log("portrait %s: could not be read, using the name box\n", path);
+            stbi_image_free(rgba);
+        } else {
+            out->width = w;
+            out->height = h;
+            out->rgba = malloc((unsigned long) w * h * 4);
+            if (out->rgba != NULL) {
+                memcpy(out->rgba, rgba, (unsigned long) w * h * 4);
+                halve(out);
+            }
+            stbi_image_free(rgba);
+        }
+    }
+    free(file);
+    fclose(f);
+}
+
 static void load_race_art(void) {
     // The portraits are in a different order from the characters (Character in enums.h).
     static const int sPortraitOfCharacter[10] = { 0, 1, 2, 4, 3, 5, 6, 7, 8, 9 };
@@ -1032,6 +1092,9 @@ static void load_race_art(void) {
     load_texture(ASSET_TEX2D_HUD_FINISHSMALL, &sFinishLabel);
     load_banana();
     load_texture(ASSET_TEX2D_HUD_XSMALL, &sTimes);
+    for (i = 0; i < RACE_HUD_SPECIALS; i++) {
+        load_special_portrait(i, &sSpecialPortraits[i]);
+    }
 }
 
 /* A picture at a whole-number size (nearest pixel, so it stays sharp), with a one pixel dark outline. */
@@ -1340,24 +1403,53 @@ static void make_race_base(const RaceHud *hud) {
     sClipEnd = end;
 }
 
+/* The colours of the bosses and Taj, for their frames and map dots (RaceHudRacer.special). */
+static const Colour sSpecialColours[RACE_HUD_SPECIALS] = {
+    { 0, 175, 0, 255 }, { 0, 128, 255, 255 }, { 255, 64, 32, 255 }, { 255, 128, 0, 255 }, { 255, 128, 190, 255 },
+    { 160, 64, 255, 255 },
+};
+
+/* A racer's colour; 0 if it has neither a portrait nor a colour (an unknown character). */
+static int racer_colour(const RaceHudRacer *r, Colour *out) {
+    if (r->special > RACE_HUD_NOT_SPECIAL && r->special < RACE_HUD_SPECIALS) {
+        *out = sSpecialColours[r->special];
+        return 1;
+    }
+    if (r->special == RACE_HUD_NOT_SPECIAL && r->character >= 0 && r->character < 10) {
+        *out = sCharacterColours[r->character];
+        return 1;
+    }
+    return 0;
+}
+
 static void draw_tower(const RaceHud *hud) {
     int i;
     for (i = 0; i < hud->racerCount && i < RACE_HUD_RACERS; i++) {
         const RaceHudRacer *r = &hud->racers[i];
         int y = TOWER_ROW_Y + i * TOWER_ROW_HEIGHT, character = r->character;
         char number[4], gap[16];
+        Colour colour;
         if (r->player) {
             // The player's row: lit in the HUD's gold.
             box(TOWER_X0 + 2, y - 1, TOWER_X1 - 2, y + TOWER_ROW_HEIGHT - 1, (Colour) { 255, 200, 40, 70 }, GOLD);
         }
         snprintf(number, sizeof(number), "%d", i + 1);
         text_centred(FONT_FUN, TOWER_X0 + 3, TOWER_X0 + 19, y + 5, number, WHITE, 1);
-        if (character >= 0 && character < 10) {
+        if (racer_colour(r, &colour)) {
             // The portrait in a frame of the racer's map colour, so the map's dots can be matched to faces.
-            fill(25, y + 1, 47, y + 23, sCharacterColours[character]);
+            fill(25, y + 1, 47, y + 23, colour);
             fill(24, y, 48, y + 1, (Colour) { 0, 4, 30, 200 });
             fill(24, y + 23, 48, y + 24, (Colour) { 0, 4, 30, 200 });
-            picture(&sPortraits[character], 26, y + 2);
+            if (r->special == RACE_HUD_NOT_SPECIAL) {
+                picture(&sPortraits[character], 26, y + 2);
+            } else if (sSpecialPortraits[r->special].rgba != NULL) {
+                picture(&sSpecialPortraits[r->special], 26, y + 2);
+            } else {
+                // The name box: the boss's initial on its colour.
+                char initial[2] = { (char) (sSpecialNames[r->special][0] - 'a' + 'A'), 0 };
+                fill(26, y + 2, 46, y + 22, (Colour) { 0, 20, 90, 255 });
+                text_centred(FONT_FUN, 26, 46, y + 5, initial, WHITE, 1);
+            }
         }
         if (r->player) {
             text(FONT_SMALL, 53, y + 6, "You", YELLOW, 1);
@@ -1447,9 +1539,10 @@ static void draw_map_markers(const RaceHud *hud) {
     // The others first, last place first, so the leaders are on top; then the player.
     for (i = hud->racerCount - 1; i >= 0; i--) {
         const RaceHudRacer *r = &hud->racers[i];
-        if (!r->player && r->onMap && r->character >= 0 && r->character < 10) {
+        Colour colour;
+        if (!r->player && r->onMap && racer_colour(r, &colour)) {
             map_point(r, &x, &y);
-            dot(x, y, sCharacterColours[r->character]);
+            dot(x, y, colour);
         }
     }
     for (i = 0; i < hud->racerCount; i++) {
