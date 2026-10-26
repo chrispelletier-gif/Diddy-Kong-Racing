@@ -14,8 +14,9 @@ extern "C" {
 #endif
 
 /*
- * Whether the Settings menus offer the debug tools (profiler, test runs, bug reports, updates) and the performance
- * switches. A player's build (make RELEASE=1) leaves them out and the switches keep their defaults; the code stays in.
+ * Whether the build has the debug tools (profiler, test runs, bug reports, updates, the reference renderer) and its
+ * Settings menus the performance switches. A player's build (make RELEASE=1) leaves the tools out altogether (see the
+ * Makefile and src/release/) and the switches keep their defaults.
  */
 #ifdef PORT_RELEASE
 #define PLAT_DEBUG_TOOLS 0

@@ -9,6 +9,8 @@
  *   send its log and crash.txt.
  *
  * Sending needs sdmc:/3ds/dkr/bugreport.txt with a line "token=<GitHub token>" (see the README).
+ *
+ * A player's build (plat.h PLAT_DEBUG_TOOLS) has only the crash handler and keeps the last run's files: no reports.
  */
 #include <3ds.h>
 #include <malloc.h>
@@ -18,10 +20,12 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#include "plat/bugreport.h"
 #include "plat/plat.h"
-#include "net_3ds.h"
 #include "audio/voices.h"
+#if PLAT_DEBUG_TOOLS
+#include "plat/bugreport.h"
+#include "net_3ds.h"
+#endif
 
 #ifndef PORT_BUILD_VERSION
 #define PORT_BUILD_VERSION "unknown"
@@ -39,6 +43,7 @@
 extern u32 __ctru_heap_size;
 int port_gfx_frame_count(void);
 
+#if PLAT_DEBUG_TOOLS
 enum ReportKind {
     REPORT_BUTTON,       /* SELECT + touch during the game. */
     REPORT_LAST_CRASHED, /* The last run crashed (crash.txt). */
@@ -100,6 +105,8 @@ static int load_config(ReportConfig *config) {
     free(text);
     return config->token[0] != '\0';
 }
+
+#endif
 
 static int file_exists(const char *path) {
     struct stat st;
@@ -175,6 +182,7 @@ void bugreport_watch_thread(const char *name) {
     threadOnException(crash_handler, sCrashStack + sizeof(sCrashStack), WRITE_DATA_TO_HANDLER_STACK);
 }
 
+#if PLAT_DEBUG_TOOLS
 /* Building the report. */
 
 typedef struct Report {
@@ -429,11 +437,11 @@ static int test_run_active(void) {
     return strncmp(text, "active=1", 8) == 0;
 }
 
+#endif
+
 /* Returns nonzero if anything was shown on the bottom screen. */
 int bugreport_boot(void) {
     int lastUnended = file_exists(RUNNING_PATH);
-    int crashed, unattended;
-    ReportConfig config;
     FILE *marker;
 
     // Nothing has been logged yet, so log.txt is still the last run's.
@@ -457,8 +465,13 @@ int bugreport_boot(void) {
     if (marker != NULL) {
         fclose(marker);
     }
-    // A player's build keeps the last run's files but does not offer to send them (plat.h PLAT_DEBUG_TOOLS).
-    if (!lastUnended || !PLAT_DEBUG_TOOLS || !load_config(&config)) {
+#if !PLAT_DEBUG_TOOLS
+    // A player's build keeps the last run's files, but has no bug reports to send them with.
+    return 0;
+#else
+    int crashed, unattended;
+    ReportConfig config;
+    if (!lastUnended || !load_config(&config)) {
         return 0;
     }
 
@@ -558,6 +571,7 @@ int bugreport_boot(void) {
         }
     }
     return 1;
+#endif
 }
 
 /* Called when the program ends normally. */
@@ -565,6 +579,7 @@ void bugreport_clean_exit(void) {
     remove(RUNNING_PATH);
 }
 
+#if PLAT_DEBUG_TOOLS
 /*
  * During the game. A thread of the highest application priority watches the buttons by reading the HID shared
  * memory, so a report can be sent even when the game itself has stopped reading the controls.
@@ -750,3 +765,15 @@ void bugreport_start(void) {
         plat_log("bug report: could not create its thread");
     }
 }
+#else
+void bugreport_request(void) {
+}
+
+void plat_send_test_results(const char *title, const char *summary) {
+    (void) title;
+    (void) summary;
+}
+
+void bugreport_start(void) {
+}
+#endif

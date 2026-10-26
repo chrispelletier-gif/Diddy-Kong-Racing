@@ -56,6 +56,14 @@ else
   PORT_SYS_SRC += src/plat/plat_posix.c $(wildcard host/*.c)
 endif
 
+# A player's build (RELEASE=1) leaves the debug tools out: the profiler, the test runs, bug reports (crash.txt is still
+# written), the updater and the reference renderer. src/release/ stands in for what the rest of the port calls.
+ifeq ($(RELEASE),1)
+  PORT_GAME_SRC := $(filter-out src/game/port_autorun.c src/game/port_profile.c,$(PORT_GAME_SRC)) \
+                   src/release/debug_stubs.c
+  PORT_SYS_SRC  := $(filter-out src/plat/bugreport.c 3ds/net_3ds.c 3ds/gfx_ref.c,$(PORT_SYS_SRC))
+endif
+
 #### Flags ####
 
 GAME_DEFINES := -DTARGET_PORT=1 -DNON_MATCHING=1 -DAVOID_UB=1 -D_LANGUAGE_C -D_FINALROM -DNDEBUG -DF3DDKR_GBI \
@@ -111,7 +119,7 @@ ifeq ($(TARGET),3ds)
   CC        := $(PREFIX)gcc
   ARCH      := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
   # The ARM EABI default of variable sized enums would change the layout of the game's structs.
-  GAME_ARCH_FLAGS := -fno-short-enums -DPORT_GFX_REFERENCE
+  GAME_ARCH_FLAGS := -fno-short-enums $(if $(filter 1,$(RELEASE)),,-DPORT_GFX_REFERENCE)
   CTRULIB   := $(DEVKITPRO)/libctru
   PORTLIBS  := $(DEVKITPRO)/portlibs/3ds
   # Identifies the build in bug reports.
@@ -122,8 +130,8 @@ ifeq ($(TARGET),3ds)
                 -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\" -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
   LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers
-  # curl and mbedtls (devkitPro's 3ds-curl) send bug reports and download updates.
-  LIBS      := -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru -lm
+  # curl and mbedtls (devkitPro's 3ds-curl) send bug reports and download updates, so a player's build has neither.
+  LIBS      := -lcitro3d $(if $(filter 1,$(RELEASE)),,-lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz) -lctru -lm
   EXE       := $(BUILD_DIR)/dkr.elf
 else
   CC        := gcc
