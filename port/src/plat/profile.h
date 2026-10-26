@@ -121,6 +121,29 @@ const char *prof_limit(const ProfStats *stats);
 /* Extra text shown under the profiler on the bottom screen (the unattended run's progress). NULL clears it. */
 void prof_set_status(const char *text);
 
+/*
+ * A player's build has no profiler (port_profile.c is left out of RELEASE=1): it is never on, and the calls compile
+ * to nothing.
+ */
+#ifdef PORT_RELEASE
+#include <string.h>
+#define prof_enabled() 0
+#define prof_user_enabled() 0
+#define prof_set_user_enabled(on) ((void) (on))
+#define prof_add(stage, ns) ((void) (stage), (void) (ns))
+#define prof_count(counter, n) ((void) (counter), (void) (n))
+#define prof_game_mark(mark, updateRate) ((void) (mark), (void) (updateRate))
+#define prof_logic_begin() ((void) 0)
+#define prof_logic_end() ((void) 0)
+#define prof_render_task(totalNs) ((void) (totalNs))
+#define prof_part(part, ns) ((void) (part), (void) (ns))
+#define prof_clock_read_cost() 0ULL
+#define prof_window_start(window) ((void) (window))
+#define prof_window_read(window, out) ((void) (window), memset((out), 0, sizeof(*(out))))
+#define prof_limit(stats) ((void) (stats), "-")
+#define prof_set_status(text) ((void) (text))
+#endif
+
 #ifdef __cplusplus
 }
 #endif

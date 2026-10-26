@@ -19,6 +19,7 @@
 #include "plat/bottom_screen.h"
 #include "plat/options.h"
 #include "plat/plat.h"
+#include "plat/profile.h"
 
 void plat_3ds_menu_draw(const BsMenu *menu);
 void plat_3ds_set_antialias_setting(int aa);
@@ -37,8 +38,6 @@ int plat_3ds_guard_band_setting(void);
 long port_autorun_enabled(void);
 void port_autorun_request(long start);
 long port_autorun_switch_count(void);
-int prof_user_enabled(void);
-void prof_set_user_enabled(int on);
 
 typedef struct MenuPage {
     const char *title;
