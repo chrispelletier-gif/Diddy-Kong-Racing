@@ -87,6 +87,23 @@ jobs:
       - name: Build dkr.3dsx
         run: make -C port TARGET=3ds ${{ matrix.make-flags }} -j"$(nproc)"
 
+      # makerom and bannertool are not in devkitPro; fetch pinned releases and check them before use.
+      - name: Install makerom and bannertool
+        run: |
+          command -v unzip >/dev/null || { apt-get update && apt-get install -y unzip; }
+          mkdir -p /tmp/cia-tools && cd /tmp/cia-tools
+          curl -sSfL -o makerom.zip https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-ubuntu_x86_64.zip
+          curl -sSfL -o bannertool.zip https://github.com/diasurgical/bannertool/releases/download/1.2.0/bannertool.zip
+          sha256sum -c - <<'SUMS'
+          dd596854718c195c6e3229286be485b122921715555af8ae5cf8e9a465d9f970  makerom.zip
+          69768596f836acb3e3aeaa66e47c6ba560dde813c6dfcd33c8afc25fe29b7524  bannertool.zip
+          SUMS
+          unzip -o -q makerom.zip && unzip -o -q -j bannertool.zip linux-x86_64/bannertool
+          chmod +x makerom bannertool
+
+      - name: Build dkr.cia
+        run: make -C port TARGET=3ds ${{ matrix.make-flags }} cia MAKEROM=/tmp/cia-tools/makerom BANNERTOOL=/tmp/cia-tools/bannertool
+
       - name: Upload dkr.3dsx
         uses: actions/upload-artifact@v4
         with:
@@ -94,9 +111,10 @@ jobs:
           # dkr.elf has the symbols for reading crash addresses.
           path: |
             ${{ matrix.out }}/dkr.3dsx
+            ${{ matrix.out }}/dkr.cia
             ${{ matrix.out }}/dkr.elf
 
-  # Releases (all pre-releases, each holding dkr.3dsx and build.txt):
+  # Releases (all pre-releases, each holding dkr.3dsx, the installable dkr.cia and build.txt):
   #   3ds-master        the player build (RELEASE=1) of master: the one to download and play
   #   3ds-master-debug  the debug build of master
   #   3ds-newest        the debug build of the latest push to any branch
@@ -149,14 +167,15 @@ jobs:
           publish() {
             gh release delete "$1" --cleanup-tag --yes 2>/dev/null || true
             gh release create "$1" --prerelease --target "$GITHUB_SHA" --title "$2" \
-              --notes "3DS build of $BRANCH at $GITHUB_SHA, made by CI. $4" "$3/dkr.3dsx" "$3/build.txt"
+              --notes "3DS build of $BRANCH at $GITHUB_SHA, made by CI. $4" "$3/dkr.3dsx" "$3/build.txt" \
+              $(ls "$3/dkr.cia" 2>/dev/null)
           }
           DEBUG_NOTE="Debug build (profiler, test runs, bug reports, updates); install it from the game's Check for updates button."
           publish 3ds-newest "3DS build: newest ($BRANCH, debug)" build/debug "$DEBUG_NOTE"
           if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
             publish 3ds-master-debug "3DS build: master (debug)" build/debug "$DEBUG_NOTE"
             publish 3ds-master "3DS build: master" build/release \
-              "Copy dkr.3dsx to sdmc:/3ds/ and your own US 1.0 ROM to sdmc:/3ds/dkr/baserom.z64, then start it from the Homebrew Launcher."
+              "Copy your own US 1.0 ROM to sdmc:/3ds/dkr/baserom.z64. Then either copy dkr.3dsx to sdmc:/3ds/ and start it from the Homebrew Launcher, or install dkr.cia with FBI to get a HOME menu icon."
           fi
 
   host:
