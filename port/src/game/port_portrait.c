@@ -5,7 +5,9 @@
  *   DKR_PORTRAIT=boss | taj | player   What to look at: the boss racer, Taj in the hub, or the player's racer.
  *   DKR_PORTRAIT_DIST=n                How far in front of it the camera stands (default 80).
  *   DKR_PORTRAIT_HEIGHT=n              How high above its origin the camera looks (default 30).
- *   DKR_PORTRAIT_YAW=n                 Turns the camera around it, in degrees (default 0: face on).
+ *   DKR_PORTRAIT_YAW=n                 Turns the camera around it, in degrees (default 0; the bosses face it at
+ *                                      about 90, see port/tools/portraits).
+ *   DKR_PORTRAIT_LOOK=n                Which way the camera looks, in degrees from its own direction (default 180).
  *
  * While it is on, the track, the sky and every other object are left out, so the frame (DKR_DUMP_EVERY) is the model
  * alone on the clear colour, which the portrait script keys out.
@@ -50,15 +52,6 @@ static Object *target(void) {
     switch (mode()) {
         case 1:
             racers = get_racer_objects(&count);
-            if (plat_getenv("DKR_PORTRAIT_LOG") != NULL) {
-                static s32 sTimes;
-                if ((sTimes++ % 600) == 0) {
-                    for (i = 0; i < count; i++) {
-                        plat_log("portrait: racer %d vehicle %d character %d", i, racers[i]->racer->vehicleID,
-                                 racers[i]->racer->characterId);
-                    }
-                }
-            }
             for (i = 0; i < count; i++) {
                 if (racers[i]->racer->vehicleID >= VEHICLE_BOSSES) {
                     return racers[i];
@@ -100,13 +93,4 @@ void port_portrait_camera(Camera *cam) {
     cam->trans.rotation.x_rotation = 0;
     cam->trans.rotation.z_rotation = 0;
     cam->pitch = 0;
-    {
-        static s32 sLogged;
-        if (plat_getenv("DKR_PORTRAIT_LOG") != NULL && (sLogged++ % 120) == 0) {
-            plat_log("portrait: obj %d at %d %d %d yaw %d, camera %d %d %d\n", obj->behaviorId,
-                     (s32) obj->trans.x_position, (s32) obj->trans.y_position, (s32) obj->trans.z_position,
-                     (s32) obj->trans.rotation.y_rotation, (s32) cam->trans.x_position, (s32) cam->trans.y_position,
-                     (s32) cam->trans.z_position);
-        }
-    }
 }
