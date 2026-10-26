@@ -9,4 +9,4 @@ Build with `make -C port TARGET=3ds cia` (needs `makerom` and `bannertool` on th
 CI builds `dkr.cia` next to `dkr.3dsx`.
 
 The art is original: red and yellow lettering set in the open-licence Lilita One font (SIL OFL) on a plain gradient,
-and a jingle synthesized from scratch. No Nintendo or Rare artwork, logos or audio are used.
+and a calypso jingle (toms, marimba, steel drum) synthesized from scratch. No Nintendo or Rare artwork, logos or audio are used.
