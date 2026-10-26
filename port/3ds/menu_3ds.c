@@ -229,7 +229,7 @@ static const char *screen_hint(int i) {
     } else if (i == SCREEN_HUD) {
         return plat_hud_edges() ? "Widescreen HUD out at the sides" : "Widescreen HUD in the 4:3 middle";
     } else if (i == SCREEN_GUARD_BAND) {
-        return "Cuts triangles far off screen (test)";
+        return "Cuts triangles far off screen";
     }
     return "With the 3D slider; no anti-aliasing in 3D";
 }
