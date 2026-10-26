@@ -72,8 +72,20 @@ swapped), and the circle pad's deadzone (default 6%), sensitivity and response c
 Controls page. They are kept in `sdmc:/3ds/dkr/controls.txt`. START, the D-Pad and the C-Stick always stay as above.
 
 The menus are driven by the stick, as on the N64. At the bottom of the bottom screen is a Settings button (and Stop
-test while a test run is on). The rest of the touch screen does nothing while the menu is closed, so a stray tap can't
-interrupt a race; holding SELECT while touching anywhere also sends a bug report.
+test while a test run is on; and Pause, first, during a race). The rest of the touch screen does nothing while the menu
+is closed, so a stray tap can't interrupt a race; holding SELECT while touching anywhere also sends a bug report.
+
+## Race HUD on the bottom screen (3DS)
+
+During a one player race (not time trials or the challenges, which keep the N64's HUD) the bottom screen shows the
+race (`src/plat/bottom_screen.c`, from `src/game/port_race_hud.c`): every racer in race order as the game's portrait,
+framed in their map colour, with the time gap to you (red: ahead of you, green: behind, timed at the track's
+checkpoints); the item you hold at twice size; your place, lap and race time; your bananas with your last and best lap
+times; and the track's map with every racer on it, you as a gold arrow. It is all the game's own HUD art at its own
+size or exactly twice, read from your ROM. The top screen then keeps only the countdown, the lap announcements, the
+direction arrows, WRONG WAY and the finish. The Race HUD page of the Settings menu (and VIDEO OPTIONS) moves it:
+Bottom (the default), Both screens, or Top (the N64's HUD only); saved as `racehud=` (1, 2, 0). The profiler's
+readout takes the bottom screen's place while it is on.
 
 ## Settings in the game's menus
 
@@ -163,6 +175,7 @@ environment variables:
 | `DKR_AUDIO_DSP`     | `0` runs the CPU mixer instead of the DSP voices (see Sound). |
 | `DKR_TRACE_FRAME`   | Log every display list command and draw of this frame. |
 | `DKR_BOTTOM_PREVIEW`| Draw the 3DS bottom screen's views (home, profiler, menu pages, updater) to PNG files in this directory and exit. `DKR_MONO_FONT` can name a copy of libctru's 8x8 font (2048 bytes) for the dense text. |
+| `DKR_BOTTOM_RACE`   | Draw the 3DS bottom screen's race HUD (roadmap G9) to `race_NNNN.png` in this directory every 60 frames of a race, and leave those HUD pieces off the top screen as the 3DS does (`DKR_RACE_HUD=2` keeps them on both). `DKR_BOTTOM_RACE_LOG=1` also prints the player's map position and heading each frame. |
 
 `make -C port TARGET=host DEBUG=asan BUILD_DIR=build/asan` builds with AddressSanitizer, which is how the original
 memory bugs above were found.

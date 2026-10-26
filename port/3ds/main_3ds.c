@@ -27,6 +27,11 @@ void sound_option_change(int i, int step);
 int sound_option_in_race(int i);
 int port_autorun_enabled(void);
 /* The Camera page (port_camera.c). */
+int race_hud_option_count(void);
+const char *race_hud_option_label(int i);
+void race_hud_option_value(int i, char *out, int size);
+void race_hud_option_change(int i, int step);
+const char *race_hud_option_hint(int i);
 int camera_option_count(void);
 const char *camera_option_label(int i);
 void camera_option_value(int i, char *out, int size);
@@ -120,7 +125,10 @@ static void add_game_menu_options(void) {
                                            sound_option_change, NULL, sound_option_in_race };
     static const OptionsSection sControls = { controls_option_count, controls_option_label, controls_option_value,
                                               controls_option_change, NULL, NULL };
+    static const OptionsSection sRaceHud = { race_hud_option_count, race_hud_option_label, race_hud_option_value,
+                                             race_hud_option_change, race_hud_option_hint, NULL };
     menu_3ds_add_options();
+    options_add(OPTIONS_VIDEO, &sRaceHud);
     options_add(OPTIONS_CAMERA, &sCamera);
     options_add(OPTIONS_AUDIO, &sSound);
     options_add(OPTIONS_CONTROLS, &sControls);
@@ -155,6 +163,8 @@ int main(int argc, char **argv) {
                       controls_option_change);
     menu_3ds_add_page("Sound", sound_option_count, sound_option_label, sound_option_value, sound_option_change);
     port_modern_camera();
+    menu_3ds_add_page("Race HUD", race_hud_option_count, race_hud_option_label, race_hud_option_value,
+                      race_hud_option_change);
     menu_3ds_add_page("Camera", camera_option_count, camera_option_label, camera_option_value, camera_option_change);
     add_game_menu_options();
     bugreport_start();

@@ -192,6 +192,17 @@ s32 port_look_back_held(void);
 void port_set_look_back_held(s32 held);
 
 /*
+ * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c, roadmap G9): port_race_hud_frame copies the
+ * race's state for the bottom screen once a frame; port_race_hud_map takes the track map's sprite from minimap_init;
+ * port_race_hud_hides says which HUD elements (HUD_*, or -1 for the track map) src/game_ui.c leaves off the top screen.
+ */
+void port_race_hud_frame(s32 updateRate);
+void port_race_hud_map(s32 spriteIndex);
+s32 port_race_hud_hides(s32 element);
+s32 port_race_hud_setting(void);
+void port_set_race_hud_setting(s32 value);
+
+/*
  * The port's settings in the game's menus (src/menu.c, plat/options.h): fills in the Options menu's rows when the
  * menu text is loaded, and says whether a category's page is open (over the Options menu or the pause menu).
  */

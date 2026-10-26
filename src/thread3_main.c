@@ -402,6 +402,7 @@ void main_game_loop(void) {
 #ifdef TARGET_PORT
     prof_game_mark(PROF_MARK_END, tempLogicUpdateRate);
     port_autorun_frame(tempLogicUpdateRate);
+    port_race_hud_frame(tempLogicUpdateRate);
     {
         // A tap on the 3DS bottom screen's menu sounds like the game's own menus.
         static const u16 sUiSounds[] = { 0, SOUND_SELECT2, SOUND_MENU_PICK2, SOUND_MENU_BACK3 };

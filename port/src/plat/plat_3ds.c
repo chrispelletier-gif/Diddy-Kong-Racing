@@ -670,6 +670,38 @@ void plat_3ds_menu_draw(const BsMenu *menu) {
     LightLock_Unlock(&sConsoleLock);
 }
 
+void update_3ds_race_changed(int racing);
+
+/*
+ * The race HUD (race_hud.h), from the game thread once a frame, or NULL after a race. The screen's thread draws the
+ * newest one when it gets to it; the panel's buttons change (Pause joins Settings) when a race starts or ends.
+ */
+void plat_set_race_hud(const RaceHud *hud) {
+    static int sRacing;
+    static RaceHud sLast;
+    static u64 sLastNs;
+    u64 now = svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000000) * 1000;
+    // The timer and the map move every frame; 15 redraws a second is plenty for them, which keeps the screen's
+    // thread from taking much of its core. A change of place, lap, item or bananas is drawn straight away.
+    if (hud != NULL && sRacing && now - sLastNs < 66000000ULL && hud->position == sLast.position &&
+        hud->lap == sLast.lap && hud->item == sLast.item && hud->itemLevel == sLast.itemLevel &&
+        hud->itemCount == sLast.itemCount && hud->bananas == sLast.bananas && hud->finished == sLast.finished) {
+        return;
+    }
+    if (hud != NULL) {
+        sLast = *hud;
+        sLastNs = now;
+    }
+    LightLock_Lock(&sConsoleLock);
+    bs_set_race_hud(hud);
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+    if ((hud != NULL) != sRacing) {
+        sRacing = hud != NULL;
+        update_3ds_race_changed(sRacing);
+    }
+}
+
 /* The profiler's readout, under the messages. */
 void plat_overlay_show(const char *text) {
     LightLock_Lock(&sConsoleLock);

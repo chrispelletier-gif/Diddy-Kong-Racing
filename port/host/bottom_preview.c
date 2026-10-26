@@ -33,6 +33,8 @@ static void save(const char *dir, const char *name) {
     printf("wrote %s\n", path);
 }
 
+static void preview_race(const char *dir);
+
 static void row(BsMenu *m, const char *label, const char *value, const char *hint) {
     BsMenuRow *r = &m->rows[m->rowCount++];
     snprintf(r->label, sizeof(r->label), "%s", label);
@@ -136,4 +138,72 @@ void host_bottom_preview(const char *dir) {
     }
     bs_add_message("Stop the test run? The results so far are sent as a report.");
     save(dir, "7_confirm");
+    bs_show_menu(NULL);
+    preview_race(dir);
+}
+
+/* A race as the mockups showed it ("standings tower"), for the preview. */
+static void preview_race(const char *dir) {
+    static const signed char sOrder[8] = { 0, 5, 9, 3, 2, 4, 7, 1 }; // Krunch, Banjo, Diddy (the player), Conker...
+    static const int sGaps[8] = { 85, 23, 0, -37, -114, -183, -286, -367 };
+    static const char *const sButtons[2] = { "Pause", "Settings" };
+    RaceHud hud;
+    int i;
+    memset(&hud, 0, sizeof(hud));
+    hud.mapSprite = -1;
+    hud.racerCount = 8;
+    for (i = 0; i < 8; i++) {
+        hud.racers[i].character = sOrder[i];
+        hud.racers[i].player = i == 2;
+        hud.racers[i].gap = i == 2 ? RACE_HUD_NO_GAP : sGaps[i];
+    }
+    hud.position = 3;
+    hud.lap = 2;
+    hud.laps = 3;
+    hud.lapTimes[0] = 1861;
+    hud.lapTimes[1] = 1879;
+    hud.lapsTimed = 2;
+    hud.raceTime = 1861 + 1879;
+    hud.item = 1;
+    hud.itemLevel = 1;
+    hud.itemCount = 3;
+    hud.bananas = 7;
+    bs_set_buttons(sButtons, 2);
+    bs_set_race_hud(&hud);
+    save(dir, "8_race");
+    hud.lap = 3;
+    hud.item = -1;
+    hud.position = 1;
+    bs_set_race_hud(&hud);
+    save(dir, "9_race_final_lap");
+    bs_set_race_hud(NULL);
+}
+
+static int sRaceFrames;
+
+void host_bottom_race_start(void) {
+    static const char *const sButtons[2] = { "Pause", "Settings" };
+    bs_init(NULL);
+    bs_load_assets();
+    bs_set_buttons(sButtons, 2);
+}
+
+/* DKR_BOTTOM_RACE: the race HUD every 60 game frames, as race_NNNN.png. */
+void host_bottom_race(const char *dir, const RaceHud *hud) {
+    char name[32];
+    if (getenv("DKR_BOTTOM_RACE_LOG") != NULL) {
+        // The player's map position and heading each frame, to check them against the track's map.
+        int i;
+        for (i = 0; i < hud->racerCount; i++) {
+            if (hud->racers[i].player) {
+                printf("player %d %d %u\n", hud->racers[i].mapX, hud->racers[i].mapY, hud->racers[i].heading);
+            }
+        }
+    }
+    if (sRaceFrames++ % 60 != 0) {
+        return;
+    }
+    bs_set_race_hud(hud);
+    snprintf(name, sizeof(name), "race_%04d", sRaceFrames / 60);
+    save(dir, name);
 }
