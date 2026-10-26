@@ -199,6 +199,13 @@ float plat_aspect_scale(void);
 float plat_camera_fov(float fovy);
 /* What the style multiplies tan(fovy / 2) by: 1 for Wide, below 1 for the narrower ones (plat_camera_fov). */
 float plat_fov_tan_scale(void);
+/*
+ * Forces the "Zoomed" style while on, whatever the setting, for screens whose 3D scenery was only built as wide as the
+ * N64's 4:3 picture (Player Select: wider, its planters end and the trees stand in front of the log). The game thread
+ * sets it each frame (src/thread3_main.c).
+ */
+void plat_set_zoomed_view(int on);
+int plat_zoomed_view(void);
 int plat_fb16(void);
 /*
  * The frame rate cap (roadmap G6): the scheduler hands the game each finished frame after 2 retraces (30 fps, the

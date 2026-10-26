@@ -21,6 +21,7 @@
 // Widescreen: the port can widen the camera to the screen's shape (port/src/plat/plat.h).
 float plat_aspect_scale(void);
 float plat_camera_fov(float fovy);
+void plat_set_zoomed_view(int on);
 #define CAMERA_ASPECT (SCREEN_WIDTH_FLOAT / SCREEN_HEIGHT_FLOAT * plat_aspect_scale())
 #define CAMERA_FOV(fovy) plat_camera_fov(fovy)
 // The wider picture shows rock faces right beside the camera that 4:3 never reached, so widescreen cuts closer to it

@@ -692,7 +692,7 @@ float plat_aspect_scale(void) {
 float plat_fov_tan_scale(void) {
     // Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
     static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
-    int style = sWideSetting;
+    int style = sWideSetting && plat_zoomed_view() ? 3 : sWideSetting;
     return style >= 0 && style <= 3 ? sTanScale[style] : 1.0f;
 }
 

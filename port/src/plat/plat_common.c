@@ -337,6 +337,16 @@ int plat_60fps_setting(void) {
     return sFps60Setting;
 }
 
+static int sZoomedView;
+
+void plat_set_zoomed_view(int on) {
+    sZoomedView = on != 0;
+}
+
+int plat_zoomed_view(void) {
+    return sZoomedView;
+}
+
 void plat_set_60fps_setting(int on) {
     read_60fps_setting();
     sFps60Setting = sFps60 = on != 0;
