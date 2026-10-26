@@ -224,7 +224,9 @@ static s32 inflate_fixed(InflateState *s) {
 
 static s32 inflate_dynamic(InflateState *s) {
     static const u8 order[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
-    static Huffman lencode, distcode;
+    // On the stack, not static: the 3DS bottom screen's thread unpacks textures and track maps while the game's
+    // threads load levels, and shared tables mixed up both streams (crash report #192: heap overrun).
+    Huffman lencode, distcode;
     u8 lengths[MAXLCODES + MAXDCODES];
     s32 nlen, ndist, ncode, index, sym, len;
 
