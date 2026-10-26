@@ -117,6 +117,7 @@ void port_ai_init(void);
 void port_gfx_init(void);
 /* Level load timing (game/port_loadtime.c): one log line per load with its steps and the first frame after it. */
 void port_load_begin(void);
+void port_load_bg_queued(void);
 void port_load_step(const char *name);
 void port_load_end(s32 levelId, const char *kind);
 void port_load_frame_done(void);

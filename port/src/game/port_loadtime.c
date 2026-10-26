@@ -30,8 +30,20 @@ static unsigned long long sLoadEndNs;
 static s32 sLoadWasGame;
 static unsigned long long sPickNs[2]; // Tracks menu: A on the track, A on the last option (0 = none).
 static unsigned long long sLastGameFrameNs;
+static unsigned long long sBgQueuedNs; // When the tracks menu asked for a background load.
+static s32 sBgStartDelayMs;           // How long the background load then took to start, or -1.
+
+/* The tracks menu asked the background thread to load a track (bgload_start). */
+void port_load_bg_queued(void) {
+    sBgQueuedNs = plat_time_ns();
+}
 
 void port_load_begin(void) {
+    sBgStartDelayMs = -1;
+    if (sBgQueuedNs != 0) {
+        sBgStartDelayMs = (s32) ((plat_time_ns() - sBgQueuedNs) / 1000000ULL);
+        sBgQueuedNs = 0;
+    }
     sStepCount = 0;
     sLoadStartNs = sLastMarkNs = plat_time_ns();
     sActive = TRUE;
@@ -84,6 +96,10 @@ void port_load_end(s32 levelId, const char *kind) {
     for (i = 0; i < sStepCount && len < (s32) sizeof(sLine) - 1; i++) {
         len += plat_snprintf(sLine + len, sizeof(sLine) - len, "%s %s %d", i ? "," : "", sStepName[i],
                              (int) ((sStepNs[i] + 500000ULL) / 1000000ULL));
+    }
+    if (sBgStartDelayMs >= 0 && kind[0] == 'b' && len < (s32) sizeof(sLine) - 1) {
+        len += plat_snprintf(sLine + len, sizeof(sLine) - len, " (started %d ms after it was asked for)",
+                             (int) sBgStartDelayMs);
     }
     sLoadEndNs = now;
     sLoadWasGame = kind[0] == 'g';
