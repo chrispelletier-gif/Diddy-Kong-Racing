@@ -182,6 +182,14 @@ unsigned long long plat_time_ns(void) {
     return (unsigned long long) ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+unsigned long long plat_ticks(void) {
+    return plat_time_ns();
+}
+
+unsigned long long plat_ticks_per_second(void) {
+    return 1000000000ULL;
+}
+
 void plat_sleep_ns(unsigned long long ns) {
     struct timespec ts;
     ts.tv_sec = ns / 1000000000ULL;

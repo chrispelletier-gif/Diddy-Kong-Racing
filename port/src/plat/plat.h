@@ -46,6 +46,9 @@ unsigned long long plat_render_idle_ns(void);
 
 /* Monotonic time. */
 unsigned long long plat_time_ns(void);
+/* The raw clock behind plat_time_ns, without its conversion: for timing many short spans (the profiler's parts). */
+unsigned long long plat_ticks(void);
+unsigned long long plat_ticks_per_second(void);
 void plat_sleep_ns(unsigned long long ns);
 
 /* The global "kernel" lock and condition variable that protect every emulated message queue. */
@@ -199,6 +202,13 @@ float plat_aspect_scale(void);
 float plat_camera_fov(float fovy);
 /* What the style multiplies tan(fovy / 2) by: 1 for Wide, below 1 for the narrower ones (plat_camera_fov). */
 float plat_fov_tan_scale(void);
+/*
+ * Widescreen HUD placement (Settings > Screen > HUD, settings.txt "hudedges", else DKR_HUD_EDGES, on by default): 1
+ * moves the race HUD's left and right pieces out to the wide screen's edges (src/game_ui.c), 0 keeps it in the 4:3
+ * middle.
+ */
+int plat_hud_edges(void);
+void plat_set_hud_edges(int on);
 int plat_fb16(void);
 /*
  * The frame rate cap (roadmap G6): the scheduler hands the game each finished frame after 2 retraces (30 fps, the

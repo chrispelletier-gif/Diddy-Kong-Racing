@@ -320,6 +320,14 @@ unsigned long long plat_time_ns(void) {
     return (ticks / SYSCLOCK_ARM11) * 1000000000ULL + ((ticks % SYSCLOCK_ARM11) * 1000000000ULL) / SYSCLOCK_ARM11;
 }
 
+unsigned long long plat_ticks(void) {
+    return svcGetSystemTick();
+}
+
+unsigned long long plat_ticks_per_second(void) {
+    return SYSCLOCK_ARM11;
+}
+
 void plat_sleep_ns(unsigned long long ns) {
     svcSleepThread((s64) ns);
 }
