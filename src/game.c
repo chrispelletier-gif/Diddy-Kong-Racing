@@ -24,6 +24,7 @@
 #include "types.h"
 #include "video.h"
 #include "weather.h"
+#include "port_loadtime.h"
 
 /************ .data ************/
 
@@ -561,6 +562,7 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
         cutsceneId = CUTSCENE_ID_UNK_64;
     }
     cutscene_id_set(cutsceneId);
+    PORT_LOAD_STEP("rest");
     init_track(gCurrentLevelHeader->geometry, gCurrentLevelHeader->skybox, numberOfPlayers, vehicleId, entranceId,
                gCurrentLevelHeader->collectables, gCurrentLevelHeader->unkBA);
     if (gCurrentLevelHeader->fogNear == 0 && gCurrentLevelHeader->fogFar == 0 && gCurrentLevelHeader->fogR == 0 &&

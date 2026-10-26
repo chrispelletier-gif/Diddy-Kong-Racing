@@ -144,9 +144,12 @@ typedef struct BenchSwitch {
     s8 usual, test;
 } BenchSwitch;
 
-/* Nothing to compare right now: command list splits (P19) were measured and are off by default (#153), early depth
- * (P20) was tried and dropped (#155), and the white-line diagnostics (P28) cost about 1 ms of GPU time a frame and are
- * off for good. The bench says so instead of racing. The list ends with an empty entry, so it may be otherwise empty. */
+/* Nothing to compare right now. Command list splits (P19) are off by default (#153), early depth (P20) was dropped
+ * (#155), the white-line diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches: the
+ * depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
+ * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
+ * transforms (P27) gained nothing and stay off. The bench says so instead of racing. The list ends with an empty
+ * entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { NULL, { NULL, NULL }, 0, 0 },
 };

@@ -29,6 +29,8 @@ static RcpWorker sGfxWorker;
 static RcpWorker sAudioWorker;
 static s32 sRcpStarted;
 static volatile s32 sGfxTasksPending;
+// Graphics tasks handed over and finished so far (kernel lock), for waiting on the ones queued at a given moment.
+static volatile u32 sGfxTasksSubmitted, sGfxTasksFinished;
 /* Tasks handed to the workers whose completion has not been raised yet (kernel lock). */
 static s32 sRcpTasksBusy;
 /* What the audio worker is doing, for the 3DS watchdog's stall report. */
@@ -93,10 +95,12 @@ static void gfx_thread(void *arg) {
         start = plat_time_ns();
         port_gfx_run_task(task);
         prof_render_task(plat_time_ns() - start);
+        port_load_frame_done();
         gPlatCounters[PLAT_COUNTER_GFX_DONE]++;
         gPlatGfxStage = "raising the DP interrupt";
         plat_klock();
         sGfxTasksPending--;
+        sGfxTasksFinished++;
         plat_kbroadcast();
         plat_kunlock();
         port_raise_event(OS_EVENT_DP);
@@ -175,15 +179,21 @@ void port_rcp_gfx_submitted(void) {
     gPlatCounters[PLAT_COUNTER_GFX_QUEUED]++;
     plat_klock();
     sGfxTasksPending++;
+    sGfxTasksSubmitted++;
     plat_kunlock();
 }
 
 /*
- * Waits until no graphics task is queued or running. The game sometimes frees memory that the display list being
- * drawn still uses, relying on the RCP having finished long before. This makes that safe however slow rendering is.
+ * Waits until the graphics tasks queued or running now have finished. The game sometimes frees memory that the
+ * display list being drawn still uses, relying on the RCP having finished long before. This makes that safe however
+ * slow rendering is. Tasks handed over later can't use memory freed now, so they aren't waited for: the tracks
+ * menu's background loader frees a lot while the game thread keeps queueing menu frames, and waiting for no task at
+ * all could take seconds, or forever with frames rendered ahead.
  */
+static volatile u32 sGfxWaitTarget; // The newest task any waiter needs finished (kernel lock).
+
 static int gfx_idle(void) {
-    return sGfxTasksPending <= 0;
+    return (s32) (sGfxTasksFinished - sGfxWaitTarget) >= 0;
 }
 
 void port_rcp_wait_idle(void) {
@@ -195,6 +205,9 @@ void port_rcp_wait_idle(void) {
     // raise their events, so let them in while waiting (as the OS does for any blocking call).
     wasDisabled = port_int_release();
     plat_klock();
+    if ((s32) (sGfxTasksSubmitted - sGfxWaitTarget) > 0) {
+        sGfxWaitTarget = sGfxTasksSubmitted;
+    }
     port_kwait_until(gfx_idle);
     plat_kunlock();
     port_int_restore(wasDisabled);

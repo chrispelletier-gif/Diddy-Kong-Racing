@@ -23,6 +23,7 @@
 #include "thread3_main.h"
 #include "types.h"
 #include "port_step.h"
+#include "port_loadtime.h"
 #include "video.h"
 #include "waves.h"
 #include "weather.h"
@@ -213,6 +214,7 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
     }
 
     generate_track(geometry);
+    PORT_LOAD_STEP("track");
 
     gWaveBlockCount = 0;
 
@@ -238,14 +240,17 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
 
     cam_set_layout(numberOfPlayers);
     skydome_spawn(skybox);
+    PORT_LOAD_STEP("sky");
     gTrackTexAnimOffset = 0;
     gTrackTexAnimFlags = RENDER_TEX_ANIM;
     path_enable();
     track_spawn_objects(arg6, 0);
     track_spawn_objects(collectables, 1);
+    PORT_LOAD_STEP("objects");
     gScenePlayerViewports = numberOfPlayers;
     track_setup_racers(vehicle, entranceId, numberOfPlayers);
     racerfx_alloc(72, 64);
+    PORT_LOAD_STEP("racers");
 
     if (geometry == 0 && entranceId == 0) {
         transition_begin(&gCircleFadeToBlack);
@@ -270,6 +275,7 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
         shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, LOGIC_NULL);
     }
     gShadowHeapFlip = 0;
+    PORT_LOAD_STEP("shadows");
     if (gCurrentLevelHeader2->useVoid) {
         gVoidColourR = gCurrentLevelHeader2->voidColour.red;
         gVoidColourG = gCurrentLevelHeader2->voidColour.green;

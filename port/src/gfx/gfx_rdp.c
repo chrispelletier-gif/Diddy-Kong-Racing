@@ -190,25 +190,7 @@ static void walk_begin(void) {
     if (!sWalkTimed) {
         return;
     }
-    if (sWalkReadCost == 0) {
-        // The fastest of a few tries, so a thread switch in one doesn't count.
-        s32 attempt;
-        for (attempt = 0; attempt < 8; attempt++) {
-            unsigned long long start = plat_ticks(), cost;
-            for (i = 0; i < 32; i++) {
-                (void) plat_ticks();
-            }
-            cost = (plat_ticks() - start) * 256 / 33;
-            if (attempt == 0 || cost < sWalkReadCost) {
-                sWalkReadCost = cost;
-            }
-        }
-        if (sWalkReadCost == 0) {
-            sWalkReadCost = 1;
-        }
-        plat_log("profiler: a clock read takes %llu ns",
-                 (sWalkReadCost * 1000000000ULL / 256) / plat_ticks_per_second());
-    }
+    sWalkReadCost = prof_clock_read_cost();
     for (i = 0; i < WALK_PART_COUNT; i++) {
         sWalkTicks[i] = 0;
         sWalkSpans[i] = 0;
@@ -961,6 +943,64 @@ static void vertex_fog(RspVertex *v) {
     v->fog = (fog < 0.0f) ? 0 : (fog > 255.0f) ? 255 : (u8) fog;
 }
 
+#if defined(__arm__) && defined(__VFP_FP__) && !defined(__SOFTFP__)
+/*
+ * The vertex transform with the VFP's short vectors (roadmap P27, DKR_VFP_VECTORS=1): the ARM11's VFP runs one
+ * instruction over 4 registers when the FPSCR's vector length is 4, so each vertex takes 4 arithmetic instructions
+ * instead of 16. A vector instruction treats a source register in s0-s7 as a scalar, so the matrix's rows sit in
+ * s8-s23 as vectors, the vertex's x, y and z in s0-s2 and the result in s24-s27. The sums are made in the same order
+ * as the C loop's, and the VFP's multiply-accumulate rounds the product before adding, as a separate multiply and add
+ * do, so the results are bit-identical. The compiler doesn't know about the vector length, so it is set and put back
+ * within the one asm statement, which uses no other floating point instructions while it is set (an instruction
+ * writing s0-s7 stays scalar). Only x, y, z and w are written; load_vertices does the rest.
+ */
+#define HAVE_VFP_VECTORS 1
+static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst, float (*m)[4]) {
+    u32 savedFpscr, x, y, z;
+    __asm__ volatile("vldmia %[m], {s8-s23}\n\t"
+                     "vmrs %[saved], fpscr\n\t"
+                     "bic %[x], %[saved], #0x00370000\n\t" // LEN (bits 16-18) and STRIDE (20-21)
+                     "orr %[x], %[x], #0x00030000\n\t"     // LEN = 4, STRIDE = 1
+                     "vmsr fpscr, %[x]\n"
+                     "1:\n\t"
+                     "ldrsh %[x], [%[src]]\n\t"
+                     "ldrsh %[y], [%[src], #2]\n\t"
+                     "ldrsh %[z], [%[src], #4]\n\t"
+                     "add %[src], %[src], %[srcSize]\n\t"
+                     "vmov s0, %[x]\n\t"
+                     "vmov s1, %[y]\n\t"
+                     "vmov s2, %[z]\n\t"
+                     "vcvt.f32.s32 s0, s0\n\t"
+                     "vcvt.f32.s32 s1, s1\n\t"
+                     "vcvt.f32.s32 s2, s2\n\t"
+                     "vmul.f32 s24, s8, s0\n\t"  // s24-s27 = row 0 * x
+                     "vmla.f32 s24, s12, s1\n\t" // += row 1 * y
+                     "vmla.f32 s24, s16, s2\n\t" // += row 2 * z
+                     "vadd.f32 s24, s24, s20\n\t" // += row 3
+                     "vstmia %[dst], {s24-s27}\n\t"
+                     "add %[dst], %[dst], %[dstSize]\n\t"
+                     "subs %[count], %[count], #1\n\t"
+                     "bne 1b\n\t"
+                     "vmsr fpscr, %[saved]"
+                     : [src] "+r"(src), [dst] "+r"(dst), [count] "+r"(count), [saved] "=&r"(savedFpscr), [x] "=&r"(x),
+                       [y] "=&r"(y), [z] "=&r"(z)
+                     : [m] "r"(m), [srcSize] "I"(sizeof(Vertex)), [dstSize] "I"(sizeof(RspVertex))
+                     : "d0", "d1", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12", "d13", "cc", "memory");
+}
+#endif
+
+static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
+static s32 sSwitchEpoch = -1;
+
+/* Reads the renderer's experimental switches when they change (see plat_switch). */
+static void read_switches(void) {
+    if (sSwitchEpoch == gPlatSwitchEpoch) {
+        return;
+    }
+    sSwitchEpoch = gPlatSwitchEpoch;
+    sVfpVectors = plat_switch("DKR_VFP_VECTORS", 0) != 0;
+}
+
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
  * triangles being drawn use the level model's vertices. */
 int gGfxSweep, gGfxSweepLevel;
@@ -968,14 +1008,8 @@ extern s32 port_sweep_level_vertex(const void *vertices);
 
 static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float(*m)[4] = g.matrices[g.curMatrix];
-    if (gGfxSweep) {
-        int level = port_sweep_level_vertex(src) != 0;
-        if (level != gGfxSweepLevel) {
-            flush_batch();
-            gGfxSweepLevel = level;
-        }
-    }
     s32 i, fog = (g.geometryMode & G_FOG) != 0;
+    s32 vectors = FALSE;
     // An orthographic matrix (the HUD's, menus', fades') gives every vertex the same w.
     u8 flat = m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f;
     // Billboard (sprite) vertices are offsets in clip space, sized for the N64's camera; on the port's wider (G3) or
@@ -995,13 +1029,32 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
         bbScaleZ = plat_aspect_scale() > 1.0f ? 2.5f / 10.0f : 1.0f;
     }
 
+    if (gGfxSweep) {
+        int level = port_sweep_level_vertex(src) != 0;
+        if (level != gGfxSweepLevel) {
+            flush_batch();
+            gGfxSweepLevel = level;
+        }
+    }
+
+#ifdef HAVE_VFP_VECTORS
+    if (sVfpVectors) {
+        s32 n = MIN(count, MAX_VERTICES - dest);
+        if (n > 0) {
+            transform_vertices_vfp(src, n, &g.verts[dest], m);
+            vectors = TRUE;
+        }
+    }
+#endif
     for (i = 0; i < count && dest + i < MAX_VERTICES; i++) {
         RspVertex *v = &g.verts[dest + i];
-        float x = src[i].x, y = src[i].y, z = src[i].z;
-        v->x = x * m[0][0] + y * m[1][0] + z * m[2][0] + m[3][0];
-        v->y = x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1];
-        v->z = x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2];
-        v->w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
+        if (!vectors) {
+            float x = src[i].x, y = src[i].y, z = src[i].z;
+            v->x = x * m[0][0] + y * m[1][0] + z * m[2][0] + m[3][0];
+            v->y = x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1];
+            v->z = x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2];
+            v->w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
+        }
         v->flat = flat;
         if (g.billboard && dest + i > 0) {
             // Billboard vertices are offsets from the anchor vertex, in clip space.
@@ -1902,6 +1955,7 @@ void port_gfx_run_task(void *taskPtr) {
     }
 #endif
     REF_CALL(refb_start_frame());
+    read_switches();
     prewarm_textures();
     g.vertexIndex = 0;
     g.billboard = 0;

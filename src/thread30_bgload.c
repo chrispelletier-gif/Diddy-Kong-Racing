@@ -4,6 +4,7 @@
 #include "stacks.h"
 #include "thread3_main.h"
 #include <ultra64.h>
+#include "port_loadtime.h"
 
 /************ .data ************/
 
@@ -74,6 +75,7 @@ UNUSED s32 bgload_timer(void) {
  */
 s32 bgload_start(s32 levelId, s32 cutsceneId) {
     if (!gThread30NeedToLoadLevel) {
+        PORT_LOAD_BG_QUEUED();
         gThread30LoadDelay = 4;
         gThread30LevelIdToLoad = levelId;
         gThread30CutsceneIdToLoad = cutsceneId;
