@@ -86,8 +86,8 @@ typedef struct C3DTexture {
     int levels; // Mipmap levels after the first that tex holds (see mip_levels)
     int point;  // Point sampled, so the levels are never used
     int tinted; // The levels are tinted (the "Show" mipmap setting)
-    struct C3DTexture *vramPrev, *vramNext; // In sVramTextures while tex's memory is in VRAM
-    u32 vramBytes;                          // What it counts for in sVramTextureBytes
+    struct C3DTexture *prev, *next; // In sTextures (textures in VRAM, P17)
+    int toVram;                     // Waiting to be copied to VRAM (promote_textures)
 } C3DTexture;
 
 static C3D_RenderTarget *sTarget;
@@ -191,151 +191,148 @@ static void gpu_flush(const void *data, u32 size) {
 
 /*
  * Textures in VRAM (roadmap item P17). Every texture used to live in the linear heap in main memory, so the GPU
- * fetched its texels over the bus the CPU uses too; VRAM is the GPU's own. With DKR_TEX_VRAM=1 a new texture goes to
- * VRAM while that leaves VRAM_RESERVE free (room for the right eye's target when the 3D slider goes up), and to the
- * linear heap otherwise. A render target that later finds no room (anti-aliasing turned up, 3D) moves every texture
- * in VRAM back to the linear heap and tries again (evict_vram_textures), so the settings get the VRAM they always did.
+ * fetched its texels over the bus the CPU uses too; VRAM is the GPU's own. The CPU may not write VRAM (a write there
+ * is a data abort, bug report #172), so with DKR_TEX_VRAM=1 a texture is still made and written in the linear heap,
+ * then copied to VRAM by the GPU at the start of a later frame (promote_textures, a few a frame so the GPU queue
+ * doesn't overflow), while that leaves VRAM_RESERVE free (room for the right eye's target when the 3D slider goes up).
+ * Its linear copy is freed once the frames that may have used it are drawn. A render target that later finds no room
+ * (anti-aliasing turned up, 3D) has every texture copied back to the linear heap and tries again
+ * (evict_vram_textures), so the settings get the VRAM they always did. A texture written again gets new linear
+ * memory first, as the CPU writes it (and the "Show" mipmap setting leaves the levels of one in VRAM as they were).
  */
 #define VRAM_RESERVE (TOP_WIDTH * TOP_HEIGHT * 8)
-static GPU_TEXCOLOR gpu_texcolor(int format);
+#define PROMOTE_PER_FRAME 16
 static void forget_gpu_state(void);
+static void defer_delete(C3DTexture *t);
 
 static int in_vram(const void *data) {
     return (u32) data >= OS_VRAM_VADDR && (u32) data < OS_VRAM_VADDR + OS_VRAM_SIZE;
 }
-static C3DTexture *sVramTextures; // Every texture whose memory is in VRAM, those sharing another's included
+static C3DTexture *sTextures; // Every texture, those sharing another's memory included
+static int sToVram;           // How many wait to be copied to VRAM
 static u32 sVramTextureBytes;
-static u8 *sStaging;
-static u32 sStagingSize;
 
-static void vram_link(C3DTexture *t) {
-    t->vramPrev = NULL;
-    t->vramNext = sVramTextures;
-    if (sVramTextures != NULL) {
-        sVramTextures->vramPrev = t;
+static void texture_link(C3DTexture *t) {
+    t->prev = NULL;
+    t->next = sTextures;
+    if (sTextures != NULL) {
+        sTextures->prev = t;
     }
-    sVramTextures = t;
-    t->vramBytes = t->shared ? 0 : C3D_TexCalcTotalSize(t->tex.size, t->levels);
-    sVramTextureBytes += t->vramBytes;
+    sTextures = t;
 }
 
-/* Called before a texture is deleted or moved out of VRAM. */
-static void vram_unlink(C3DTexture *t) {
-    if (t->vramPrev == NULL && sVramTextures != t) {
+/* Called before a texture is deleted. */
+static void texture_unlink(C3DTexture *t) {
+    if (t->prev == NULL && sTextures != t) {
         return; // Not in the list.
     }
-    if (t->vramPrev != NULL) {
-        t->vramPrev->vramNext = t->vramNext;
+    if (t->prev != NULL) {
+        t->prev->next = t->next;
     } else {
-        sVramTextures = t->vramNext;
+        sTextures = t->next;
     }
-    if (t->vramNext != NULL) {
-        t->vramNext->vramPrev = t->vramPrev;
+    if (t->next != NULL) {
+        t->next->prev = t->prev;
     }
-    t->vramPrev = t->vramNext = NULL;
-    sVramTextureBytes -= t->vramBytes;
-    t->vramBytes = 0;
+    t->prev = t->next = NULL;
+    if (t->toVram) {
+        t->toVram = 0;
+        sToVram--;
+    }
+    if (!t->shared && in_vram(t->tex.data)) {
+        sVramTextureBytes -= C3D_TexCalcTotalSize(t->tex.size, t->levels);
+    }
 }
 
-/* Makes the texture's memory, in VRAM if the switch is on and there is room, else in the linear heap. */
-static int texture_init(C3DTexture *t, unsigned int pw, unsigned int ph, int levels, int format) {
-    C3D_TexInitParams params = { pw, ph, levels, gpu_texcolor(format), GPU_TEX_2D, false };
-    u32 bytes = C3D_TexCalcTotalSize(C3D_TexCalcLevelSize(pw * ph * gfx_texel_bytes(format), 0), levels);
-    if (plat_switch("DKR_TEX_VRAM", 0) && vramSpaceFree() >= bytes + VRAM_RESERVE) {
-        params.onVram = true;
-        if (C3D_TexInitWithParams(&t->tex, NULL, params)) {
-            return 1; // Listed in sVramTextures once its levels are known.
+/* Points the textures that share from's memory at to. */
+static void move_shares(const void *from, void *to) {
+    C3DTexture *t;
+    for (t = sTextures; t != NULL; t = t->next) {
+        if (t->shared && t->tex.data == from) {
+            t->tex.data = to;
         }
-        params.onVram = false;
     }
-    return C3D_TexInitWithParams(&t->tex, NULL, params);
 }
 
 /*
- * Where a texture's texels are to be written: the CPU writes VRAM a few bytes at a time and slowly, so a texture in
- * VRAM is written in a buffer in main memory first (its tex.data points there until texture_write_end), and copied
- * over in one go. Returns the texture's VRAM, or NULL when it is written in place.
+ * Start of a frame: queues GPU copies of a few waiting textures to VRAM. The copies go in the GPU queue ahead of this
+ * frame's command list, which already uses the VRAM copy; the frame being drawn now may still read the linear one,
+ * which is freed with this frame's other deleted textures.
  */
-static u8 *texture_write_begin(C3DTexture *t) {
-    u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
-    u8 *vram = (u8 *) t->tex.data;
-    if (!in_vram(vram)) {
-        return NULL;
-    }
-    if (total > sStagingSize) {
-        u8 *buffer = realloc(sStaging, total);
-        if (buffer == NULL) {
-            return NULL; // Written straight into VRAM, slowly.
-        }
-        sStaging = buffer;
-        sStagingSize = total;
-    }
-    t->tex.data = sStaging;
-    return vram;
-}
-
-/* Puts the texture's own memory back, copying what was written from byte from on, and flushes it for the GPU. */
-static void texture_write_end(C3DTexture *t, u8 *vram, u32 from) {
-    u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
-    if (from >= total) {
-        if (vram != NULL) {
-            t->tex.data = vram;
-        }
+static void promote_textures(void) {
+    C3DTexture *t;
+    int done = 0;
+    if (sToVram == 0) {
         return;
     }
-    if (vram != NULL) {
-        memcpy(vram + from, sStaging + from, total - from);
+    for (t = sTextures; t != NULL && sToVram > 0 && done < PROMOTE_PER_FRAME; t = t->next) {
+        u32 total;
+        void *vram;
+        C3DTexture *old;
+        if (!t->toVram) {
+            continue;
+        }
+        t->toVram = 0;
+        sToVram--;
+        total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
+        if (vramSpaceFree() < total + VRAM_RESERVE || (old = calloc(1, sizeof(C3DTexture))) == NULL) {
+            continue;
+        }
+        if ((vram = vramAlloc(total)) == NULL) {
+            free(old);
+            continue;
+        }
+        GX_TextureCopy((u32 *) t->tex.data, 0, (u32 *) vram, 0, total, GX_TRANSFER_RAW_COPY(1));
+        old->tex.data = t->tex.data;
+        move_shares(t->tex.data, vram);
         t->tex.data = vram;
+        sVramTextureBytes += total;
+        defer_delete(old);
+        done++;
     }
-    gpu_flush((u8 *) t->tex.data + from, total - from);
+    if (done > 0) {
+        forget_gpu_state(); // The bound textures' addresses changed.
+    }
+}
+
+/* Moves one texture's memory from VRAM to the linear heap, with the GPU idle and outside a citro3d frame. */
+static int texture_to_linear(C3DTexture *t) {
+    u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
+    void *data = linearAlloc(total);
+    if (data == NULL) {
+        return 0;
+    }
+    gpu_flush(data, total); // No dirty cache lines left to land on the copy later.
+    C3D_SyncTextureCopy((u32 *) t->tex.data, 0, (u32 *) data, 0, total, GX_TRANSFER_RAW_COPY(1));
+    move_shares(t->tex.data, data);
+    vramFree(t->tex.data);
+    t->tex.data = data;
+    sVramTextureBytes -= total;
+    return 1;
 }
 
 /*
  * With the GPU idle: moves every texture in VRAM to the linear heap, for a render target that needs the room.
- * Textures sharing another's memory follow it. Returns how many moved.
+ * Returns how many moved.
  */
 static int evict_vram_textures(void) {
-    C3DTexture *t, *next;
-    void **from = NULL, **to = NULL;
-    int count = 0, moved = 0, i;
-
-    for (t = sVramTextures; t != NULL; t = t->vramNext) {
-        count++;
-    }
-    if (count == 0 || (from = malloc(count * sizeof(void *))) == NULL || (to = malloc(count * sizeof(void *))) == NULL) {
-        free(from);
-        return 0;
-    }
-    for (t = sVramTextures; t != NULL; t = next) {
-        u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
-        void *data;
-        next = t->vramNext;
-        if (t->shared || (data = linearAlloc(total)) == NULL) {
-            continue;
+    C3DTexture *t;
+    int moved = 0, count = 0;
+    for (t = sTextures; t != NULL; t = t->next) {
+        if (t->toVram) {
+            t->toVram = 0; // They would only take the room back.
+            sToVram--;
         }
-        memcpy(data, t->tex.data, total);
-        gpu_flush(data, total);
-        vram_unlink(t);
-        from[moved] = t->tex.data;
-        to[moved++] = data;
-        vramFree(t->tex.data);
-        t->tex.data = data;
-    }
-    for (t = sVramTextures; t != NULL; t = next) {
-        next = t->vramNext;
-        for (i = 0; t->shared && i < moved; i++) {
-            if (t->tex.data == from[i]) {
-                vram_unlink(t);
-                t->tex.data = to[i];
-                break;
-            }
+        if (!t->shared && in_vram(t->tex.data)) {
+            count++;
+            moved += texture_to_linear(t);
         }
     }
-    plat_log("textures: moved %d of %d from VRAM to main memory for a render target (%lu KB left in VRAM)", moved,
-             count, (unsigned long) (sVramTextureBytes / 1024));
-    free(from);
-    free(to);
-    forget_gpu_state();
+    if (count > 0) {
+        plat_log("textures: moved %d of %d from VRAM to main memory for a render target (%lu KB left in VRAM)",
+                 moved, count, (unsigned long) (sVramTextureBytes / 1024));
+        forget_gpu_state();
+    }
     return moved;
 }
 
@@ -1958,7 +1955,7 @@ void gfxb_3ds_shutdown(void) {
 static void process_pending_frees(FrameSlot *slot) {
     int i;
     for (i = 0; i < slot->numFrees; i++) {
-        vram_unlink(slot->frees[i]);
+        texture_unlink(slot->frees[i]);
         if (!slot->frees[i]->shared) {
             C3D_TexDelete(&slot->frees[i]->tex);
         }
@@ -2119,6 +2116,7 @@ void gfxb_start_frame(void) {
     bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
     read_switches();
+    promote_textures();
     forget_gpu_state();
     sMipmapsUsed = sMipmapSetting != 0;
     sMipmapsShown = sMipmapSetting == 2;
@@ -2541,7 +2539,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
     int format = gpu_format(tex);
     int levels = mip_levels(tex, pw, ph);
     unsigned int bytes = gfx_texel_bytes(format);
-    u8 *data, *vram;
+    u8 *data;
     unsigned int tx, ty;
     int i;
 
@@ -2551,10 +2549,12 @@ void gfxb_texture_upload(GfxTexture *tex) {
     }
     if (t == NULL) {
         t = calloc(1, sizeof(C3DTexture));
-        if (t != NULL && !texture_init(t, pw, ph, levels, format)) {
+        if (t != NULL && levels > 0 &&
+            !C3D_TexInitWithParams(&t->tex, NULL,
+                                   (C3D_TexInitParams) { pw, ph, levels, gpu_texcolor(format), GPU_TEX_2D, false })) {
             levels = 0; // No room for the levels: try one.
         }
-        if (t == NULL || (levels == 0 && !texture_init(t, pw, ph, 0, format))) {
+        if (t == NULL || (levels == 0 && !C3D_TexInit(&t->tex, pw, ph, gpu_texcolor(format)))) {
             static int sFailures;
             gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
             if ((sFailures++ % 50) == 0) {
@@ -2565,15 +2565,27 @@ void gfxb_texture_upload(GfxTexture *tex) {
             return;
         }
         t->levels = levels;
-        if (in_vram(t->tex.data)) {
-            vram_link(t);
-        }
+        texture_link(t);
         tex->backendData = t;
+    } else if (in_vram(t->tex.data)) {
+        // Written again, by the CPU, which can't write VRAM: into new linear memory (P17).
+        u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
+        void *data = linearAlloc(total);
+        C3DTexture *old = calloc(1, sizeof(C3DTexture));
+        if (data == NULL || old == NULL) {
+            linearFree(data);
+            free(old);
+            return; // Keeps the old picture.
+        }
+        old->tex.data = t->tex.data;
+        move_shares(t->tex.data, data);
+        t->tex.data = data;
+        sVramTextureBytes -= total;
+        defer_delete(old);
     }
     // Swizzled straight into the texture's memory in 8x8 tiles, top row first (the GPU samples t = 0 from the start
-    // of the data). No temporary buffer (except for VRAM, see texture_write_begin): when the heap was short, skipping
-    // the upload left whatever the memory held before, such as an old solid black texture.
-    vram = texture_write_begin(t);
+    // of the data). No temporary buffer: when the heap was short, skipping the upload left whatever the memory held
+    // before, such as an old solid black texture.
     data = (u8 *) t->tex.data;
     for (ty = 0; ty < ph; ty += 8) {
         for (tx = 0; tx < pw; tx += 8) {
@@ -2590,9 +2602,13 @@ void gfxb_texture_upload(GfxTexture *tex) {
     if (t->levels > 0 && !upload_mip_levels(t, tex, format)) {
         t->levels = 0; // Out of memory for the temporary image: the levels hold nothing, so they aren't used.
     }
-    texture_write_end(t, vram, 0);
     set_texture_filter(t, tex->filter == GFX_FILTER_POINT);
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
+    gpu_flush(data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
+    if (!t->toVram && plat_switch("DKR_TEX_VRAM", 0)) {
+        t->toVram = 1; // Copied over by promote_textures.
+        sToVram++;
+    }
     forget_gpu_state();
 }
 
@@ -2640,18 +2656,22 @@ static void verify_texture(const GfxTexture *tex) {
 
 void gfxb_texture_free(GfxTexture *tex) {
     C3DTexture *t = (C3DTexture *) tex->backendData;
-    FrameSlot *slot = &sSlots[sRec];
     if (t == NULL) {
         return;
     }
     tex->backendData = NULL;
-    // The GPU may still be drawing with it, and this frame may have used it: delete it once the GPU has drawn this
-    // frame (process_pending_frees).
+    defer_delete(t);
+}
+
+/* The GPU may still be drawing with the texture, and this frame may have used it: deletes it once the GPU has drawn
+ * this frame (process_pending_frees). */
+static void defer_delete(C3DTexture *t) {
+    FrameSlot *slot = &sSlots[sRec];
     if (slot->numFrees == slot->freesCapacity) {
         int capacity = slot->freesCapacity ? slot->freesCapacity * 2 : 256;
         C3DTexture **list = realloc(slot->frees, capacity * sizeof(C3DTexture *));
         if (list == NULL) {
-            vram_unlink(t);
+            texture_unlink(t);
             if (!t->shared) {
                 C3D_TexDelete(&t->tex); // Out of memory: delete now and risk a glitch.
             }
@@ -2673,11 +2693,8 @@ void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
     // The same memory with another sampler setting: only the C3D_Tex's parameters differ.
     *t = *s;
     t->shared = 1;
-    t->vramPrev = t->vramNext = NULL;
-    t->vramBytes = 0;
-    if (in_vram(t->tex.data)) {
-        vram_link(t); // Moved with its memory by evict_vram_textures.
-    }
+    t->toVram = 0;
+    texture_link(t); // Follows its memory when that moves (move_shares).
     set_texture_filter(t, dst->filter == GFX_FILTER_POINT);
     dst->backendData = t;
 }
@@ -3151,14 +3168,11 @@ static int bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV)
     C3DTexture *t = (tex != NULL) ? (C3DTexture *) tex->backendData : NULL;
     C3D_Tex *bind = (t != NULL) ? &t->tex : &sWhiteTex;
     int changed = !sGpu.known || bind != sGpu.tex[unit];
-    if (t != NULL && t->levels > 0 && t->tinted != sMipmapsShown && tex->pixels != NULL) {
+    if (t != NULL && t->levels > 0 && t->tinted != sMipmapsShown && tex->pixels != NULL && !in_vram(t->tex.data)) {
         // The Show setting changed since the levels were built. The GPU may still be drawing the last frame with
         // them, which can show one frame of mixed levels.
-        u8 *vram = texture_write_begin(t);
         if (upload_mip_levels(t, tex, gpu_format(tex))) {
-            texture_write_end(t, vram, t->tex.size); // Only the levels after the first were written.
-        } else {
-            texture_write_end(t, vram, C3D_TexCalcTotalSize(t->tex.size, t->levels)); // Nothing to copy.
+            gpu_flush(t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
         }
         t->tinted = sMipmapsShown;
     }
