@@ -485,6 +485,8 @@ static void voice_start(Voice *v, s32 ch) {
  * on sounding), a one-shot sample is dropped (it would have ended anyway). Called by the backend from its frame
  * thread once the DSP is back.
  */
+static u32 sResyncs;
+
 void pv_resync(void) {
     s32 i, restarted = 0, dropped = 0;
     for (i = 0; i < PV_CHANNELS; i++) {
@@ -503,6 +505,7 @@ void pv_resync(void) {
             dropped++;
         }
     }
+    sResyncs++;
     plat_log("voices: resumed, %d looping voices restarted, %d one-shot voices dropped", (int) restarted,
              (int) dropped);
 }
@@ -675,6 +678,21 @@ void pv_frame_tick(void) {
 const char *pv_describe(void) {
     static char sText[32];
     sprintf(sText, "dsp/%dv", (int) sPeakPlaying);
+    return sText;
+}
+
+/* For bug reports: the engine's state and counters in one line. */
+const char *pv_status(void) {
+    static char sText[160];
+    s32 i, playing = 0;
+    for (i = 0; i < PV_CHANNELS; i++) {
+        playing += sVoices[i].playing ? 1 : 0;
+    }
+    sprintf(sText, "%d playing (peak %d), %u events late by %.0f avg %.0f max samples, %u dropped, %u pending, "
+                   "%s, %u resumes, aux frames %u/%u",
+            (int) playing, (int) sPeakPlaying, (unsigned) sLateCount, sLateCount ? sLateSum / sLateCount : 0.0,
+            sLateMax, (unsigned) sEventsDropped, (unsigned) sEventCount, sMuted ? "muted" : "unmuted",
+            (unsigned) sResyncs, (unsigned) sAuxFrames[0], (unsigned) sAuxFrames[1]);
     return sText;
 }
 

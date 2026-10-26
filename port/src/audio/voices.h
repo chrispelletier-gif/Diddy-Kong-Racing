@@ -36,6 +36,8 @@ void pv_output_queue(unsigned numBytes);
 unsigned pv_output_remaining(void);
 /* After the DSP was unloaded and reloaded (HOME menu, sleep): restarts the playing voices from a known point. */
 void pv_resync(void);
+/* For bug reports: the voices' state and counters in one line. */
+const char *pv_status(void);
 /* For the results label: e.g. "dsp" with the peak channel count. */
 const char *pv_describe(void);
 
