@@ -1453,6 +1453,25 @@ static inline u32 walk_part(u32 op) {
     }
 }
 
+/*
+ * Whether a display list call's target can't be a display list: not word aligned, or in the unmapped first 64 KB. The
+ * N64 masks such an address and reads whatever is there; here it would be a crash (bug reports #178 and #181, both on
+ * the first frame after a menu level load). The list holding the call is garbage too, so the caller stops reading it.
+ */
+static s32 bad_list_address(u32 addr, const Gfx *where) {
+    static s32 sLastLogged = -1;
+    if ((addr & 3) == 0 && addr >= 0x10000) {
+        return FALSE;
+    }
+    if (sLastLogged != sFrameCount) {
+        sLastLogged = sFrameCount;
+        plat_log("renderer: skipped a display list at bad address %08X, called from %p (%08X %08X), frame %d",
+                 (unsigned) addr, (const void *) where, (unsigned) where->words.w0, (unsigned) where->words.w1,
+                 (int) sFrameCount);
+    }
+    return TRUE;
+}
+
 static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
     s32 executed = 0;
 
@@ -1520,6 +1539,9 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 break;
 
             case OP(G_DL):
+                if (bad_list_address(w1, dl - 1)) {
+                    return;
+                }
                 if (depth < DL_STACK_SIZE) {
                     run_command_list((const Gfx *) seg_addr(w1), -1, depth + 1);
                 }
@@ -1529,6 +1551,9 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 break;
 
             case OP(G_DMADL):
+                if (bad_list_address(w1, dl - 1)) {
+                    return;
+                }
                 if (depth < DL_STACK_SIZE) {
                     run_command_list((const Gfx *) seg_addr(w1), (w0 >> 16) & 0xFF, depth + 1);
                 }
