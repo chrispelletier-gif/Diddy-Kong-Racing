@@ -114,12 +114,24 @@ ifeq ($(TARGET),3ds)
   GAME_ARCH_FLAGS := -fno-short-enums -DPORT_GFX_REFERENCE
   CTRULIB   := $(DEVKITPRO)/libctru
   PORTLIBS  := $(DEVKITPRO)/portlibs/3ds
-  # Identifies the build in bug reports.
-  PORT_BUILD_VERSION := $(shell git -c safe.directory='*' describe --always --dirty 2>/dev/null || echo unknown)$(if $(filter 1,$(RELEASE)),-release)
+  GIT := git -c safe.directory='*'
+  # The version comes from the newest vX.Y.Z[-label] tag (a tagged release, .github/workflows/Port.yml): exactly the
+  # tag's "0.1.0-beta" on the tagged commit, "0.1.0-beta+3" three commits later, "dev" before the first tag.
+  PORT_TAG := $(shell $(GIT) describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null)
+  PORT_TAG_DISTANCE := $(if $(PORT_TAG),$(shell $(GIT) rev-list --count $(PORT_TAG)..HEAD 2>/dev/null))
+  PORT_VERSION := $(if $(PORT_TAG),$(PORT_TAG:v%=%)$(if $(filter-out 0,$(PORT_TAG_DISTANCE)),+$(PORT_TAG_DISTANCE)),dev)
+  # The tag's numbers, for the .cia's title version (3ds/rules.mk); 0.0.0 before the first tag.
+  PORT_VERSION_NUMBERS := $(subst ., ,$(firstword $(subst -, ,$(subst +, ,$(PORT_TAG:v%=%)))))
+  PORT_VERSION_MAJOR := $(or $(word 1,$(PORT_VERSION_NUMBERS)),0)
+  PORT_VERSION_MINOR := $(or $(word 2,$(PORT_VERSION_NUMBERS)),0)
+  PORT_VERSION_MICRO := $(or $(word 3,$(PORT_VERSION_NUMBERS)),0)
+  # Identifies the build in bug reports: git describe from the newest version tag, or the commit before there is one.
+  PORT_BUILD_VERSION := $(shell $(GIT) describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo unknown)$(if $(filter 1,$(RELEASE)),-release)
   # The full commit, which the update (3ds/update_3ds.c) compares with the published builds.
-  PORT_BUILD_COMMIT := $(shell git -c safe.directory='*' rev-parse HEAD 2>/dev/null)
+  PORT_BUILD_COMMIT := $(shell $(GIT) rev-parse HEAD 2>/dev/null)
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include -Iinclude -Isrc \
-                -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\" -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
+                -DPORT_VERSION=\"$(PORT_VERSION)\" -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\" \
+                -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
   LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers
   # curl and mbedtls (devkitPro's 3ds-curl) send bug reports and download updates.

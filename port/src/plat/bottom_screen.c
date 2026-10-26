@@ -776,9 +776,14 @@ static void draw_controls(int y0, int y1) {
         text(FONT_FUN, 12, y0 + 4, "CONTROLS", WHITE, 1);
         top = y0 + 21;
     }
-    if (PLAT_DEBUG_TOOLS && font_ready(FONT_SMALL)) {
+    if (font_ready(FONT_SMALL)) {
         char build[48];
-        snprintf(build, sizeof(build), "Build %.12s", plat_build_version());
+        // Players see the version; debug builds the git describe, which names the commit too.
+        if (PLAT_DEBUG_TOOLS) {
+            snprintf(build, sizeof(build), "Build %.24s", plat_build_version());
+        } else {
+            snprintf(build, sizeof(build), "Version %.20s", plat_version());
+        }
         text(FONT_SMALL, BS_WIDTH - 12 - text_width(FONT_SMALL, build), y0 + 6, build, DIM, 1);
     }
     for (i = 0; i < count; i++) {

@@ -6,6 +6,10 @@ name: 3DS port
 #
 # Needs the ROMURL repository secret (the same one the N64 workflows use): a private download URL for a US 1.0
 # ROM (sha1 0cb115d8716dbbc2922fda38e533b9fe63bb9670). The ROM is only used inside the jobs; it is never uploaded.
+#
+# Pushing a version tag (vX.Y.Z, or vX.Y.Z-label such as v0.1.0-beta) builds that commit and makes a draft GitHub
+# Release of it with the player's dkr.3dsx and dkr.cia (job release-3ds). Nothing is public until the draft is
+# published on GitHub. The builds take their version from the newest such tag (port/Makefile).
 
 on:
   push:
@@ -77,6 +81,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # The history and tags, for the version (git describe).
+          fetch-depth: 0
 
       - name: Download include/asset_enums.h
         uses: actions/download-artifact@v4
@@ -177,6 +184,62 @@ jobs:
             publish 3ds-master "3DS build: master" build/release \
               "Copy your own US 1.0 ROM to sdmc:/3ds/dkr/baserom.z64. Then either copy dkr.3dsx to sdmc:/3ds/ and start it from the Homebrew Launcher, or install dkr.cia with FBI to get a HOME menu icon."
           fi
+
+  # A version tag's release: a draft (publish it on GitHub to make it public), marked a pre-release when the version
+  # has a label (v0.1.0-beta). Its notes are port/release-notes/<tag>.md when that file exists. Unlike the 3ds-*
+  # pre-releases it never moves; pushing the same tag again only replaces a draft, never a published release.
+  release-3ds:
+    name: Release the 3DS build
+    needs: build-3ds
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download the player build
+        uses: actions/download-artifact@v4
+        with:
+          name: dkr-3ds-release-${{ github.sha }}
+          path: build/release
+
+      - name: Make the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::$TAG is not a version tag (vX.Y.Z or vX.Y.Z-label)."
+            exit 1
+          fi
+          cd build/release
+          printf 'version=%s\ncommit=%s\ndate=%s\nsize=%s\nsha256=%s\n' "${TAG#v}" "$GITHUB_SHA" \
+            "$(date -u +%Y-%m-%dT%H:%MZ)" "$(stat -c %s dkr.3dsx)" "$(sha256sum dkr.3dsx | cut -d' ' -f1)" > build.txt
+          sha256sum dkr.3dsx dkr.cia > SHA256SUMS.txt
+          cat build.txt SHA256SUMS.txt
+          notes="$GITHUB_WORKSPACE/port/release-notes/$TAG.md"
+          if [ ! -f "$notes" ]; then
+            notes=$RUNNER_TEMP/notes.md
+            {
+              echo "Diddy Kong Racing for the New Nintendo 3DS, version ${TAG#v} (commit $GITHUB_SHA)."
+              echo
+              echo "You need your own US 1.0 ROM: copy it to \`sdmc:/3ds/dkr/baserom.z64\`. Then either copy dkr.3dsx to"
+              echo "\`sdmc:/3ds/\` and start it from the Homebrew Launcher, or install dkr.cia with FBI to get a HOME menu icon."
+              echo "SHA256SUMS.txt has the files' checksums."
+            } > "$notes"
+          fi
+          state=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          if [ "$state" = false ]; then
+            echo "::error::$TAG is already published; make a new version tag instead of moving this one."
+            exit 1
+          fi
+          [ "$state" = true ] && gh release delete "$TAG" --yes
+          gh release create "$TAG" --draft --verify-tag --title "Diddy Kong Racing 3DS ${TAG#v}" \
+            --notes-file "$notes" $(case "$TAG" in *-*) echo --prerelease;; esac) \
+            dkr.3dsx dkr.cia SHA256SUMS.txt build.txt
 
   host:
     name: Host build and frame regression

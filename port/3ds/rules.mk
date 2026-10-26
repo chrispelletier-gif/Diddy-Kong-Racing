@@ -10,7 +10,7 @@ SHADER_HDR  := $(BUILD_DIR)/shader/shader_shbin.h
 SHADER_OBJS := $(BUILD_DIR)/shader/shader_shbin.o
 
 APP_TITLE       := Diddy Kong Racing
-APP_DESCRIPTION := Native port of the DKR decompilation
+APP_DESCRIPTION := Native port of the DKR decompilation, version $(PORT_VERSION)
 APP_AUTHOR      := DKR decomp contributors
 APP_ICON        := $(firstword $(wildcard 3ds/icon.png) $(CTRULIB)/default_icon.png)
 
@@ -38,7 +38,14 @@ $(call obj,3ds/gfx_c3d.c): $(SHADER_HDR)
 
 $(EXE): $(SHADER_OBJS)
 
-$(BUILD_DIR)/dkr.smdh: $(APP_ICON)
+# Rewritten only when the version changes, so the files that show it are rebuilt then (an incremental build would
+# otherwise keep the old one).
+VERSION_STAMP := $(BUILD_DIR)/version.txt
+$(shell mkdir -p $(BUILD_DIR) && echo '$(PORT_VERSION) $(PORT_BUILD_VERSION)' | cmp -s - $(VERSION_STAMP) || \
+        echo '$(PORT_VERSION) $(PORT_BUILD_VERSION)' > $(VERSION_STAMP))
+$(foreach f,src/plat/plat_common.c 3ds/bugreport_3ds.c 3ds/update_3ds.c,$(call obj,$(f))): $(VERSION_STAMP)
+
+$(BUILD_DIR)/dkr.smdh: $(APP_ICON) $(VERSION_STAMP)
 	@$(TOOLS_BIN)/smdhtool --create "$(APP_TITLE)" "$(APP_DESCRIPTION)" "$(APP_AUTHOR)" $(APP_ICON) $@
 
 $(BUILD_DIR)/dkr.3dsx: $(EXE) $(BUILD_DIR)/dkr.smdh
@@ -52,7 +59,8 @@ $(BUILD_DIR)/dkr.bnr: $(CIA_DIR)/banner.png $(CIA_DIR)/banner.wav
 $(BUILD_DIR)/dkr.cia: $(EXE) $(BUILD_DIR)/dkr.smdh $(BUILD_DIR)/dkr.bnr $(CIA_DIR)/dkr.rsf
 	@echo "CIA $@"
 	@$(MAKEROM) -f cia -o $@ -elf $(EXE) -rsf $(CIA_DIR)/dkr.rsf -icon $(BUILD_DIR)/dkr.smdh \
-		-banner $(BUILD_DIR)/dkr.bnr -exefslogo -target t
+		-banner $(BUILD_DIR)/dkr.bnr -exefslogo -target t \
+		-major $(PORT_VERSION_MAJOR) -minor $(PORT_VERSION_MINOR) -micro $(PORT_VERSION_MICRO)
 
 .PHONY: cia
 cia: $(BUILD_DIR)/dkr.cia
