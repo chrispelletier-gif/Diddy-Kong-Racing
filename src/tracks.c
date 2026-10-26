@@ -22,6 +22,7 @@
 #include "textures_sprites.h"
 #include "thread3_main.h"
 #include "types.h"
+#include "port_step.h"
 #include "video.h"
 #include "waves.h"
 #include "weather.h"
@@ -3523,7 +3524,7 @@ void func_8002DE30(Object *obj) {
                                                         (Vec3s *) &vertices[triangle->verticesArray[2]],
                                                         (Vec3s *) &vertices[triangle->verticesArray[3]])) {
                                 foundResult = TRUE;
-                                obj->shading->unk0 += (((1.0f - D_800DC884[batchFlags]) - obj->shading->unk0) * 0.2);
+                                obj->shading->unk0 += (((1.0f - D_800DC884[batchFlags]) - obj->shading->unk0) * PORT_LERP(0.2)); //!@Delta
                             }
                         }
                     }

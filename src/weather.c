@@ -14,6 +14,7 @@
 #include "textures_sprites.h"
 #include "tracks.h"
 #include "types.h"
+#include "port_step.h"
 #include "video.h"
 
 #define WEATHER_OVERRIDE_COUNT 16
@@ -463,7 +464,7 @@ void snow_update(s32 updateRate) {
             ((((snowPos->y + (gWeather.velY * 2)) * updateRate) >> 1) + gSnowPhysics[i].y_position) & gSnowGfx.radiusY;
         gSnowPhysics[i].z_position =
             ((((snowPos->z + (gWeather.velZ * 2)) * updateRate) >> 1) + gSnowPhysics[i].z_position) & gSnowGfx.radiusZ;
-        gSnowPhysics[i].index++;
+        gSnowPhysics[i].index += PORT_TICK(); //!@Delta: the flakes' sway runs at 30 fps speed
         if (gSnowPhysics[i].index >= gSnowGfx.size) {
             gSnowPhysics[i].index -= gSnowGfx.size;
         }

@@ -9,6 +9,7 @@
 #include "particles.h"
 #include "racer.h"
 #include "types.h"
+#include "port_step.h"
 
 /************ .data ************/
 
@@ -136,7 +137,7 @@ void update_bluey(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *ra
                     steerVel = 73;
                 }
                 racer->unk1CD = 3;
-                racer->animationSpeed += (steerVel - racer->animationSpeed) * 0.25;
+                racer->animationSpeed += (steerVel - racer->animationSpeed) * PORT_LERP(0.25); //!@Delta
             } else {
                 racer->unk1CD = 0;
                 obj->animationID = ANIM_BLUEY_RUN;

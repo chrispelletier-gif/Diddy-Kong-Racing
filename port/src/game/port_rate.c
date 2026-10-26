@@ -1,6 +1,7 @@
 /*
- * 60 fps physics (port.h): obj_update (src/objects.c) tells this file how many retraces each logic frame took, and
- * the PORT_STEP / PORT_DECAY / PORT_LERP / PORT_TICK macros in src/racer.c read the two flags it sets.
+ * 60 fps steps (port.h): the main loop (src/thread3_main.c) tells this file how many retraces each logic frame took,
+ * once a frame, and the PORT_* macros (include/port_step.h) in the racer, object, HUD and menu code read the two flags
+ * it sets.
  */
 #include <stdlib.h>
 

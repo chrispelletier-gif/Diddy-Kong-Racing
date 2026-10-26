@@ -26,7 +26,7 @@ typedef struct RspVertex {
     u8 r, g, b, a;
     u8 fog;
     u8 fogValid; // The fog factor is only worked out while G_FOG is set (see load_vertices)
-    u8 flat;     // Loaded with an orthographic matrix: drawn flat on the screen (GfxDrawState.flat)
+    u8 flat;     // Loaded with an orthographic matrix: drawn flat on the screen (1, or GFX_FLAT_PLACED for a sprite)
 } RspVertex;
 
 typedef struct Tile {
@@ -853,9 +853,12 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     u8 flat = m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f;
     // Billboard (sprite) vertices are offsets in clip space, sized for the N64's camera; on the port's wider (G3) or
     // narrower (the widescreen style's field of view) camera they are scaled to keep their size next to the 3D world.
-    // Their matrix has no perspective, but they belong to the 3D world, not the flat HUD.
+    // Their matrix has no perspective, but they belong with their anchor: the 3D world's, or, anchored by the HUD's
+    // or a menu's orthographic matrix (the Save Options balloons, the banana counter), the flat 4:3 picture, where
+    // they never stretch to a wide screen's edge as they pass the N64 one (GFX_FLAT_PLACED).
     float bbScaleY = 1.0f, bbScaleX = 1.0f;
-    if (g.billboard) {
+    u8 bbFlat = g.verts[0].flat ? GFX_FLAT_PLACED : 0;
+    if (g.billboard && !bbFlat) {
         bbScaleY = 1.0f / plat_fov_tan_scale();
         bbScaleX = bbScaleY / plat_aspect_scale();
     }
@@ -874,7 +877,7 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
             v->y = v->y * bbScaleY + g.verts[0].y;
             v->z += g.verts[0].z;
             v->w += g.verts[0].w;
-            v->flat = 0;
+            v->flat = bbFlat;
         }
         v->r = src[i].r;
         v->g = src[i].g;
@@ -987,6 +990,7 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         const Triangle *t = &tris[i];
         const TexCoords *uv[3] = { &t->uv0, &t->uv1, &t->uv2 };
         u8 idx[3] = { t->vi0, t->vi1, t->vi2 };
+        u8 flat0, flat1, flat2;
         u16 *out;
 
         if (idx[0] >= MAX_VERTICES || idx[1] >= MAX_VERTICES || idx[2] >= MAX_VERTICES) {
@@ -994,7 +998,10 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         }
         // Backface culling: flag 0x40 means double sided. The game mirrors the viewport for mirror mode.
         state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : frontCull;
-        state.flat = g.verts[idx[0]].flat && g.verts[idx[1]].flat && g.verts[idx[2]].flat;
+        flat0 = g.verts[idx[0]].flat;
+        flat1 = g.verts[idx[1]].flat;
+        flat2 = g.verts[idx[2]].flat;
+        state.flat = (flat0 && flat1 && flat2) ? (flat0 | flat1 | flat2) : 0; // 1, or GFX_FLAT_PLACED (3) if a sprite
         if ((state.cullMode | (state.flat << 2)) == batchedKey && sBatchCount > 0 && batch_has_room()) {
             // Only the culling and flatness change from one triangle to the next, so the batch's state is still this
             // one.
@@ -1069,6 +1076,9 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
     if (!textured) {
         state.textures[0] = NULL;
         state.textures[1] = NULL;
+    } else if (x0 > 1.0f || x1 < GFX_SCREEN_WIDTH - 1.0f) {
+        // Narrower than the screen: on a wide screen it keeps its size even where it ends at an edge (gfx_flat_x).
+        state.flat = GFX_FLAT_PLACED;
     }
     if (state.textures[0] != NULL) {
         w0 = state.textures[0]->width;
@@ -1114,10 +1124,17 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
     out[2] = first[3];
 }
 
+/* A rectangle's x (10.2 fixed point), read as signed: the game's x past the left edge wraps to 1023 and down, and the
+ * port has it draw there (src/rcp_dkr.c, src/font.c), where the wide screen shows it. On the N64 screen both are off
+ * the screen, and nothing the game draws starts 512 pixels or more to the right. */
+static inline float rect_x(u32 field) {
+    return (s32) ((field & 0xFFF) ^ 0x800) - 0x800;
+}
+
 static void texture_rectangle(u32 w0, u32 w1, s32 flip) {
-    float lrx = ((w0 >> 12) & 0xFFF) * 0.25f;
+    float lrx = rect_x(w0 >> 12) * 0.25f;
     float lry = (w0 & 0xFFF) * 0.25f;
-    float ulx = ((w1 >> 12) & 0xFFF) * 0.25f;
+    float ulx = rect_x(w1 >> 12) * 0.25f;
     float uly = (w1 & 0xFFF) * 0.25f;
     s32 tile = (w1 >> 24) & 7;
     float s = (s16) (g.rdpHalf1 >> 16) * (1.0f / 32.0f);

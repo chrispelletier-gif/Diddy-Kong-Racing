@@ -39,6 +39,7 @@
 #include "thread3_main.h"
 #include "tracks.h"
 #include "types.h"
+#include "port_step.h"
 #include "video.h"
 
 /**
@@ -14076,9 +14077,9 @@ void update_controller_sticks(void) {
 
         gControllersYAxis[i] = YClamp;
         if (gControllersYAxis[i] < -STICK_DEADZONE) {
-            gControllersYAxisDelay[i]++; //!@Delta
+            gControllersYAxisDelay[i] += PORT_TICK(); //!@Delta
         } else if (gControllersYAxis[i] > STICK_DEADZONE) {
-            gControllersYAxisDelay[i]++; //!@Delta
+            gControllersYAxisDelay[i] += PORT_TICK(); //!@Delta
         } else {
             gControllersYAxisDelay[i] = 0;
         }
@@ -14090,9 +14091,9 @@ void update_controller_sticks(void) {
 
         gControllersXAxis[i] = XClamp;
         if (gControllersXAxis[i] < -STICK_DEADZONE) {
-            gControllersXAxisDelay[i]++; //!@Delta
+            gControllersXAxisDelay[i] += PORT_TICK(); //!@Delta
         } else if (gControllersXAxis[i] > STICK_DEADZONE) {
-            gControllersXAxisDelay[i]++; //!@Delta
+            gControllersXAxisDelay[i] += PORT_TICK(); //!@Delta
         } else {
             gControllersXAxisDelay[i] = 0;
         }

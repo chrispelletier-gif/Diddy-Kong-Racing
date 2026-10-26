@@ -32,13 +32,7 @@
 #include "video.h"
 #include "waves.h"
 #include "weather.h"
-#ifdef TARGET_PORT
-#include "port.h"
-#else
-// 60 fps physics (port.h): on the N64 these leave each step as it is.
-#define PORT_STEP(x) (x)
-#define PORT_DECAY(k) (k)
-#endif
+#include "port_step.h"
 
 /************ .data ************/
 
@@ -747,10 +741,10 @@ void obj_loop_collectegg(Object *obj, s32 updateRate) {
             obj->trans.x_position = targetPos.f[0];
             obj->trans.y_position = targetPos.f[1];
             obj->trans.z_position = targetPos.f[2];
-            obj->y_velocity -= 0.5;
-            obj->x_velocity *= 0.98;
-            obj->z_velocity *= 0.98;
-            obj->y_velocity *= 0.95;
+            obj->y_velocity -= PORT_STEP(0.5); //!@Delta
+            obj->x_velocity *= PORT_DECAY(0.98); //!@Delta
+            obj->z_velocity *= PORT_DECAY(0.98); //!@Delta
+            obj->y_velocity *= PORT_DECAY(0.95); //!@Delta
             // Destroy the egg if it lands on an invalid surface.
             if (obj->trans.y_position < -2000.0f ||
                 (hasCollision && (surface < SURFACE_EGG_SPAWN || surface > SURFACE_EGG_04))) {
@@ -1297,12 +1291,12 @@ void obj_loop_stopwatchman(Object *obj, s32 updateRate) {
                         angleDiff = 0x10;
                     }
                 }
-                obj->trans.rotation.y_rotation += angleDiff >> 4;
+                obj->trans.rotation.y_rotation += PORT_SHIFT(angleDiff, 4); //!@Delta
                 distance = -2.0f;
                 if (angleDiff > 0x800 || angleDiff < -0x800) {
                     distance = -0.5f;
                 }
-                tt->forwardVel += (distance - tt->forwardVel) * 0.125;
+                tt->forwardVel += (distance - tt->forwardVel) * PORT_LERP(0.125); //!@Delta
                 obj->x_velocity = sins_f(obj->trans.rotation.y_rotation) * tt->forwardVel;
                 obj->z_velocity = coss_f(obj->trans.rotation.y_rotation) * tt->forwardVel;
                 tt->animFrameF -= (tt->forwardVel * 2 * updateRateF);
@@ -1324,7 +1318,7 @@ void obj_loop_stopwatchman(Object *obj, s32 updateRate) {
                     angleDiff = 0x10;
                 }
             }
-            obj->trans.rotation.y_rotation += (angleDiff >> 4);
+            obj->trans.rotation.y_rotation += PORT_SHIFT(angleDiff, 4); //!@Delta
             obj->x_velocity = diffX * 0.05;
             obj->z_velocity = diffZ * 0.05;
             if (angleDiff < 0x500) {
@@ -2734,12 +2728,12 @@ void obj_loop_parkwarden(Object *obj, s32 updateRate) {
                 if (arctan > 0 && arctan < 16) {
                     arctan = 16;
                 }
-                obj->trans.rotation.y_rotation += (arctan >> 4);
+                obj->trans.rotation.y_rotation += PORT_SHIFT(arctan, 4); //!@Delta
                 var_f2 = -2.0f;
                 if (arctan > 0x800 || arctan < -0x800) {
                     var_f2 = -0.5f;
                 }
-                taj->forwardVel += (var_f2 - taj->forwardVel) * 0.125;
+                taj->forwardVel += (var_f2 - taj->forwardVel) * PORT_LERP(0.125); //!@Delta
                 obj->x_velocity = sins_f(obj->trans.rotation.y_rotation) * taj->forwardVel;
                 obj->z_velocity = coss_f(obj->trans.rotation.y_rotation) * taj->forwardVel;
                 taj->animFrameF -= taj->forwardVel * 2 * updateRateF;
@@ -2763,7 +2757,7 @@ void obj_loop_parkwarden(Object *obj, s32 updateRate) {
             if (arctan > 0 && arctan < 16) {
                 arctan = 16;
             }
-            obj->trans.rotation.y_rotation += arctan >> 3;
+            obj->trans.rotation.y_rotation += PORT_SHIFT(arctan, 3); //!@Delta
             if (arctan < 0x400 && arctan > -0x400 && distance < 2.0) {
                 obj->properties.taj.action = TAJ_MODE_GREET_PLAYER;
                 taj->animFrameF = 0;
@@ -2795,7 +2789,7 @@ void obj_loop_parkwarden(Object *obj, s32 updateRate) {
             if (arctan > 0 && arctan < 16) {
                 arctan = 16;
             }
-            obj->trans.rotation.y_rotation = obj->trans.rotation.y_rotation + (arctan >> 4);
+            obj->trans.rotation.y_rotation = obj->trans.rotation.y_rotation + PORT_SHIFT(arctan, 4); //!@Delta
             racer_set_dialogue_camera();
             break;
         case TAJ_MODE_DIALOGUE:
@@ -2870,7 +2864,7 @@ void obj_loop_parkwarden(Object *obj, s32 updateRate) {
             racer_set_dialogue_camera();
             if (racerObj != NULL) {
                 if (taj->animFrameF != 0.0f) {
-                    taj->animFrameF += 8.0;
+                    taj->animFrameF += PORT_STEP(8.0); //!@Delta
                 }
                 var_a2 = updateRate;
                 if (var_a2 > 4) {
@@ -3714,12 +3708,12 @@ void obj_loop_door(Object *doorObj, s32 updateRate) {
             } else if (door->openDir == DOOR_CLOSING) {
                 angleVel = doorObj->trans.rotation.y_rotation - doorObj->properties.common.unk0;
             }
-            angleVel >>= 3;
-            if (angleVel > 0x200) {
-                angleVel = 0x200;
+            angleVel = PORT_SHIFT(angleVel, 3); //!@Delta
+            if (angleVel > PORT_HALF(0x200)) {
+                angleVel = PORT_HALF(0x200);
             }
-            if (angleVel < -0x200) {
-                angleVel = -0x200;
+            if (angleVel < -PORT_HALF(0x200)) {
+                angleVel = -PORT_HALF(0x200);
             }
             doorObj->trans.rotation.y_rotation -= angleVel; //@!Delta
             if (angleVel != 0) {
@@ -3856,12 +3850,12 @@ void obj_loop_ttdoor(Object *obj, s32 updateRate) {
     } else {
         angle = obj->trans.rotation.y_rotation - obj->properties.door.closeAngle;
     }
-    angle >>= 3;
-    if (angle > 0x200) {
-        angle = 0x200;
+    angle = PORT_SHIFT(angle, 3); //!@Delta
+    if (angle > PORT_HALF(0x200)) {
+        angle = PORT_HALF(0x200);
     }
-    if (angle < -0x200) {
-        angle = -0x200;
+    if (angle < -PORT_HALF(0x200)) {
+        angle = -PORT_HALF(0x200);
     }
     obj->trans.rotation.y_rotation -= angle;
     if (angle == 0) {
@@ -5329,9 +5323,9 @@ void weapon_trap(Object *weaponObj, s32 updateRate) {
         hitDist = 60;
         if (weaponOwner->vehicleID != VEHICLE_PLANE) {
             hitDist = 34;
-            weaponObj->y_velocity -= 2.0;
-            weaponObj->x_velocity -= (weaponObj->x_velocity / 8);
-            weaponObj->z_velocity -= (weaponObj->z_velocity / 8);
+            weaponObj->y_velocity -= PORT_STEP(2.0);                         //!@Delta
+            weaponObj->x_velocity -= weaponObj->x_velocity * PORT_LERP(0.125); //!@Delta
+            weaponObj->z_velocity -= weaponObj->z_velocity * PORT_LERP(0.125); //!@Delta
         } else {
             weaponObj->y_velocity = 0.0f;
             weaponObj->animFrame += updateRate * 8;
@@ -5694,7 +5688,9 @@ void obj_loop_log(Object *obj, s32 updateRate) {
         obj->trans.y_position = ((LevelObjectEntryCommon *) obj->level_entry)->y;
     }
     if (obj->collisionData->collidedObj != NULL) {
-        obj->properties.log.velocityY++;
+        if (PORT_TICK()) { //!@Delta
+            obj->properties.log.velocityY++;
+        }
         racerObj = obj->collisionData->collidedObj;
         if (racerObj->behaviorId == BHV_RACER) {
             racer = racerObj->racer;
@@ -5711,7 +5707,7 @@ void obj_loop_log(Object *obj, s32 updateRate) {
         diffX = (diffX * cosine) + (diffZ * sine);
         diffZ = (racerObj->x_velocity * sine) - (racerObj->z_velocity * cosine);
         diffX *= diffZ;
-        obj->properties.log.angleVel -= (s32) (diffX / 4);
+        obj->properties.log.angleVel -= (s32) (PORT_STEP(diffX) / 4); //!@Delta
 
         if (obj->properties.log.angleVel > 0x200) {
             obj->properties.log.angleVel = 0x200;
@@ -5720,11 +5716,11 @@ void obj_loop_log(Object *obj, s32 updateRate) {
             obj->properties.log.angleVel = -0x200;
         }
     } else {
-        if (obj->properties.log.velocityY > 0) {
+        if (obj->properties.log.velocityY > 0 && PORT_TICK()) { //!@Delta
             obj->properties.log.velocityY--;
         }
     }
-    obj->trans.y_position -= (f32) obj->properties.log.velocityY * 1.0;
+    obj->trans.y_position -= (f32) obj->properties.log.velocityY * 1.0; // A depth, not a speed (y is reset above).
     if (obj->properties.log.angleVel > 0) {
         obj->properties.log.angleVel -= updateRate;
         if (obj->properties.log.angleVel < 0) {
@@ -6125,7 +6121,7 @@ void obj_loop_butterfly(Object *butterflyObj, s32 updateRate) {
                         } else {
                             butterflyObj->y_velocity -= (sp7C * updateRate);
                         }
-                        butterflyObj->trans.rotation.y_rotation += butterfly->unk106;
+                        butterflyObj->trans.rotation.y_rotation += PORT_HALF(butterfly->unk106); //!@Delta
                     }
                 }
             }
@@ -6158,7 +6154,9 @@ void obj_loop_butterfly(Object *butterflyObj, s32 updateRate) {
         if (butterfly->unk108 != 0.0f) {
             butterflyObj->x_velocity = sins_f(butterflyObj->trans.rotation.y_rotation) * -butterfly->unk108;
             butterflyObj->z_velocity = coss_f(butterflyObj->trans.rotation.y_rotation) * -butterfly->unk108;
-            move_object(butterflyObj, butterflyObj->x_velocity, butterflyObj->y_velocity, butterflyObj->z_velocity);
+            //!@Delta: moves its velocity once a frame (PORT_STEP keeps the speed at 60 fps).
+            move_object(butterflyObj, PORT_STEP(butterflyObj->x_velocity), PORT_STEP(butterflyObj->y_velocity),
+                        PORT_STEP(butterflyObj->z_velocity));
         }
     }
     butterfly->unkFC = 1 - butterfly->unkFC;

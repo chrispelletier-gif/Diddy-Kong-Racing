@@ -199,7 +199,7 @@ void port_options_menu_strings(void);
 s32 port_options_menu_open(void);
 
 /*
- * 60 fps physics (src/objects.c sets these in obj_update). Much of the racer code takes one fixed step per logic frame
+ * 60 fps physics (src/thread3_main.c sets these once a frame). Much of the racer code takes one fixed step per logic frame
  * (the decomp marks these lines //!@Delta), tuned for 30 fps, where a frame is 2 retraces. At 60 fps a frame is 1
  * retrace, so those steps would happen twice as often: karts would speed up, slow down, steer and spin out twice as
  * fast. While the logic runs at 1 retrace a frame, gPortHalfStep is set and the PORT_* macros below halve the steps:
@@ -214,6 +214,10 @@ extern s32 gPortSkipTick;
 #define PORT_DECAY(k) (gPortHalfStep ? sqrtf(k) : (k))
 #define PORT_LERP(k) (gPortHalfStep ? 1.0f - sqrtf(1.0f - (k)) : (k))
 #define PORT_TICK() (!gPortSkipTick)
+/* A whole-number "x >> n" each frame (an angle closing a share of its gap): one more shift at half step. */
+#define PORT_SHIFT(x, n) (gPortHalfStep ? (x) >> ((n) + 1) : (x) >> (n))
+/* A whole number added each frame: half of it at half step (odd amounts round toward zero). */
+#define PORT_HALF(x) (gPortHalfStep ? (x) / 2 : (x))
 void port_set_logic_rate(s32 updateRate);
 
 /*

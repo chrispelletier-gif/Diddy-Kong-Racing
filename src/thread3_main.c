@@ -304,6 +304,10 @@ void main_game_loop(void) {
     rsp_init(&gCurrDisplayList);
     rdp_init(&gCurrDisplayList);
     bgdraw_render(&gCurrDisplayList, &gGameCurrMatrix, TRUE);
+#ifdef TARGET_PORT
+    // Once a frame, before anything steps: the 60 fps flags (port.h) for objects, the HUD and the menus alike.
+    port_set_logic_rate(sLogicUpdateRate);
+#endif
     gSaveDataFlags = input_update(gSaveDataFlags, sLogicUpdateRate);
 #ifdef TARGET_PORT
     // Taken every frame, so a request made outside a race (on the title screen, say) does not pause a later one.

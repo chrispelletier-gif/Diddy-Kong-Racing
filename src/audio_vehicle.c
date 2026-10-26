@@ -12,6 +12,7 @@
 #include "printf.h"
 #include "racer.h"
 #include "types.h"
+#include "port_step.h"
 
 /************ .data ************/
 
@@ -258,21 +259,21 @@ void racer_sound_car(Object *obj, u32 buttonsPressed, u32 buttonsHeld, s32 ticks
                     bananas = 10;
                 }
                 if (gRacerSound->bananaPitch < 0.05 * bananas) {
-                    gRacerSound->bananaPitch += (0.05 * bananas) / (bananas * 64);
+                    gRacerSound->bananaPitch += PORT_STEP((0.05 * bananas) / (bananas * 64)); //!@Delta
                 } else if (gRacerSound->bananaPitch > 0.05 * bananas) {
                     gRacerSound->bananaPitch = 0.05 * bananas;
                 }
                 targetPitch = ((pitch2 - pitch1) * interpFrac) + pitch1 + gRacerSound->bananaPitch;
             } else {
-                gRacerSound->bananaPitch *= 0.95;
+                gRacerSound->bananaPitch *= PORT_DECAY(0.95); //!@Delta
                 targetPitch = ((pitch2 - pitch1) * interpFrac) + pitch1 + gRacerSound->bananaPitch;
             }
 
             // Add 0.13 pitch boost when drifting, with smooth increase and fast decay when drifting stops
             if (gSoundRacerObj->drift_direction != 0) {
-                gRacerSound->driftPitch += (0.13 - gRacerSound->driftPitch) / 8;
+                gRacerSound->driftPitch += (0.13 - gRacerSound->driftPitch) * PORT_LERP(0.125); //!@Delta
             } else {
-                gRacerSound->driftPitch /= 4;
+                gRacerSound->driftPitch *= PORT_DECAY(0.25); //!@Delta
             }
             targetPitch += gRacerSound->driftPitch;
 
@@ -282,8 +283,8 @@ void racer_sound_car(Object *obj, u32 buttonsPressed, u32 buttonsHeld, s32 ticks
             }
 
             // Smooth pitch and volume changes over two frames to allow jitter effects
-            deltaPitch = (targetPitch - gRacerSound->basePitch[i]) / 2;
-            deltaVolume = (targetVolume - gRacerSound->baseVolume[i]) / 2;
+            deltaPitch = (targetPitch - gRacerSound->basePitch[i]) * (f32) PORT_LERP(0.5); //!@Delta
+            deltaVolume = (targetVolume - gRacerSound->baseVolume[i]) * (f32) PORT_LERP(0.5);
 
             // Add engine jitter effect for player cars to simulate engine vibration
             // Max pitch variation ±0.02, volume variation ±5
@@ -445,13 +446,13 @@ void racer_sound_hovercraft(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsH
             bananas = 10;
         }
         if (gRacerSound->bananaPitch < 0.05 * bananas) {
-            gRacerSound->bananaPitch += (0.05 * bananas) / (bananas * 64);
+            gRacerSound->bananaPitch += PORT_STEP((0.05 * bananas) / (bananas * 64)); //!@Delta
         } else if (gRacerSound->bananaPitch > 0.05 * bananas) {
             gRacerSound->bananaPitch = 0.05 * bananas;
         }
         targetPitch += gRacerSound->bananaPitch;
     } else {
-        gRacerSound->bananaPitch *= 0.95;
+        gRacerSound->bananaPitch *= PORT_DECAY(0.95); //!@Delta
         targetPitch += gRacerSound->bananaPitch;
     }
 
@@ -468,7 +469,7 @@ void racer_sound_hovercraft(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsH
 
     // Smoothly interpolate pitch and clamp to maximum.
     // The max pitch value is 0x7FFF / 5000.0 (~6.5534), but its origin is unclear.
-    gRacerSound->basePitch[0] += (targetPitch - gRacerSound->basePitch[0]) / 8;
+    gRacerSound->basePitch[0] += (targetPitch - gRacerSound->basePitch[0]) * (f32) PORT_LERP(0.125); //!@Delta
     if (gRacerSound->basePitch[0] > (0x7FFF / 5000.0)) {
         gRacerSound->basePitch[0] = (0x7FFF / 5000.0); // 6.5534
     }
@@ -487,7 +488,7 @@ void racer_sound_hovercraft(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsH
         volume = gRacerSound->volumeLevels[0][i] +
                  (gRacerSound->volumeLevels[0][i + 1] - gRacerSound->volumeLevels[0][i]) * fracPart;
     }
-    gRacerSound->baseVolume[0] += (volume - gRacerSound->baseVolume[0]) / 8;
+    gRacerSound->baseVolume[0] += (volume - gRacerSound->baseVolume[0]) * (f32) PORT_LERP(0.125); //!@Delta
     gRacerSound->basePitch[1] = 1.0f;
     gRacerSound->baseVolume[1] = 0.0f;
 }
@@ -518,7 +519,7 @@ void racer_sound_plane(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsHeld, 
 
     if (speed < 2.0f) {
         // If speed is below 2, treat the plane as idle and smoothly blend to the idle engine volume.
-        gRacerSound->baseVolume[0] += (gRacerSound->engineIdleMaxVolume - gRacerSound->baseVolume[0]) / 8;
+        gRacerSound->baseVolume[0] += (gRacerSound->engineIdleMaxVolume - gRacerSound->baseVolume[0]) * (f32) PORT_LERP(0.125); //!@Delta
     } else {
         // Compute volume based on pitch using linear interpolation between volume control points.
         // Note: Uses pitch from the previous frame.
@@ -535,7 +536,7 @@ void racer_sound_plane(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsHeld, 
             volume = gRacerSound->volumeLevels[0][i] +
                      (gRacerSound->volumeLevels[0][i + 1] - gRacerSound->volumeLevels[0][i]) * interpFrac;
         }
-        gRacerSound->baseVolume[0] += ((volume - gRacerSound->baseVolume[0]) / 8);
+        gRacerSound->baseVolume[0] += ((volume - gRacerSound->baseVolume[0]) * (f32) PORT_LERP(0.125)); //!@Delta
     }
 
     targetPitch = gRacerSound->planeHovercraftBasePitch;
@@ -584,16 +585,16 @@ void racer_sound_plane(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsHeld, 
             bananas = 10;
         }
         if (gRacerSound->bananaPitch < 0.05 * bananas) {
-            gRacerSound->bananaPitch += (0.05 * bananas) / (bananas * 64);
+            gRacerSound->bananaPitch += PORT_STEP((0.05 * bananas) / (bananas * 64)); //!@Delta
         } else if (gRacerSound->bananaPitch > 0.05 * bananas) {
             gRacerSound->bananaPitch = 0.05 * bananas;
         }
         targetPitch += gRacerSound->bananaPitch;
     } else {
-        gRacerSound->bananaPitch *= 0.95;
+        gRacerSound->bananaPitch *= PORT_DECAY(0.95); //!@Delta
         targetPitch += gRacerSound->bananaPitch;
     }
-    gRacerSound->basePitch[0] += (targetPitch - gRacerSound->basePitch[0]) / 8;
+    gRacerSound->basePitch[0] += (targetPitch - gRacerSound->basePitch[0]) * (f32) PORT_LERP(0.125); //!@Delta
 
     if (gRacerSound->basePitch[0] > 0x7FFF / 5000.0) {
         gRacerSound->basePitch[0] = 0x7FFF / 5000.0; // 6.5534
