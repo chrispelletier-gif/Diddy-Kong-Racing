@@ -106,7 +106,7 @@ static int sTargetFb16;
  * The early depth test (P20) needs the render target in 32x32 blocks instead of the usual 8x8 tiles: the GPU keeps one
  * early depth value per 32x32 block, and with 8x8 tiles one tile's depth stood for its whole block, so the parts of a
  * block behind it were thrown away (squares of 32 pixels missing on a New 3DS, #150). A 32x32 block target needs a
- * width that is a whole number of blocks: 240 becomes 256, and the display transfer crops it back (see
+ * width that is a whole number of blocks: 240 becomes 256, cropped back on the way to the screen (see
  * __wrap_GX_DisplayTransfer). Only for targets 800 pixels long (the 800 pixel mode or 4x anti-aliasing): 400 is not a
  * whole number of blocks either, and cropping that way is untried. Not in 3D, where early depth is off.
  */
@@ -637,25 +637,64 @@ static void link_target(void) {
 
 /*
  * Every display transfer goes through here (-Wl,--wrap=GX_DisplayTransfer): citro3d's copy of the target to the screen
- * at the end of a frame, and the bug report's capture. One from a target in 32x32 blocks (sTargetBlock32) says so, and
- * reads the target's whole width (256 for the screen's 240) while writing only the picture's, cropping the rest of each
- * line. citro3d passes the target's width for both.
+ * at the end of a frame, and the bug report's capture. One from a target in 32x32 blocks (sTargetBlock32) says so. A
+ * padded one (256 wide for the screen's 240) is copied whole into sUnpadded, lines 256 long, and a texture copy then
+ * takes the first 240 of each line to where the picture should go. (Cropping in the display transfer itself scrambled
+ * the picture on a New 3DS.) Both go on the same GX queue, so they run in turn.
  */
+static u8 *sUnpadded;
+static u32 sUnpaddedBytes;
+
 Result __real_GX_DisplayTransfer(u32 *inadr, u32 indim, u32 *outadr, u32 outdim, u32 flags);
 __attribute__((used)) Result __wrap_GX_DisplayTransfer(u32 *inadr, u32 indim, u32 *outadr, u32 outdim, u32 flags) {
+    static const u8 sBytes[5] = { 4, 3, 2, 2, 2 }; // GX_TRANSFER_FMT_*
     const C3D_RenderTarget *target = sTarget;
-    if (target != NULL && target->frameBuf.block32 && inadr == (u32 *) target->frameBuf.colorBuf) {
-        u32 width = target->frameBuf.width, shown = TOP_HEIGHT * sRenderScale;
-        indim = (indim & 0xFFFF0000u) | width;
-        if ((outdim & 0xFFFF) == width) {
-            outdim = (outdim & 0xFFFF0000u) | shown;
-        }
-        if ((outdim & 0xFFFF) < width) {
-            flags |= BIT(2); // Crop the input lines to the output's width.
-        }
-        flags |= BIT(16); // Input in 32x32 blocks.
+    u32 width, shown, rows, bpp;
+    Result res;
+
+    if (target == NULL || !target->frameBuf.block32 || inadr != (u32 *) target->frameBuf.colorBuf) {
+        return __real_GX_DisplayTransfer(inadr, indim, outadr, outdim, flags);
     }
-    return __real_GX_DisplayTransfer(inadr, indim, outadr, outdim, flags);
+    flags |= BIT(16); // Input in 32x32 blocks.
+    width = target->frameBuf.width;
+    shown = TOP_HEIGHT * sRenderScale;
+    if (width == shown) {
+        return __real_GX_DisplayTransfer(inadr, indim, outadr, outdim, flags);
+    }
+    // Padded: no scaling then (anti-aliased targets are 480 wide, whole blocks already).
+    rows = indim >> 16;
+    bpp = sBytes[((flags >> 12) & 7) < 5 ? (flags >> 12) & 7 : 0];
+    if (sUnpadded == NULL || sUnpaddedBytes < width * rows * bpp) {
+        return -1; // No room for the copy (see make_unpadded): leave the screen as it was.
+    }
+    res = __real_GX_DisplayTransfer(inadr, GX_BUFFER_DIM(width, rows), (u32 *) sUnpadded, GX_BUFFER_DIM(width, rows),
+                                    flags);
+    if (R_FAILED(res)) {
+        return res;
+    }
+    // Units of 16 bytes: lines of width pixels in, the first shown of each out, packed.
+    return GX_TextureCopy((u32 *) sUnpadded, GX_BUFFER_DIM(shown * bpp / 16, (width - shown) * bpp / 16), outadr,
+                          GX_BUFFER_DIM(shown * bpp / 16, 0), shown * bpp * rows, GX_TRANSFER_RAW_COPY(1));
+}
+
+/* The linear buffer a padded target is copied through on its way to the screen (see __wrap_GX_DisplayTransfer). */
+static void make_unpadded(void) {
+    u32 bytes;
+    if (sUnpadded != NULL) {
+        linearFree(sUnpadded);
+        sUnpadded = NULL;
+        sUnpaddedBytes = 0;
+    }
+    if (sTarget == NULL || !sTarget->frameBuf.block32 || sTarget->frameBuf.width == TOP_HEIGHT * sRenderScale) {
+        return;
+    }
+    bytes = sTarget->frameBuf.width * sTarget->frameBuf.height * 4;
+    sUnpadded = linearAlloc(bytes);
+    if (sUnpadded != NULL) {
+        sUnpaddedBytes = bytes;
+    } else {
+        plat_log("early depth: no linear memory to copy the padded target through");
+    }
 }
 
 /* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) and 16-bit buffers for the frames from the next
@@ -810,6 +849,7 @@ static void apply_screen_mode(void) {
             sTargetRight = NULL;
         }
         create_target(scale, across, fb16, block32);
+        make_unpadded();
         sFrameStarted = 0;
         if (wide800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target: don't try again every frame.
