@@ -60,6 +60,19 @@ void prof_count(int counter, unsigned int n) {
     (void) counter;
     (void) n;
 }
+unsigned long long plat_ticks(void) {
+    return 0;
+}
+unsigned long long plat_ticks_per_second(void) {
+    return 1000000000ULL;
+}
+int prof_enabled(void) {
+    return 0;
+}
+void prof_part(int part, unsigned long long ns) {
+    (void) part;
+    (void) ns;
+}
 
 #define RDRAM_MAX (8 << 20)
 #define DL_DEPTH 18

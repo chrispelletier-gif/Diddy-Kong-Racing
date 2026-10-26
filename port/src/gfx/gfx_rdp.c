@@ -142,6 +142,102 @@ static GfxDrawState sTriState;
 static s32 sTriStateValid;
 static s32 sFrameCount;
 
+/*
+ * Where the display list walk's time goes while the profiler is on (P26; the profile.h PROF_PART_WALK parts). The
+ * clock is read only when the walk moves from one part to another, which leaves runs of state commands untimed one by
+ * one. Each span between two reads also holds about one read's own cost, which is taken back out of its part (and,
+ * through PROF_PART_WALK_TIMER, out of the renderer's time). Draws and texture decodes are timed elsewhere, so their
+ * parts here only keep them out of the others.
+ */
+enum WalkPart {
+    WALK_COMMANDS,
+    WALK_MATRICES,
+    WALK_VERTICES,
+    WALK_TRIANGLES,
+    WALK_RECTS,
+    WALK_DRAWSTATE,
+    WALK_TEXTURES,
+    WALK_FRAMEEND,
+    WALK_DRAWS,
+    WALK_DECODE,
+    WALK_PART_COUNT
+};
+#define WALK_REPORTED WALK_DRAWS // Parts before this one are reported, in the order of the PROF_PART_WALK ones
+
+static s32 sWalkTimed;
+static u32 sWalkPart;
+static unsigned long long sWalkLast;
+static unsigned long long sWalkTicks[WALK_PART_COUNT];
+static u32 sWalkSpans[WALK_PART_COUNT];
+static unsigned long long sWalkReadCost; // Ticks one clock read takes, in 1/256ths
+
+/* Switches the walk's timing to this part. Returns the part it was in, to switch back to. */
+static inline u32 walk_switch(u32 part) {
+    u32 old = sWalkPart;
+    if (sWalkTimed && part != old) {
+        unsigned long long now = plat_ticks();
+        sWalkTicks[old] += now - sWalkLast;
+        sWalkSpans[old]++;
+        sWalkLast = now;
+        sWalkPart = part;
+    }
+    return old;
+}
+
+static void walk_begin(void) {
+    s32 i;
+    sWalkTimed = prof_enabled();
+    if (!sWalkTimed) {
+        return;
+    }
+    if (sWalkReadCost == 0) {
+        // The fastest of a few tries, so a thread switch in one doesn't count.
+        s32 attempt;
+        for (attempt = 0; attempt < 8; attempt++) {
+            unsigned long long start = plat_ticks(), cost;
+            for (i = 0; i < 32; i++) {
+                (void) plat_ticks();
+            }
+            cost = (plat_ticks() - start) * 256 / 33;
+            if (attempt == 0 || cost < sWalkReadCost) {
+                sWalkReadCost = cost;
+            }
+        }
+        if (sWalkReadCost == 0) {
+            sWalkReadCost = 1;
+        }
+        plat_log("profiler: a clock read takes %llu ns",
+                 (sWalkReadCost * 1000000000ULL / 256) / plat_ticks_per_second());
+    }
+    for (i = 0; i < WALK_PART_COUNT; i++) {
+        sWalkTicks[i] = 0;
+        sWalkSpans[i] = 0;
+    }
+    sWalkPart = WALK_COMMANDS;
+    sWalkLast = plat_ticks();
+}
+
+static void walk_end(void) {
+    unsigned long long perSecond, readTicks = 0;
+    s32 i;
+    if (!sWalkTimed) {
+        return;
+    }
+    sWalkTicks[sWalkPart] += plat_ticks() - sWalkLast;
+    sWalkSpans[sWalkPart]++;
+    sWalkTimed = FALSE;
+    perSecond = plat_ticks_per_second();
+    for (i = 0; i < WALK_PART_COUNT; i++) {
+        unsigned long long reads = sWalkSpans[i] * sWalkReadCost / 256;
+        unsigned long long ticks = sWalkTicks[i] > reads ? sWalkTicks[i] - reads : 0;
+        readTicks += sWalkTicks[i] - ticks;
+        if (i < WALK_REPORTED) {
+            prof_part(PROF_PART_WALK_COMMANDS + i, ticks * 1000000000ULL / perSecond);
+        }
+    }
+    prof_part(PROF_PART_WALK_TIMER, readTicks * 1000000000ULL / perSecond);
+}
+
 /******************************** Helpers ********************************/
 
 static inline const u8 *seg_addr(u32 addr) {
@@ -390,7 +486,7 @@ static inline u32 cycle_type(void) {
 }
 
 /* Returns the texture for the given tile, decoding it if it isn't in the cache. */
-static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
+static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
     Tile *tile = &g.tiles[tileIndex & 7];
     TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63];
     u32 width, height, size, hash, i, slot, oldest;
@@ -472,6 +568,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
         return NULL; // Can't happen: at most three of the eight entries are in use.
     }
 
+    walk_switch(WALK_DECODE); // Timed as PROF_TEXTURE instead
     texStart = plat_time_ns();
     e = &sTexCache[oldest];
     if (e->used) {
@@ -485,6 +582,7 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
         gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
         e->used = FALSE;
         prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+        walk_switch(WALK_TEXTURES);
         return NULL;
     }
     decode_texture(pixels, load, tile, width, height, tlut);
@@ -512,11 +610,20 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     e->tex.backendData = NULL;
     gfxb_texture_upload(&e->tex);
     prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+    walk_switch(WALK_TEXTURES);
     if (!sPrewarming) {
         // Only the decodes that interrupt a frame: these are the hitches.
         prof_count(PROF_TEXTURE_UPLOADS, 1);
     }
     return &e->tex;
+}
+
+/* The texture the tile shows: from the cache, or decoded into it. */
+static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
+    u32 part = walk_switch(WALK_TEXTURES);
+    GfxTexture *tex = find_texture(tileIndex, pinned);
+    walk_switch(part);
+    return tex;
 }
 
 /*
@@ -633,7 +740,7 @@ static inline s32 scissor_right(u32 cyc) {
 }
 
 /* Builds the draw state for the current RSP/RDP state. */
-static void build_draw_state(GfxDrawState *s, s32 isRect) {
+static void make_draw_state(GfxDrawState *s, s32 isRect) {
     u32 cyc = cycle_type();
     u32 omL = g.omL;
     u32 blendBits;
@@ -745,6 +852,12 @@ static void build_draw_state(GfxDrawState *s, s32 isRect) {
 
 /******************************** Batching ********************************/
 
+static void build_draw_state(GfxDrawState *s, s32 isRect) {
+    u32 part = walk_switch(WALK_DRAWSTATE);
+    make_draw_state(s, isRect);
+    walk_switch(part);
+}
+
 static s32 draw_states_equal(const GfxDrawState *a, const GfxDrawState *b) {
     return __builtin_memcmp(a, b, sizeof(GfxDrawState)) == 0;
 }
@@ -781,10 +894,12 @@ static void flush_batch(void) {
                      v->y, v->z, v->w, v->u0, v->v0, v->r, v->g, v->b, v->a);
             plat_log("    u %.3f..%.3f v %.3f..%.3f w %.1f..%.1f", minU, maxU, minV, maxV, minW, maxW);
         }
+        u32 part = walk_switch(WALK_DRAWS);
         gfxb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
         REF_CALL(refb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount));
+        walk_switch(part);
         sBatchCount = 0;
         sBatchVertices = 0;
         sBatchGeneration++;
@@ -1209,7 +1324,9 @@ static void fill_rectangle(u32 w0, u32 w1) {
         return;
     }
     if (cyc == G_CYC_FILL) {
+        u32 part;
         flush_batch();
+        part = walk_switch(WALK_DRAWS);
         if (g.colorImage == g.depthImage) {
             gfxb_clear_depth(rect);
             REF_CALL(refb_clear_depth(rect));
@@ -1218,6 +1335,7 @@ static void fill_rectangle(u32 w0, u32 w1) {
             gfxb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255);
             REF_CALL(refb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255));
         }
+        walk_switch(part);
         return;
     }
     if (g.colorImage == g.depthImage) {
@@ -1265,6 +1383,24 @@ static inline s32 state_command(u32 op) {
     }
 }
 
+/* The walk part a command's time goes to. */
+static inline u32 walk_part(u32 op) {
+    switch (op) {
+        case OP(G_MTX):
+            return WALK_MATRICES;
+        case OP(G_VTX):
+            return WALK_VERTICES;
+        case OP(G_TRIN):
+            return WALK_TRIANGLES;
+        case OP(G_TEXRECT):
+        case OP(G_TEXRECTFLIP):
+        case OP(G_FILLRECT):
+            return WALK_RECTS;
+        default:
+            return WALK_COMMANDS;
+    }
+}
+
 static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
     s32 executed = 0;
 
@@ -1275,6 +1411,9 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         dl++;
         executed++;
         TRACE("%*s%08X %08X", (int) (depth * 2), "", (unsigned) w0, (unsigned) w1);
+        if (sWalkTimed) {
+            walk_switch(walk_part(op));
+        }
         if (state_command(op)) {
             sTriStateValid = FALSE;
         }
@@ -1760,10 +1899,13 @@ void port_gfx_run_task(void *taskPtr) {
         g.scissor[3] = GFX_SCREEN_HEIGHT;
     }
     gPlatGfxStage = "running a display list";
+    walk_begin();
     run_dl((const Gfx *) task->t.data_ptr, -1);
     flush_batch();
     gPlatGfxStage = "ending the frame";
+    walk_switch(WALK_FRAMEEND);
     gfxb_end_frame();
+    walk_end();
 #ifdef PORT_GFX_REFERENCE
     if (sRefActive) {
         char path[256];
