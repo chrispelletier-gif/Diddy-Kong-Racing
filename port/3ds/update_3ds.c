@@ -107,9 +107,13 @@ static volatile int sRacing;    // A race is on, with its HUD on the bottom scre
 static int sRacingShown;
 
 /* What the idle buttons do. */
-enum { IDLE_PAUSE, IDLE_SETTINGS, IDLE_STOP_TEST };
+enum { IDLE_PAUSE, IDLE_SETTINGS, IDLE_CONTROLS, IDLE_UPDATES, IDLE_STOP_TEST };
 static int sIdleActions[3];
 
+/*
+ * In a race: Pause and Settings. Otherwise Settings, Controls and Updates (a player's build has no updater), with
+ * "Stop test" in the last place while a test run is on.
+ */
 static void draw_home(void) {
     const char *labels[3];
     int count = 0;
@@ -121,9 +125,16 @@ static void draw_home(void) {
     }
     sIdleActions[count] = IDLE_SETTINGS;
     labels[count++] = "Settings";
+    if (!sRacingShown) {
+        sIdleActions[count] = IDLE_CONTROLS;
+        labels[count++] = "Controls";
+    }
     if (sTestRunShown) {
         sIdleActions[count] = IDLE_STOP_TEST;
         labels[count++] = "Stop test";
+    } else if (!sRacingShown && PLAT_DEBUG_TOOLS) {
+        sIdleActions[count] = IDLE_UPDATES;
+        labels[count++] = "Updates";
     }
     draw_buttons(labels, count);
 }
@@ -597,6 +608,18 @@ int update_3ds_touch(int x, int y) {
     return 1;
 }
 
+/* Looks for new builds; returns 1 if the choices are shown, 0 (back to idle) if there are none. */
+static int check_updates(void) {
+    sState = STATE_BUSY;
+    if (check()) {
+        sState = STATE_CHOOSE;
+        draw_choices();
+        return 1;
+    }
+    sState = STATE_IDLE;
+    return 0;
+}
+
 static void update_thread(void *arg) {
     (void) arg;
     bugreport_watch_thread("update");
@@ -635,6 +658,17 @@ static void update_thread(void *arg) {
                     sState = STATE_MENU;
                     menu_3ds_open();
                     draw_menu_buttons();
+                } else if (sIdleActions[button] == IDLE_CONTROLS) {
+                    sState = STATE_MENU;
+                    if (!menu_3ds_open_page("Controls")) {
+                        menu_3ds_open();
+                    }
+                    draw_menu_buttons();
+                } else if (sIdleActions[button] == IDLE_UPDATES) {
+                    if (check_updates()) {
+                        break;
+                    }
+                    draw_home();
                 } else {
                     sState = STATE_CONFIRM;
                     draw_confirm();
@@ -659,14 +693,8 @@ static void update_thread(void *arg) {
                 sState = STATE_IDLE;
                 if (result == MENU_BUGREPORT) {
                     bugreport_request();
-                } else if (result == MENU_UPDATES) {
-                    sState = STATE_BUSY;
-                    if (check()) {
-                        sState = STATE_CHOOSE;
-                        draw_choices();
-                        break;
-                    }
-                    sState = STATE_IDLE;
+                } else if (result == MENU_UPDATES && check_updates()) {
+                    break;
                 }
                 draw_home();
                 break;

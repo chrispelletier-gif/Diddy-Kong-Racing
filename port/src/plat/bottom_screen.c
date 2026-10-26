@@ -733,7 +733,6 @@ static void draw_messages(const State *s, int y0, int y1) {
     }
 }
 
-/* The controls, in two columns. */
 /*
  * The controls card: what each button does, with the player's own mapping (controls.c), two to a line. A debug build
  * names itself in the corner and lists the bug report (plat.h PLAT_DEBUG_TOOLS).
@@ -820,9 +819,14 @@ static void draw_home(const State *s) {
     if (s->overlayLines > 0) {
         draw_messages(s, 70, 98);
         draw_overlay(s, 100, BS_BUTTONS_Y);
+    } else if (sLogo.rgba == NULL) {
+        draw_messages(s, 70, BS_BUTTONS_Y - 1); // No ROM yet: what is happening, or why it can't start.
     } else {
-        draw_controls(70, 153);
-        draw_messages(s, 156, BS_BUTTONS_Y - 1);
+        // The controls card fills the screen under the logo; a debug build keeps the newest message on its last line.
+        draw_controls(72, BS_BUTTONS_Y - 4);
+        if (PLAT_DEBUG_TOOLS && font_ready(FONT_SMALL)) {
+            text_clipped(FONT_SMALL, 12, BS_BUTTONS_Y - 18, newest_message(s), DIM, 1, BS_WIDTH - 12);
+        }
     }
 }
 

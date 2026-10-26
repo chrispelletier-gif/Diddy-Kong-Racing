@@ -465,6 +465,18 @@ void menu_3ds_open(void) {
     open_page(&sMainPage);
 }
 
+/* Opens the page added with this title (the panel's Controls button). Returns 0 if there is none. */
+int menu_3ds_open_page(const char *title) {
+    int i;
+    for (i = 0; i < sPageCount; i++) {
+        if (strcmp(sPages[i].title, title) == 0) {
+            open_page(&sPages[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void menu_3ds_close(void) {
     plat_3ds_menu_draw(NULL);
     sPage = NULL;

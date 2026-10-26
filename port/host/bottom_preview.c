@@ -71,6 +71,10 @@ void host_bottom_preview(const char *dir) {
     save(dir, "0_before_rom");
 
     bs_load_assets();
+    {
+        static const char *const sHome[3] = { "Settings", "Controls", "Updates" };
+        bs_set_buttons(sHome, 3);
+    }
     bs_add_message("Starting the game...");
     bs_add_message("Saves and settings: sdmc:/3ds/dkr/");
     save(dir, "1_home");
@@ -290,7 +294,11 @@ static void preview_modes(const char *dir, RaceHud *race) {
     bs_set_race_hud(&hud);
     save(dir, "17_hub");
 
-    // The menus' companions.
+    // The menus' companions, with the idle buttons.
+    {
+        static const char *const sHome[3] = { "Settings", "Controls", "Updates" };
+        bs_set_buttons(sHome, 3);
+    }
     hud.mode = RACE_HUD_MODE_MENU_SAVE;
     hud.world = -1;
     hud.racerCount = 0;
