@@ -2851,9 +2851,6 @@ void obj_update(s32 updateRate) {
     s32 sp54;
     Object *obj;
 
-#ifdef TARGET_PORT
-    port_set_logic_rate(updateRate);
-#endif
     func_800245B4(-1);
     gEventStartTimer = gEventCountdown;
     if (gEventCountdown > 0 && race_starting() != FALSE) {

@@ -44,11 +44,8 @@
 #else
 #define AI_DRIVEN(racer) ((racer)->raceFinished)
 #define ZIPPER_BOOSTS_AT_ONCE(racer) ((racer)->playerIndex == PLAYER_COMPUTER)
-// 60 fps physics (port.h): on the N64 these leave each step as it is.
-#define PORT_STEP(x) (x)
-#define PORT_DECAY(k) (k)
-#define PORT_LERP(k) (k)
 #endif
+#include "port_step.h"
 #include "textures_sprites.h"
 #include "thread3_main.h"
 #include "tracks.h"
@@ -1320,10 +1317,10 @@ void racer_ai_eggs(Object *obj, Object_Racer *racer, s32 updateRate) {
         if (racer->aiSkill < 0) {
             gCurrentStickX = 0;
             gCurrentStickY = -35;
-            racer->aiSkill++;
+            racer->aiSkill += PORT_TICK(); //!@Delta
         } else {
             if (gCurrentStickX > 60 || gCurrentStickX < -60) {
-                racer->aiSkill++;
+                racer->aiSkill += PORT_TICK(); //!@Delta
                 if (racer->aiSkill > 110) {
                     racer->aiSkill = -40;
                 }
@@ -1764,7 +1761,7 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         apply_vehicle_rotation_offset(racer, updateRate, 0, (spF0 * 4096.0f) * var_f2, 0);
     }
     if (racer->unk1D5 != 0) {
-        racer->y_rotation_offset -= racer->y_rotation_offset >> 3;
+        racer->y_rotation_offset -= PORT_SHIFT(racer->y_rotation_offset, 3); //!@Delta
         if (racer->y_rotation_offset < 16 && racer->y_rotation_offset > -16) {
             racer->unk1D5 = 0;
         }
@@ -2075,9 +2072,9 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         }
     }
     racer->driftHeadingOffset = 0;
-    racer->y_rotation_vel += (gCurrentCarSteerVel - racer->y_rotation_vel) >> 3;
+    racer->y_rotation_vel += PORT_SHIFT(gCurrentCarSteerVel - racer->y_rotation_vel, 3); //!@Delta
     obj->trans.rotation.y_rotation = racer->steerVisualRotation + racer->y_rotation_vel;
-    racer->z_rotation_vel += (D_8011D558 - racer->z_rotation_vel) >> 3;
+    racer->z_rotation_vel += PORT_SHIFT(D_8011D558 - racer->z_rotation_vel, 3); //!@Delta
     obj->trans.rotation.z_rotation = racer->x_rotation_vel + racer->z_rotation_vel;
     if (racer->unk1D2 > 0) {
         racer->unk1D2 -= updateRate;
@@ -2169,8 +2166,8 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         rotate_racer_in_water(obj, racer, &water_rotation, wave_properties, updateRate, iTemp, 1.0f);
     }
     if (racer->buoyancy > 0.0) {
-        obj->trans.y_position += racer->buoyancy * racer->unkC4;
-        racer->unkC4 += (0.75 - racer->unkC4) * 0.125;
+        obj->trans.y_position += PORT_STEP(racer->buoyancy * racer->unkC4); //!@Delta
+        racer->unkC4 += (0.75 - racer->unkC4) * PORT_LERP(0.125); //!@Delta
     }
 
     iTemp = racer->unk1D2; // saves unk1D2
@@ -2191,7 +2188,7 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
     obj->x_velocity = temp;
     obj->y_velocity = (obj->trans.y_position - yPos) * var_f2;
 
-    racer->forwardVel -= (racer->forwardVel + (racer->velocity * 0.05)) * 0.125;
+    racer->forwardVel -= (racer->forwardVel + (racer->velocity * 0.05)) * PORT_LERP(0.125); //!@Delta
     if (racer->buoyancy > 0.0 && racer->unk1FB == 0 && obj->y_velocity > 4.0) {
         obj->y_velocity = 4.0f;
     }
@@ -2269,7 +2266,7 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         if (var_v1 < -0x8000) {
             var_v1 += 0xFFFF;
         }
-        obj->trans.rotation.x_rotation += var_v1 >> 2;
+        obj->trans.rotation.x_rotation += PORT_SHIFT(var_v1, 2); //!@Delta
         var_v0 = -(racer->x_rotation_vel & 0xFFFF);
         if (var_v0 > 0x8000) {
             var_v0 -= 0xFFFF;
@@ -2960,9 +2957,9 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
             rumble_set(racer->playerIndex, RUMBLE_TYPE_8);
             racer->zipperDirCorrection = 0;
         } else {
-            obj->x_velocity *= 0.75;
-            obj->y_velocity *= 0.75;
-            obj->z_velocity *= 0.75;
+            obj->x_velocity *= PORT_DECAY(0.75); //!@Delta
+            obj->y_velocity *= PORT_DECAY(0.75);
+            obj->z_velocity *= PORT_DECAY(0.75);
         }
     }
     if (racer->spinout_timer != 0) {
@@ -3298,9 +3295,9 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         racer->forwardVel -= (racer->forwardVel + (racer->velocity * 0.05)) * PORT_LERP(0.125);
     }
     racer->driftHeadingOffset = 0;
-    racer->y_rotation_vel += (gCurrentCarSteerVel - racer->y_rotation_vel) >> 3;
+    racer->y_rotation_vel += PORT_SHIFT(gCurrentCarSteerVel - racer->y_rotation_vel, 3); //!@Delta
     obj->trans.rotation.y_rotation = racer->steerVisualRotation + racer->y_rotation_vel;
-    racer->z_rotation_vel += (D_8011D558 - racer->z_rotation_vel) >> 3;
+    racer->z_rotation_vel += PORT_SHIFT(D_8011D558 - racer->z_rotation_vel, 3); //!@Delta
     obj->trans.rotation.z_rotation = racer->x_rotation_vel + racer->z_rotation_vel;
     if (racer->magnetTimer != 0) {
         obj->x_velocity = gRacerMagnetVelX;
@@ -3716,7 +3713,7 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
         racer->unk74 = 8.0;
     }
     if (racer->unk74 > 2.0) {
-        racer->unk74 -= 0.2;
+        racer->unk74 -= PORT_STEP(0.2); //!@Delta
     } else {
         racer->unk74 = 2.0;
     }
@@ -3744,7 +3741,7 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
         if (angleVel < -0x8000) {
             angleVel += 0xFFFF;
         }
-        gCameraObject->trans.rotation.z_rotation += angleVel >> 2;
+        gCameraObject->trans.rotation.z_rotation += PORT_SHIFT(angleVel, 2); //!@Delta
     } else {
         angle = racer->x_rotation_vel;
         angleVel = (angle >> 4) - (u16) gCameraObject->trans.rotation.z_rotation;
@@ -3754,7 +3751,7 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
         if (angleVel < -0x8000) {
             angleVel += 0xFFFF;
         }
-        gCameraObject->trans.rotation.z_rotation += angleVel >> 3;
+        gCameraObject->trans.rotation.z_rotation += PORT_SHIFT(angleVel, 3); //!@Delta
     }
     segmentIndex = get_level_segment_index_from_position(
         gCameraObject->trans.x_position, gCameraObject->trans.y_position, gCameraObject->trans.z_position);
@@ -3895,7 +3892,7 @@ void func_8004CC20(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Rac
     }
     racer->attackType = ATTACK_NONE;
     racer->spinout_timer = 0;
-    var_f0 = (steerAngle * racer->velocity) / 360;
+    var_f0 = PORT_STEP((steerAngle * racer->velocity) / 360); //!@Delta
     var_f2 = 1.0f;
     racerObj->x_velocity -= (racer->ox3 * var_f0);
     racerObj->y_velocity -= (racer->oy3 * var_f0);
@@ -3933,17 +3930,17 @@ void func_8004CC20(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Rac
     if ((var_v0 > 0x1000) || (var_v0 < -0x1000)) {
         var_f2 = 0.0f;
     }
-    racer->steerVisualRotation += (var_v0 >> 3);
+    racer->steerVisualRotation += PORT_SHIFT(var_v0, 3); //!@Delta
     racer->x_rotation_vel = 0;
 
-    racerObj->x_velocity -= racer->ox1 * var_f2;
-    racerObj->y_velocity -= racer->oy1 * var_f2;
-    racerObj->z_velocity -= racer->oz1 * var_f2;
-    racerObj->x_velocity -= racer->ox2 * 1.5;
-    racerObj->y_velocity -= racer->oy2 * 1.5;
-    racerObj->z_velocity -= racer->oz2 * 1.5;
+    racerObj->x_velocity -= racer->ox1 * PORT_STEP(var_f2); //!@Delta
+    racerObj->y_velocity -= racer->oy1 * PORT_STEP(var_f2);
+    racerObj->z_velocity -= racer->oz1 * PORT_STEP(var_f2);
+    racerObj->x_velocity -= racer->ox2 * PORT_STEP(1.5);
+    racerObj->y_velocity -= racer->oy2 * PORT_STEP(1.5);
+    racerObj->z_velocity -= racer->oz2 * PORT_STEP(1.5);
 
-    var_f0 = racer->velocity * racer->velocity * 0.002f;
+    var_f0 = PORT_STEP(racer->velocity * racer->velocity * 0.002f);
     if (racer->velocity < 0.0f) {
         var_f0 = -var_f0;
     }
@@ -3951,14 +3948,14 @@ void func_8004CC20(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Rac
     racerObj->y_velocity -= racer->oy1 * var_f0;
     racerObj->z_velocity -= racer->oz1 * var_f0;
 
-    var_f0 = racer->lateral_velocity * racer->lateral_velocity * 0.01f;
+    var_f0 = PORT_STEP(racer->lateral_velocity * racer->lateral_velocity * 0.01f);
     if (racer->lateral_velocity < 0.0f) {
         var_f0 = -var_f0;
     }
     racerObj->x_velocity -= racer->ox3 * var_f0;
     racerObj->y_velocity -= racer->oy3 * var_f0;
     racerObj->z_velocity -= racer->oz3 * var_f0;
-    var_f0 = racer->unk34 * racer->unk34 * 0.01f;
+    var_f0 = PORT_STEP(racer->unk34 * racer->unk34 * 0.01f);
     if (racer->unk34 < 0.0f) {
         var_f0 = -var_f0;
     }
@@ -3967,9 +3964,9 @@ void func_8004CC20(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Rac
     racerObj->z_velocity -= racer->oz2 * var_f0;
 
     racer->driftHeadingOffset = 0;
-    racer->y_rotation_vel += ((gCurrentCarSteerVel - racer->y_rotation_vel) >> 3);
+    racer->y_rotation_vel += PORT_SHIFT(gCurrentCarSteerVel - racer->y_rotation_vel, 3); //!@Delta
     racerObj->trans.rotation.y_rotation = racer->steerVisualRotation + racer->y_rotation_vel;
-    racer->z_rotation_vel += ((D_8011D558 - racer->z_rotation_vel) >> 3);
+    racer->z_rotation_vel += PORT_SHIFT(D_8011D558 - racer->z_rotation_vel, 3); //!@Delta
     racerObj->trans.rotation.z_rotation = racer->x_rotation_vel + racer->z_rotation_vel;
     temp2 = racerObj->x_velocity;
     temp3 = racerObj->z_velocity;
@@ -4045,7 +4042,7 @@ void update_camera_loop(f32 updateRateF, Object *obj, Object_Racer *racer) {
     if (gCameraObject->zoom == ZOOM_FAR) {
         targetBoomLength -= 35.0f;
     }
-    gCameraObject->boomLength += (targetBoomLength - gCameraObject->boomLength) * 0.125;
+    gCameraObject->boomLength += (targetBoomLength - gCameraObject->boomLength) * PORT_LERP(0.125); //!@Delta
 
     gCurrentRacerTransform.rotation.y_rotation = 0x8000 - gCameraObject->trans.rotation.y_rotation;
     gCurrentRacerTransform.rotation.x_rotation = -gCameraObject->trans.rotation.x_rotation;
@@ -6312,7 +6309,7 @@ void func_80053750(Object *objRacer, Object_Racer *racer, f32 updateRateF) {
             }
         }
         flags = 1;
-        if (racer->unk1FB != 0) {
+        if (racer->unk1FB != 0 && PORT_TICK()) { //!@Delta: the wheels spin one frame per 30 fps frame
             for (i = 0; i < 2; i++) {
                 someObj = objRacer->attachPoints->obj[i];
                 if (someObj->properties.common.unk0 != 0) {
@@ -6333,14 +6330,14 @@ void func_80053750(Object *objRacer, Object_Racer *racer, f32 updateRateF) {
         for (i = 0; i < 4; i++) {
             someObj = objRacer->attachPoints->obj[i];
             if (!(racer->unk1E3 & flags)) {
-                someObj->trans.y_position += ((-10.0f - someObj->trans.y_position) * 0.125);
+                someObj->trans.y_position += ((-10.0f - someObj->trans.y_position) * PORT_LERP(0.125)); //!@Delta
                 if (racer->waterTimer != 0) {
-                    someObj->trans.scale += (((someObj->header->scale * 1.4) - someObj->trans.scale) * 0.1);
+                    someObj->trans.scale += (((someObj->header->scale * 1.4) - someObj->trans.scale) * PORT_LERP(0.1));
                 }
             } else {
                 temp_f0 = someObj->trans.y_position;
-                someObj->trans.y_position = (temp_f0 - (temp_f0 * 0.125));
-                someObj->trans.scale += ((someObj->header->scale - someObj->trans.scale) * 0.1);
+                someObj->trans.y_position = (temp_f0 - (temp_f0 * PORT_LERP(0.125)));
+                someObj->trans.scale += ((someObj->header->scale - someObj->trans.scale) * PORT_LERP(0.1));
             }
             flags <<= 1;
         }
@@ -6942,7 +6939,7 @@ void update_racer_collision(Object *racerObj, Object_Racer *racer, s32 updateRat
         if (sp130) {
             temp_s16 *= 4;
         }
-        racerObj->trans.rotation.y_rotation += temp_s16 >> 2;
+        racerObj->trans.rotation.y_rotation += PORT_SHIFT(temp_s16, 2); //!@Delta
         racer->steerVisualRotation = racerObj->trans.rotation.y_rotation - racer->y_rotation_vel;
     }
     sp180 = spF4[2] - spF4[0];
@@ -7060,7 +7057,7 @@ void onscreen_ai_racer_physics(Object *obj, Object_Racer *racer, UNUSED s32 upda
                 xRot -= (u16) obj->trans.rotation.x_rotation;
             }
             WRAP(xRot, -0x8000, 0x8000);
-            obj->trans.rotation.x_rotation += xRot >> 2;
+            obj->trans.rotation.x_rotation += PORT_SHIFT(xRot, 2); //!@Delta
         }
     }
     if (racer->vehicleID != VEHICLE_LOOPDELOOP && racer->vehicleID != VEHICLE_PLANE &&
@@ -8190,7 +8187,7 @@ void update_camera_car(f32 updateRate, Object *obj, Object_Racer *racer) {
     }
 #endif
     angle = gCameraObject->trans.rotation.z_rotation;
-    gCameraObject->trans.rotation.z_rotation -= (angle + newAngle) >> 4;
+    gCameraObject->trans.rotation.z_rotation -= PORT_SHIFT(angle + newAngle, 4); //!@Delta
     if (gCameraObject->trans.rotation.z_rotation > 0x2000) {
         gCameraObject->trans.rotation.z_rotation = 0x2000;
     }
@@ -8217,7 +8214,7 @@ void update_camera_finish_challenge(UNUSED f32 updateRate, Object *obj, Object_R
     f32 zOffset;
     f32 xOffset;
 
-    gCameraObject->trans.rotation.y_rotation += 0x200;
+    gCameraObject->trans.rotation.y_rotation += PORT_HALF(0x200); //!@Delta
     if (1) {} // Fakematch
     gCameraObject->trans.rotation.x_rotation = 0x400;
     gCameraObject->trans.rotation.z_rotation = 0;
@@ -9246,10 +9243,10 @@ void func_8005B818(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateR
         if (racer->velocity < -var_f12) {
             racer->velocity = -var_f12;
         } else {
-            racer->velocity += ((-var_f12 - racer->velocity) * 0.125);
+            racer->velocity += ((-var_f12 - racer->velocity) * PORT_LERP(0.125)); //!@Delta
         }
     } else {
-        racer->velocity += ((-var_f12 - racer->velocity) * 0.25);
+        racer->velocity += ((-var_f12 - racer->velocity) * PORT_LERP(0.25)); //!@Delta
     }
 
     checkpointIdx = racer->nextCheckpoint - 2;
