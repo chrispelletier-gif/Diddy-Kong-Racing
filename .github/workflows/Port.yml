@@ -129,7 +129,8 @@ jobs:
   # never swaps a debug build for a player build.
   publish-3ds:
     name: Publish the 3DS build
-    needs: build-3ds
+    # Only once the PC build has played its scenarios without a crash, hang or repeatability failure.
+    needs: [build-3ds, host]
     if: github.event_name == 'push' && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     permissions:
@@ -176,11 +177,26 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           # publish TAG TITLE DIR NOTES
+          # An existing release is updated in place (tag moved, files replaced, build.txt last) rather than deleted
+          # and made again: a newer push cancels this run, and a cancel between a delete and a create would leave the
+          # updaters with no release. A half-updated release is safe: the updater checks the file against build.txt.
           publish() {
-            gh release delete "$1" --cleanup-tag --yes 2>/dev/null || true
-            gh release create "$1" --prerelease --target "$GITHUB_SHA" --title "$2" \
-              --notes "3DS build of $BRANCH at $GITHUB_SHA, made by CI. $4" "$3/dkr.3dsx" "$3/build.txt" \
-              $(ls "$3/dkr.cia" 2>/dev/null)
+            notes="3DS build of $BRANCH at $GITHUB_SHA, made by CI. $4"
+            if gh release view "$1" >/dev/null 2>&1; then
+              gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$1" -f sha="$GITHUB_SHA" -F force=true >/dev/null ||
+                gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$1" -f sha="$GITHUB_SHA" >/dev/null
+              gh release edit "$1" --prerelease --title "$2" --notes "$notes"
+              if [ -f "$3/dkr.cia" ]; then
+                gh release upload "$1" --clobber "$3/dkr.3dsx" "$3/dkr.cia"
+              else
+                gh release upload "$1" --clobber "$3/dkr.3dsx"
+                gh release delete-asset "$1" dkr.cia --yes 2>/dev/null || true
+              fi
+              gh release upload "$1" --clobber "$3/build.txt"
+            else
+              gh release create "$1" --prerelease --target "$GITHUB_SHA" --title "$2" --notes "$notes" \
+                "$3/dkr.3dsx" "$3/build.txt" $(ls "$3/dkr.cia" 2>/dev/null)
+            fi
           }
           DEBUG_NOTE="Debug build (profiler, test runs, bug reports, updates); install it from the game's Check for updates button."
           publish 3ds-newest "3DS build: newest ($BRANCH, debug)" build/debug "$DEBUG_NOTE"
@@ -312,18 +328,17 @@ jobs:
           BASE_EXE: ${{ steps.base.outputs.exe }}
         run: |
           python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
-            --head port/build/host/dkr ${BASE_EXE:+--base "$BASE_EXE"} --out "$RUNNER_TEMP/regression"
+            --head port/build/host/dkr ${BASE_EXE:+--base "$BASE_EXE"} --out "$RUNNER_TEMP/regression" --max-images 0
 
-      - name: Upload the differences and logs
+      - name: Upload the report and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: frame-regression
-          # Frames that differ, side by side, and each run's log. The frames themselves are not kept.
+          # The report and each run's log only: no frames, since they are pictures of the game and the repository
+          # is public. Run port/tools/frame_regression.py locally to see the differing frames.
           path: |
             ${{ runner.temp }}/regression/report.md
-            ${{ runner.temp }}/regression/differences/
             ${{ runner.temp }}/regression/runs/*/*/log.txt
           if-no-files-found: ignore
-          # The side-by-side frames are pictures of the game; keep them a week, not GitHub's default 90 days.
           retention-days: 7

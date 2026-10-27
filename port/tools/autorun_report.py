@@ -117,7 +117,8 @@ def main():
             if any("switch_bench" in path for path in args.csv):
                 configs = ["usual settings", "command list splits off (P19)"]
             for row in finished:
-                index = int(row["config"]) if row["config"].isdigit() else -1
+                config = row.get("config") or ""  # CSVs from older builds have no config column
+                index = int(config) if config.isdigit() else -1
                 row["track and settings"] = f"{row['track']}, {configs[index] if 0 <= index < len(configs) else '?'}"
             lines += group_table(finished, "track and settings", "track and settings") + [""]
         elif any(r.get("aa") not in (None, "") for r in finished):

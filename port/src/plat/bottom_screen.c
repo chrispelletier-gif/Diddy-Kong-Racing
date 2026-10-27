@@ -627,6 +627,10 @@ void bs_show_menu(const BsMenu *menu) {
     sChanges |= 1 << BS_AREA_TOP;
 }
 
+int bs_race_hud_covered(void) {
+    return sState.menuShown || sState.overlayLines > 0;
+}
+
 void bs_set_buttons(const char *const *labels, int count) {
     int i;
     sState.buttonCount = count > 4 ? 4 : count;
@@ -1796,27 +1800,38 @@ static void draw_standing(const RaceHud *hud) {
     race_time(x, 70, hud->raceTime, 1);
 }
 
+/* The laps the HUD has times for, and of those the finished ones (after the finish line, all of them). */
+static void timed_laps(const RaceHud *hud, int *timed, int *done) {
+    *timed = hud->lapsTimed > RACE_HUD_LAPS ? RACE_HUD_LAPS : hud->lapsTimed;
+    if (hud->finished && hud->laps > 0 && *timed > hud->laps) {
+        // The game starts timing another lap as the player crosses the line.
+        *timed = hud->laps;
+    }
+    *done = hud->finished ? *timed : *timed - 1;
+}
+
 static void draw_bananas_and_laps(const RaceHud *hud) {
-    int x, best = -1, i, last = hud->lapsTimed - 2;
+    int x, best = -1, i, timed, done;
     char label[16];
     picture_scaled(&sBanana, MIDDLE_X0 + 6, LOWER_Y0 + 3, 1, 1);
     x = piece(&sTimes, MIDDLE_X0 + 42, LOWER_Y0 + 17, 2);
     x = piece(&sDigits[(hud->bananas / 10) % 10], x, LOWER_Y0 + 14, 1);
     piece(&sDigits[hud->bananas % 10], x, LOWER_Y0 + 14, 0);
     // The last finished lap (or the lap so far, on the first) and the best finished lap.
-    for (i = 0; i < hud->lapsTimed - 1 && i < RACE_HUD_LAPS; i++) {
+    timed_laps(hud, &timed, &done);
+    for (i = 0; i < done; i++) {
         if (best < 0 || hud->lapTimes[i] < best) {
             best = hud->lapTimes[i];
         }
     }
-    if (last >= 0) {
-        snprintf(label, sizeof(label), "Lap %d", last + 1);
+    if (done > 0) {
+        snprintf(label, sizeof(label), "Lap %d", done);
         text(FONT_SMALL, MIDDLE_X0 + 44, LOWER_Y0 + 42, label, HINT, 1);
-        race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[last], 1);
-    } else if (hud->lapsTimed > 0) {
-        snprintf(label, sizeof(label), "Lap %d", hud->lapsTimed);
+        race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[done - 1], 1);
+    } else if (timed > 0) {
+        snprintf(label, sizeof(label), "Lap %d", timed);
         text(FONT_SMALL, MIDDLE_X0 + 44, LOWER_Y0 + 42, label, HINT, 1);
-        race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[hud->lapsTimed - 1], 1);
+        race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[timed - 1], 1);
     }
     text(FONT_SMALL, MIDDLE_X0 + 8, LOWER_Y0 + 76, "Best lap", HINT, 1);
     if (best >= 0) {
@@ -1951,16 +1966,9 @@ static void draw_lap_and_time(const RaceHud *hud, const char *title, int laps) {
 
 /* Lap times down a panel (the lower middle one): the finished laps, then the best. */
 static void draw_lap_list(const RaceHud *hud, int x0, int y0) {
-    int i, y = y0 + 6, best = -1, timed = hud->lapsTimed, done;
+    int i, y = y0 + 6, best = -1, timed, done;
     char label[16];
-    if (timed > RACE_HUD_LAPS) {
-        timed = RACE_HUD_LAPS;
-    }
-    if (hud->finished && hud->laps > 0 && timed > hud->laps) {
-        // The game starts timing another lap as the player crosses the line.
-        timed = hud->laps;
-    }
-    done = hud->finished ? timed : timed - 1;
+    timed_laps(hud, &timed, &done);
     // The last two laps: the one being driven and the one before.
     for (i = timed > 2 ? timed - 2 : 0; i < timed; i++) {
         snprintf(label, sizeof(label), "Lap %d", i + 1);

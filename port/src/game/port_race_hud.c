@@ -33,6 +33,7 @@
 void plat_set_race_hud(const RaceHud *hud);
 /* Whether there is a bottom screen to show the race HUD on. */
 int plat_race_hud_screen(void);
+int plat_race_hud_covered(void);
 
 extern s32 gMinimapDotOffsetX;
 extern s16 gTTGhostTimeToBeat; // T.T.'s time on this track (objects.c), while his ghost is out.
@@ -46,6 +47,7 @@ static s32 sMenuShown;             // It is showing a menu's companion (menu_com
 static s32 sMapSprite = -1;        // The current track's map, as minimap_init loaded it.
 static void *sMapModel;            // The level model it belongs to: no map until the new level's is loaded.
 static s32 sClock;                 // 60ths of a second since the start.
+static s32 sTracking, sTrackedMode; // In a race (of this RACE_HUD_MODE_), keeping the clock and checkpoints.
 static s16 sReached[RACE_HUD_RACERS];
 static s32 sStamps[RACE_HUD_RACERS][MAX_STAMPS];
 
@@ -75,7 +77,8 @@ void port_race_hud_map(void *model, s32 spriteIndex) {
 
 /* Whether game_ui.c leaves this HUD element (HUD_*, or -1 for the track map itself) off the top screen. */
 s32 port_race_hud_hides(s32 element) {
-    if (!sActive || port_race_hud_setting() != RACE_HUD_BOTTOM) {
+    // While the bottom screen's menu covers the race HUD, the top screen keeps its own.
+    if (!sActive || port_race_hud_setting() != RACE_HUD_BOTTOM || plat_race_hud_covered()) {
         return FALSE;
     }
     switch (element) {
@@ -448,6 +451,34 @@ void port_race_hud_frame(s32 updateRate) {
         plat_set_race_hud(&hud);
         return;
     }
+    if (mode >= 0) {
+        racers = get_racer_objects(&count);
+        if (count > RACE_HUD_RACERS) {
+            count = RACE_HUD_RACERS;
+        }
+        // The clock and the checkpoints are kept whichever screen the HUD is on, so that switching it to the bottom
+        // in the middle of a race doesn't start the gaps (or a time trial's splits) over from there.
+        if (!sTracking || get_race_countdown() > 0 || mode != sTrackedMode) {
+            // A new race (or the start of this one): the clock and the gaps start over.
+            sClock = 0;
+            sBestSaved = FALSE;
+            for (i = 0; i < RACE_HUD_RACERS; i++) {
+                sReached[i] = 0;
+            }
+        } else if (!is_game_paused()) {
+            sClock += updateRate;
+        }
+        sTracking = TRUE;
+        sTrackedMode = mode;
+        for (i = 0; i < count; i++) {
+            Object_Racer *r = racers[i]->racer;
+            if (r->racerIndex >= 0 && r->racerIndex < RACE_HUD_RACERS) {
+                stamp(r->racerIndex, r->courseCheckpoint);
+            }
+        }
+    } else {
+        sTracking = FALSE;
+    }
     if (port_race_hud_setting() == RACE_HUD_TOP || mode < 0) {
         if (sActive || sMenuShown) {
             sActive = FALSE;
@@ -459,22 +490,8 @@ void port_race_hud_frame(s32 updateRate) {
     sMenuShown = FALSE;
     me = player->racer;
     header = level_header();
-    racers = get_racer_objects(&count);
     model = get_current_level_model();
     checkpoints = get_checkpoint_count();
-    if (count > RACE_HUD_RACERS) {
-        count = RACE_HUD_RACERS;
-    }
-    if (!sActive || get_race_countdown() > 0 || mode != hud.mode) {
-        // A new race (or the start of this one): the clock and the gaps start over.
-        sClock = 0;
-        sBestSaved = FALSE;
-        for (i = 0; i < RACE_HUD_RACERS; i++) {
-            sReached[i] = 0;
-        }
-    } else if (!is_game_paused()) {
-        sClock += updateRate;
-    }
     sActive = TRUE;
 
     hud = sEmpty;
@@ -486,12 +503,6 @@ void port_race_hud_frame(s32 updateRate) {
         hud.mapColour[0] = (model->minimapColor >> 16) & 0xFF;
         hud.mapColour[1] = (model->minimapColor >> 8) & 0xFF;
         hud.mapColour[2] = model->minimapColor & 0xFF;
-    }
-    for (i = 0; i < count; i++) {
-        Object_Racer *r = racers[i]->racer;
-        if (r->racerIndex >= 0 && r->racerIndex < RACE_HUD_RACERS) {
-            stamp(r->racerIndex, r->courseCheckpoint);
-        }
     }
     // The racers in race order (racePosition from 1; a finished racer keeps its finishing place); in a challenge, by
     // score (the knocked out last).
@@ -528,7 +539,8 @@ void port_race_hud_frame(s32 updateRate) {
             out->character = -1;
         }
         out->player = racers[order[j]] == player;
-        out->gap = (r->racerIndex >= 0 && r->racerIndex < RACE_HUD_RACERS)
+        out->gap = (r->racerIndex >= 0 && r->racerIndex < RACE_HUD_RACERS && me->racerIndex >= 0 &&
+                    me->racerIndex < RACE_HUD_RACERS)
                        ? gap(r->racerIndex, me->racerIndex, checkpoints)
                        : RACE_HUD_NO_GAP;
         out->score = (s8) challenge_score(mode, r);
@@ -546,7 +558,12 @@ void port_race_hud_frame(s32 updateRate) {
         }
     }
     hud.position = me->racePosition;
-    hud.laps = (level_type() == RACETYPE_DEFAULT && mode != RACE_HUD_MODE_HUB) ? header->laps : 0;
+    // The race types whose top screen HUD counts laps (game_ui.c): the races, Horseshoe Gulch's and the bosses'.
+    hud.laps = (level_type() == RACETYPE_DEFAULT || level_type() == RACETYPE_HORSESHOE_GULCH ||
+                level_type() == RACETYPE_BOSS) &&
+                       mode != RACE_HUD_MODE_HUB
+                   ? header->laps
+                   : 0;
     hud.lap = me->countLap + 1;
     if (hud.laps > 0 && hud.lap > hud.laps) {
         hud.lap = hud.laps;

@@ -68,5 +68,12 @@ def check_mpk(d):
 for path in sys.argv[1:]:
     d = open(path, 'rb').read()
     print(path)
-    for line in (check_eep(d) if path.endswith('.eep') else check_mpk(d)):
+    # By size, not name: an EEPROM is 512 bytes (4 Kbit) or 2 KB (16 Kbit), a Controller Pak 32 KB.
+    if len(d) <= 2048:
+        lines = check_eep(d)
+    elif len(d) == 32768:
+        lines = check_mpk(d)
+    else:
+        lines = ['unknown save size %d bytes (EEPROM: 512 or 2048, Controller Pak: 32768)' % len(d)]
+    for line in lines:
         print('  ' + line)

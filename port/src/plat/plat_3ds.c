@@ -378,6 +378,10 @@ void plat_sem_wait(PlatSem *sem) {
     LightSemaphore_Acquire(&sem->sem, 1);
 }
 
+int plat_sem_try_wait(PlatSem *sem) {
+    return LightSemaphore_TryAcquire(&sem->sem, 1) == 0;
+}
+
 void plat_wait_vblank(void) {
     gspWaitForVBlank();
 }
@@ -687,6 +691,11 @@ void update_3ds_race_changed(int racing);
  */
 int plat_race_hud_screen(void) {
     return 1;
+}
+
+/* Whether the bottom screen shows something over the race HUD (the Settings menu, the profiler's lines). */
+int plat_race_hud_covered(void) {
+    return bs_race_hud_covered();
 }
 
 /* Whether a HUD only differs from the last one drawn in what moves every frame (the timer and the map). */

@@ -297,8 +297,9 @@ void racer_sound_car(Object *obj, u32 buttonsPressed, u32 buttonsHeld, s32 ticks
                         gRacerSound->engineJitter = -5;
                     }
                 }
-                deltaPitch += 0.02 * (gRacerSound->engineJitter / 5.0f);
-                deltaVolume += 5.0f * (gRacerSound->engineJitter / 5.0f);
+                // At 60 fps the smoothing above is gentler, so the jitter is scaled with it to wobble as much.
+                deltaPitch += 0.02 * (gRacerSound->engineJitter / 5.0f) * (f32) (PORT_LERP(0.5) / 0.5);
+                deltaVolume += 5.0f * (gRacerSound->engineJitter / 5.0f) * (f32) (PORT_LERP(0.5) / 0.5);
             }
 
             // While acceleration button is held, gradually increase pitch boost up to 0.4 (by 0.01 per frame)

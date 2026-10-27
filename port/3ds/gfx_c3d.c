@@ -3244,6 +3244,12 @@ static void set_scissor(const short rect[4], int flat) {
             return;
         }
     }
+    if (right <= left || bottom <= top) {
+        // Nothing inside: citro3d would wrap an empty rectangle's right - 1 round to 1023, turning the scissor off on
+        // that side. Keeping out everything inside the whole screen draws nothing instead.
+        C3D_SetScissor(GPU_SCISSOR_INVERT, 0, 0, TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX);
+        return;
+    }
     C3D_SetScissor(GPU_SCISSOR_NORMAL, left * sRenderScale, top * sScaleX, right * sRenderScale, bottom * sScaleX);
 }
 

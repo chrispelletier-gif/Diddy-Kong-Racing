@@ -35,7 +35,7 @@ Vertex *gSnowVerts = NULL;
 s32 gSnowVertCount = 0;
 Triangle *gSnowTriangles = NULL;
 s16 *gSnowTriIndices = NULL;
-Vertex *gSnowVertexData[2] = { NULL, NULL };
+Vertex *gSnowVertexData[FRAME_BUFFERS] = { NULL, NULL };
 s32 *gWeatherAssetTable = NULL;   // List of Ids
 s32 gWeatherAssetTableLength = 0; // Set, but never read.
 
@@ -165,6 +165,9 @@ void weather_init(void) {
     gSnowTriCount = gSnowVertOffset >> 1; // One triangle per two verts
     gSnowVertexData[0] = 0;
     gSnowVertexData[1] = 0;
+#ifdef TARGET_PORT
+    gSnowVertexData[2] = 0; // Render ahead's third copy.
+#endif
     gSnowTriangles = 0;
     gSnowPlane.near = -1;
     gSnowPlane.far = -512;
@@ -220,6 +223,9 @@ void weather_free(void) {
     FREE_MEM(gSnowTriangles);
     FREE_MEM(gSnowVertexData[0]);
     FREE_MEM(gSnowVertexData[1]);
+#ifdef TARGET_PORT
+    FREE_MEM(gSnowVertexData[2]);
+#endif
     FREE_MEM(gSnowPhysics);
     FREE_MEM(gSnowGfx.pos);
     FREE_TEX(gSnowGfx.texture);
@@ -306,7 +312,10 @@ void weather_reset(s32 weatherType, s32 density, s32 velX, s32 velY, s32 velZ, s
     allocSize *= numOfElements;
     gSnowVertexData[0] = mempool_alloc_safe(allocSize, COLOUR_TAG_LIGHT_ORANGE);
     gSnowVertexData[1] = mempool_alloc_safe(allocSize, COLOUR_TAG_LIGHT_ORANGE);
-    for (j = 0; j < 2; j++) {
+#ifdef TARGET_PORT
+    gSnowVertexData[2] = mempool_alloc_safe(allocSize, COLOUR_TAG_LIGHT_ORANGE);
+#endif
+    for (j = 0; j < FRAME_BUFFERS; j++) {
         gSnowVerts = gSnowVertexData[j];
         for (i = 0; i < numOfElements; i++) {
             gSnowVerts[i].r = 255;
@@ -439,7 +448,7 @@ void weather_update(Gfx **currDisplayList, Mtx **currHudMat, Vertex **currHudVer
             gSnowVerts = gSnowVertexData[gSnowVertexFlip];
             snow_vertices();
             snow_render();
-            gSnowVertexFlip = 1 - gSnowVertexFlip;
+            gSnowVertexFlip = FRAME_FLIP(gSnowVertexFlip);
         }
     }
     *currDisplayList = gCurrWeatherDisplayList;

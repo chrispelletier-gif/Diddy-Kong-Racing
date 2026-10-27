@@ -188,7 +188,7 @@ s32 port_rom_load(const char *path) {
     lutStart = ASSETS_LUT_ROM_OFFSET;
     count = (lutStart + 4 <= size) ? port_read_be32(data + lutStart) : 0;
     lutEnd = lutStart + (count + 2) * 4;
-    if (count < 40 || count > 64 || lutEnd > size || port_read_be32(data + lutEnd - 4) + lutEnd > size) {
+    if (count < 40 || count > 64 || lutEnd > size || port_read_be32(data + lutEnd - 4) > size - lutEnd) {
         plat_free(data);
         plat_snprintf(sRomProblem, sizeof(sRomProblem),
                       "%s is Diddy Kong Racing, but looks modified or damaged (%u KB).", path, size / 1024);
@@ -224,8 +224,9 @@ void port_rom_read(u32 romOffset, void *dst, u32 size) {
         bzero(dst, size);
         return;
     }
-    if (romOffset + size > sRomSize) {
-        bzero((u8 *) dst + (sRomSize - romOffset), romOffset + size - sRomSize);
+    // Compared without adding, which could wrap round for a huge size and skip the clamp.
+    if (size > sRomSize - romOffset) {
+        bzero((u8 *) dst + (sRomSize - romOffset), size - (sRomSize - romOffset));
         size = sRomSize - romOffset;
     }
     bcopy(sRomData + romOffset, dst, size);

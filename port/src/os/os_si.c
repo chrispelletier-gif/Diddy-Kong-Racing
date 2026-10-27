@@ -43,7 +43,25 @@ u8 __osMaxControllers = MAXCONTROLLERS;
 static void load_saves(void);
 static void do_save_request(void);
 
-/* Write the EEPROM and the Controller Pak, in the N64's order, as dir + dkr.eep and dir + dkr.mpk. */
+/*
+ * The saves are written from the game's thread and, when the HOME menu opens, the console sleeps or the game exits,
+ * from the main thread, which has a higher priority. This lock keeps the two from writing at once, and keeps the main
+ * thread from copying a save the game is part way through changing. It sleeps rather than spins, so that the main
+ * thread lets the game's finish.
+ */
+static volatile s32 sSaveLock;
+
+static void save_lock(void) {
+    while (__atomic_exchange_n(&sSaveLock, 1, __ATOMIC_ACQUIRE)) {
+        plat_sleep_ns(1000000ULL);
+    }
+}
+
+static void save_unlock(void) {
+    __atomic_store_n(&sSaveLock, 0, __ATOMIC_RELEASE);
+}
+
+/* Write the EEPROM and the Controller Pak, in the N64's order, as dir + dkr.eep and dir + dkr.mpk. Called locked. */
 static s32 write_eeprom(const char *dir) {
     static u8 sOut[EEPROM_SIZE];
     char name[96];
@@ -62,6 +80,36 @@ static s32 write_mempak(const char *dir) {
     return port_save_write(name, sOut, MEMPAK_SIZE);
 }
 
+/* Writes the saves that changed. A write that fails leaves its save marked, so it is tried again later. Locked. */
+static void write_dirty_saves(void) {
+    static s32 sFailures;
+    s32 ok = TRUE;
+
+    if (sEepromDirty) {
+        sEepromDirty = FALSE;
+        if (!write_eeprom("")) {
+            sEepromDirty = TRUE;
+            ok = FALSE;
+        }
+    }
+    if (sMempakDirty) {
+        sMempakDirty = FALSE;
+        if (!write_mempak("")) {
+            sMempakDirty = TRUE;
+            ok = FALSE;
+        }
+    }
+    if (!ok) {
+        // Not again for the flush delay, so a full or locked SD card isn't tried every frame.
+        sLastSaveWrite = plat_time_ns();
+        if (sFailures++ < 5) {
+            plat_log("saves: writing to the SD card failed, will try again");
+        }
+    } else {
+        sFailures = 0;
+    }
+}
+
 static void flush_saves(s32 force) {
     if (!force) {
         do_save_request();
@@ -69,24 +117,16 @@ static void flush_saves(s32 force) {
     if (!sEepromDirty && !sMempakDirty) {
         return;
     }
+    save_lock();
     if (port_autorun_enabled() || sSavesFrozen) {
         // The unattended test run never touches the player's saves (its races would set track records), and after a
         // restore the game's memory has the old progress.
         sEepromDirty = FALSE;
         sMempakDirty = FALSE;
-        return;
+    } else if (force || plat_time_ns() - sLastSaveWrite >= SAVE_FLUSH_DELAY_NS) {
+        write_dirty_saves();
     }
-    if (!force && plat_time_ns() - sLastSaveWrite < SAVE_FLUSH_DELAY_NS) {
-        return;
-    }
-    if (sEepromDirty) {
-        sEepromDirty = FALSE;
-        write_eeprom("");
-    }
-    if (sMempakDirty) {
-        sMempakDirty = FALSE;
-        write_mempak("");
-    }
+    save_unlock();
 }
 
 /******************************** Backups ********************************/
@@ -94,58 +134,84 @@ static void flush_saves(s32 force) {
 enum { REQUEST_NONE, REQUEST_ASKED, REQUEST_TAKEN, REQUEST_DONE };
 enum { REQUEST_BACKUP, REQUEST_RESTORE };
 
+typedef struct SaveRequest {
+    s32 kind;
+    const char *dir; // Backup: where to; restore: where the saves go first (NULL: nowhere).
+    const u8 *eeprom;
+    const u8 *pak;
+} SaveRequest;
+
+/* The request another thread hands to the game's. Only one at a time: sAskLock is held from asking to the answer. */
 static volatile s32 sRequestState;
-static s32 sRequestKind;
-static const char *sRequestDir; // Backup: where to; restore: where the saves go first (NULL: nowhere).
-static const u8 *sRestoreEeprom;
-static const u8 *sRestorePak;
+static volatile s32 sAskLock;
+static SaveRequest sRequest;
 static s32 sRequestResult;
 
-/* On the game's thread: a backup or restore another thread asked for. */
-static void do_save_request(void) {
+/* On the game's thread: a backup or restore. */
+static s32 run_request(const SaveRequest *request) {
     char dir[96];
     s32 ok = TRUE;
+
+    save_lock();
+    if (request->dir != NULL) {
+        plat_snprintf(dir, sizeof(dir), "%s/", request->dir);
+        ok = write_eeprom(dir) && write_mempak(dir);
+    }
+    if (ok && request->kind == REQUEST_RESTORE && sSavesFrozen) {
+        plat_log("saves: already restored, the game has to restart first");
+        ok = FALSE;
+    } else if (ok && request->kind == REQUEST_RESTORE) {
+        // A save the game made in the last moments is written first, so the one of the pair not restored has it.
+        write_dirty_saves();
+        ok = !sEepromDirty && !sMempakDirty;
+        if (ok && request->eeprom != NULL) {
+            ok = port_save_write(EEPROM_FILE, request->eeprom, EEPROM_SIZE);
+        }
+        if (ok && request->pak != NULL) {
+            ok = port_save_write(MEMPAK_FILE, request->pak, MEMPAK_SIZE);
+        }
+        if (ok) {
+            sSavesFrozen = TRUE;
+        } else {
+            // Put back what the game holds (just written above), so a half restore doesn't stay, and keep saving.
+            sEepromDirty = TRUE;
+            sMempakDirty = TRUE;
+            write_dirty_saves();
+        }
+        plat_log("saves: restore%s%s%s", request->eeprom != NULL ? " " EEPROM_FILE : "",
+                 request->pak != NULL ? " " MEMPAK_FILE : "", ok ? " done" : " failed, saves kept as they were");
+    } else {
+        plat_log("saves: backup to %s %s", request->dir, ok ? "written" : "failed");
+    }
+    save_unlock();
+    return ok;
+}
+
+/* On the game's thread, at a controller read: a request another thread made. */
+static void do_save_request(void) {
     s32 expected = REQUEST_ASKED;
 
     if (!__atomic_compare_exchange_n(&sRequestState, &expected, REQUEST_TAKEN, FALSE, __ATOMIC_ACQUIRE,
                                      __ATOMIC_RELAXED)) {
         return;
     }
-    if (sRequestDir != NULL) {
-        plat_snprintf(dir, sizeof(dir), "%s/", sRequestDir);
-        ok = write_eeprom(dir) && write_mempak(dir);
-    }
-    if (ok && sRequestKind == REQUEST_RESTORE) {
-        // A save the game made in the last moments is written first, so the one of the pair not restored has it.
-        flush_saves(TRUE);
-        sSavesFrozen = TRUE;
-        if (sRestoreEeprom != NULL) {
-            ok = port_save_write(EEPROM_FILE, sRestoreEeprom, EEPROM_SIZE);
-        }
-        if (sRestorePak != NULL) {
-            ok = port_save_write(MEMPAK_FILE, sRestorePak, MEMPAK_SIZE) && ok;
-        }
-        plat_log("saves: restored%s%s%s", sRestoreEeprom != NULL ? " " EEPROM_FILE : "",
-                 sRestorePak != NULL ? " " MEMPAK_FILE : "", ok ? "" : " (a write failed)");
-    } else {
-        plat_log("saves: backup to %s %s", sRequestDir, ok ? "written" : "failed");
-    }
-    sRequestResult = ok;
+    sRequestResult = run_request(&sRequest);
     __atomic_store_n(&sRequestState, REQUEST_DONE, __ATOMIC_RELEASE);
 }
 
 /* From another thread: hands the request to the game's thread and waits for it. On the game's own: does it now. */
-static s32 run_save_request(s32 kind, s32 onGameThread) {
+static s32 run_save_request(const SaveRequest *request, s32 onGameThread) {
     unsigned long long start = plat_time_ns();
-    s32 expected;
+    s32 expected, result;
 
-    sRequestKind = kind;
-    __atomic_store_n(&sRequestState, REQUEST_ASKED, __ATOMIC_RELEASE);
     if (onGameThread) {
-        do_save_request();
-        sRequestState = REQUEST_NONE;
-        return sRequestResult;
+        return run_request(request);
     }
+    while (__atomic_exchange_n(&sAskLock, 1, __ATOMIC_ACQUIRE)) {
+        plat_sleep_ns(20000000ULL);
+    }
+    sRequest = *request;
+    __atomic_store_n(&sRequestState, REQUEST_ASKED, __ATOMIC_RELEASE);
     for (;;) {
         plat_sleep_ns(20000000ULL);
         expected = REQUEST_ASKED;
@@ -153,25 +219,28 @@ static s32 run_save_request(s32 kind, s32 onGameThread) {
             __atomic_compare_exchange_n(&sRequestState, &expected, REQUEST_NONE, FALSE, __ATOMIC_ACQUIRE,
                                         __ATOMIC_RELAXED)) {
             // The game isn't reading the controllers (loading, or stopped): nothing was done.
-            return -1;
+            result = -1;
+            break;
         }
         if (__atomic_load_n(&sRequestState, __ATOMIC_ACQUIRE) == REQUEST_DONE) {
             sRequestState = REQUEST_NONE;
-            return sRequestResult;
+            result = sRequestResult;
+            break;
         }
     }
+    __atomic_store_n(&sAskLock, 0, __ATOMIC_RELEASE);
+    return result;
 }
 
-s32 port_save_backup(const char *dir, s32 onGameThread) {
-    sRequestDir = dir;
-    return run_save_request(REQUEST_BACKUP, onGameThread);
+long port_save_backup(const char *dir, long onGameThread) {
+    SaveRequest request = { REQUEST_BACKUP, dir, NULL, NULL };
+    return run_save_request(&request, onGameThread);
 }
 
-s32 port_save_restore(const u8 *eeprom, const u8 *pak, const char *undoDir, s32 onGameThread) {
-    sRequestDir = undoDir;
-    sRestoreEeprom = eeprom;
-    sRestorePak = pak;
-    return run_save_request(REQUEST_RESTORE, onGameThread);
+long port_save_restore(const unsigned char *eeprom, const unsigned char *pak, const char *undoDir,
+                       long onGameThread) {
+    SaveRequest request = { REQUEST_RESTORE, undoDir, eeprom, pak };
+    return run_save_request(&request, onGameThread);
 }
 
 void port_si_flush(void) {
@@ -245,18 +314,19 @@ static void load_saves(void) {
     sSaveLoaded = TRUE;
     if (port_save_read(EEPROM_FILE, sEeprom, sizeof(sEeprom))) {
         port_eep_convert(sEeprom);
-    } else if (port_save_read(OLD_EEPROM_FILE, sEeprom, sizeof(sEeprom))) {
-        // An earlier build's save: kept as it was, written again in the N64's order.
+    } else if (!port_save_exists(EEPROM_FILE) && port_save_read(OLD_EEPROM_FILE, sEeprom, sizeof(sEeprom))) {
+        // An earlier build's save: kept as it was, written again in the N64's order. Only when there is no
+        // dkr.eep at all: an empty one (cut off by an earlier build's save) must not bring back that old progress.
         plat_log("saves: " OLD_EEPROM_FILE " -> " EEPROM_FILE);
-        write_eeprom("");
+        sEepromDirty = TRUE;
     } else {
         bzero(sEeprom, sizeof(sEeprom));
     }
     if (port_save_read(MEMPAK_FILE, sMempak, sizeof(sMempak))) {
         port_mpk_convert(sMempak, FALSE);
-    } else if (port_save_read(OLD_MEMPAK_FILE, sMempak, sizeof(sMempak))) {
+    } else if (!port_save_exists(MEMPAK_FILE) && port_save_read(OLD_MEMPAK_FILE, sMempak, sizeof(sMempak))) {
         plat_log("saves: " OLD_MEMPAK_FILE " -> " MEMPAK_FILE);
-        write_mempak("");
+        sMempakDirty = TRUE;
     } else {
         // A brand new pak. It gets formatted the first time the game initialises it.
         bzero(sMempak, sizeof(sMempak));
@@ -278,8 +348,7 @@ s32 osEepromRead(OSMesgQueue *mq, u8 address, u8 *buffer) {
     return 0;
 }
 
-s32 osEepromWrite(OSMesgQueue *mq, u8 address, u8 *buffer) {
-    (void) mq;
+static s32 eeprom_write_block(u8 address, u8 *buffer) {
     if (address >= EEPROM_SIZE / EEPROM_BLOCK_SIZE) {
         return -1;
     }
@@ -287,6 +356,15 @@ s32 osEepromWrite(OSMesgQueue *mq, u8 address, u8 *buffer) {
     sEepromDirty = TRUE;
     sLastSaveWrite = plat_time_ns();
     return 0;
+}
+
+s32 osEepromWrite(OSMesgQueue *mq, u8 address, u8 *buffer) {
+    s32 ret;
+    (void) mq;
+    save_lock();
+    ret = eeprom_write_block(address, buffer);
+    save_unlock();
+    return ret;
 }
 
 s32 osEepromLongRead(OSMesgQueue *mq, u8 address, u8 *buffer, int nbytes) {
@@ -299,13 +377,17 @@ s32 osEepromLongRead(OSMesgQueue *mq, u8 address, u8 *buffer, int nbytes) {
     return ret;
 }
 
+/* Locked as a whole, so a save written from the main thread never has half of it. */
 s32 osEepromLongWrite(OSMesgQueue *mq, u8 address, u8 *buffer, int nbytes) {
     s32 ret = 0;
+    (void) mq;
+    save_lock();
     while (nbytes > 0 && ret == 0) {
-        ret = osEepromWrite(mq, address++, buffer);
+        ret = eeprom_write_block(address++, buffer);
         buffer += EEPROM_BLOCK_SIZE;
         nbytes -= EEPROM_BLOCK_SIZE;
     }
+    save_unlock();
     return ret;
 }
 
@@ -338,9 +420,11 @@ s32 __osContRamWrite(OSMesgQueue *mq, int channel, u16 address, u8 *buffer, int 
         return PFS_ERR_NOPACK;
     }
     if (address < MEMPAK_BLOCKS) {
+        save_lock();
         bcopy(buffer, &sMempak[address * BLOCKSIZE], BLOCKSIZE);
         sMempakDirty = TRUE;
         sLastSaveWrite = plat_time_ns();
+        save_unlock();
     }
     return 0;
 }

@@ -776,6 +776,10 @@ void aitable_init(s8 *aiLevelTable) {
     temp = gTempAssetTable[aiLevel + 1] - temp2;
     gAIBehaviourTable = mempool_alloc_safe(temp, COLOUR_TAG_YELLOW);
     asset_load(ASSET_AI_BEHAVIOUR, (u32) gAIBehaviourTable, temp2, temp);
+#ifdef TARGET_PORT
+    // The two floats (the AI's speed range) come from the ROM big endian; the percentages are bytes.
+    port_swap32_array(gAIBehaviourTable, 2);
+#endif
     mempool_free(gTempAssetTable);
 }
 

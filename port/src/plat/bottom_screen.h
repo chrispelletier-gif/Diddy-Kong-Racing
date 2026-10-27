@@ -66,6 +66,8 @@ void bs_clear_messages(void);
 void bs_set_overlay(const char *text);
 /* menu NULL closes it. */
 void bs_show_menu(const BsMenu *menu);
+/* Whether the menu or the overlay lines are up, so that the race HUD isn't drawn. */
+int bs_race_hud_covered(void);
 /*
  * The buttons, side by side: button i of count takes columns i * (40 / count) + 1 to (i + 1) * (40 / count) - 1 of
  * 8 pixels (update_3ds.c maps taps the same way). A label starting with '-' is a button that cannot be tapped (just

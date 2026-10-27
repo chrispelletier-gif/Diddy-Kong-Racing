@@ -50,10 +50,20 @@ s32 port_save_read(const char *name, void *data, u32 size) {
     if (file == NULL) {
         return FALSE;
     }
+    if (fileSize < size) {
+        plat_log("saves: %s is only %u bytes, the rest is blank", name, fileSize);
+    }
     bzero(data, size);
     bcopy(file, data, (fileSize < size) ? fileSize : size);
     plat_free(file);
     return TRUE;
+}
+
+s32 port_save_exists(const char *name) {
+    char path[256];
+    u8 byte;
+    make_path(path, sizeof(path), name);
+    return plat_load_file_start(path, &byte, 1) >= 0;
 }
 
 s32 port_save_write(const char *name, const void *data, u32 size) {

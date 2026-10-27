@@ -244,9 +244,10 @@ void mempool_free_timer(s32 state) {
     u32 intFlags = interrupts_disable();
 #ifdef TARGET_PORT
     // Memory freed in a frame may be read by the frame before it and, with the game two frames ahead of the renderer,
-    // the one before that, which is drawn a frame later than on the N64.
+    // the one before that, which is drawn a frame later than on the N64. Always the longer wait: Render ahead can be
+    // switched on mid-level, and frees already queued with the shorter wait would then come a frame too early.
     if (state >= 2) {
-        state += port_render_ahead() - 1;
+        state += FRAME_BUFFERS - 2;
     }
 #endif
     gFreeQueueTimer = state;
@@ -382,6 +383,21 @@ UNUSED void mempool_clear(void) {
  * Adds the current memory address to the back of the queue, so it can be freed.
  */
 void mempool_free_queue(void *dataAddress) {
+#ifdef TARGET_PORT
+    // The N64 wrote past the end here. Full, the entry nearest its time is freed now instead: mempool_free_addr waits
+    // for the renderer to finish first, as for any unqueued free.
+    if (gFreeQueueCount >= ARRAY_COUNT(gFreeQueue)) {
+        s32 i;
+        s32 soonest = 0;
+        for (i = 1; i < gFreeQueueCount; i++) {
+            if (gFreeQueue[i].freeTimer < gFreeQueue[soonest].freeTimer) {
+                soonest = i;
+            }
+        }
+        mempool_free_addr(gFreeQueue[soonest].dataAddress);
+        gFreeQueue[soonest] = gFreeQueue[--gFreeQueueCount];
+    }
+#endif
     gFreeQueue[gFreeQueueCount].dataAddress = dataAddress;
     gFreeQueue[gFreeQueueCount].freeTimer = gFreeQueueTimer;
     gFreeQueueCount++;

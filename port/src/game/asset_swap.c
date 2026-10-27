@@ -32,6 +32,7 @@
 #define MAX_SWAPPED_ONCE 4096
 static void *sSwappedOnce[MAX_SWAPPED_ONCE];
 static s32 sSwappedOnceCount;
+static s32 sSwappedOnceFull;
 
 s32 port_swap_once(void *ptr) {
     s32 i;
@@ -42,6 +43,10 @@ s32 port_swap_once(void *ptr) {
     }
     if (sSwappedOnceCount < MAX_SWAPPED_ONCE) {
         sSwappedOnce[sSwappedOnceCount++] = ptr;
+    } else if (!sSwappedOnceFull) {
+        // Past this, a shared structure seen again would be swapped twice.
+        sSwappedOnceFull = TRUE;
+        port_log("asset_swap: swap-once list full (%d): shared data may be swapped twice", MAX_SWAPPED_ONCE);
     }
     return TRUE;
 }

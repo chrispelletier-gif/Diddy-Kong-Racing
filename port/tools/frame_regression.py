@@ -246,8 +246,12 @@ def main():
         lines += ["**Failed:**", ""] + ["- " + f for f in failures] + [""]
     if compare:
         if total_differing:
-            lines.append("%d frames differ from the base build. Side by side images (base, head, difference x4) "
-                         "are in the `frame-regression` artifact." % total_differing)
+            if args.max_images > 0:
+                lines.append("%d frames differ from the base build. Side by side images (base, head, difference x4) "
+                             "are in %s." % (total_differing, os.path.join(args.out, "differences")))
+            else:
+                lines.append("%d frames differ from the base build. Run port/tools/frame_regression.py locally to "
+                             "see them side by side." % total_differing)
         else:
             lines.append("Every frame matches the base build.")
     report = "\n".join(lines) + "\n"

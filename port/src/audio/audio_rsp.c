@@ -80,6 +80,12 @@ static inline u8 *dmem_u8(u32 addr) {
     return sDmem + (addr & 0xFFFF);
 }
 
+/* count bytes from DMEM address addr, cut to what fits before DMEM's end (a bad command list stays inside it). */
+static inline u32 dmem_fit(u32 addr, u32 count) {
+    addr &= 0xFFFF;
+    return count > DMEM_SIZE - addr ? DMEM_SIZE - addr : count;
+}
+
 static inline void *ram(u32 addr) {
     return (void *) (uintptr_t) addr;
 }
@@ -603,13 +609,13 @@ void port_audio_run_task(void *taskPtr) {
                 }
                 break;
             case A_CLEARBUFF:
-                bzero(dmem_u8(w0 & ~3), ((w1 & 0xFFFF) + 3) & ~3);
+                bzero(dmem_u8(w0 & ~3), dmem_fit(w0 & ~3, ((w1 & 0xFFFF) + 3) & ~3));
                 break;
             case A_ENVMIXER:
                 cmd_envmixer(w0, w1);
                 break;
             case A_LOADBUFF:
-                count = (sAudio.count + 3) & ~3;
+                count = dmem_fit(sAudio.in & ~3, (sAudio.count + 3) & ~3);
                 bcopy(ram(w1 & ~3), dmem_u8(sAudio.in & ~3), count);
                 if ((w0 >> 16) & PORT_A_SWAP16) {
                     port_swap16_array(dmem_u8(sAudio.in & ~3), count / 2);
@@ -626,7 +632,7 @@ void port_audio_run_task(void *taskPtr) {
                 }
                 break;
             case A_SAVEBUFF:
-                bcopy(dmem_u8(sAudio.out & ~3), ram(w1 & ~3), (sAudio.count + 3) & ~3);
+                bcopy(dmem_u8(sAudio.out & ~3), ram(w1 & ~3), dmem_fit(sAudio.out & ~3, (sAudio.count + 3) & ~3));
                 break;
             case A_SETBUFF:
                 if ((w0 >> 16) & A_AUX) {
@@ -657,6 +663,7 @@ void port_audio_run_task(void *taskPtr) {
             }
             case A_DMEMMOVE:
                 count = ((w1 & 0xFFFF) + 3) & ~3;
+                count = dmem_fit(w0, dmem_fit(w1 >> 16, count));
                 bcopy(dmem_u8(w0 & 0xFFFF), dmem_u8(w1 >> 16), count);
                 break;
             case A_LOADADPCM:
@@ -671,7 +678,7 @@ void port_audio_run_task(void *taskPtr) {
                 s16 gain = (s16) w0;
                 s16 *src = dmem_s16(w1 >> 16);
                 s16 *dst = dmem_s16(w1 & 0xFFFF);
-                count = sAudio.count >> 1;
+                count = dmem_fit(w1 >> 16, dmem_fit(w1 & 0xFFFF, sAudio.count)) >> 1;
                 i = 0;
                 // Pairs at a time when the buffers are the same or don't overlap (the plain loop's order matters
                 // otherwise).
@@ -689,9 +696,9 @@ void port_audio_run_task(void *taskPtr) {
                 static s16 sTemp[DMEM_SIZE / 2];
                 s16 *left = dmem_s16(w1 >> 16);
                 s16 *right = dmem_s16(w1 & 0xFFFF);
-                count = sAudio.count >> 1;
-                if (count > DMEM_SIZE / 4) {
-                    count = DMEM_SIZE / 4;
+                count = dmem_fit(w1 >> 16, dmem_fit(w1 & 0xFFFF, sAudio.count)) >> 1;
+                if (count > dmem_fit(sAudio.out & ~3, DMEM_SIZE) / 4) {
+                    count = dmem_fit(sAudio.out & ~3, DMEM_SIZE) / 4;
                 }
                 for (i = 0; i < count; i++) {
                     sTemp[i * 2] = left[i];

@@ -73,6 +73,10 @@ int plat_race_hud_screen(void) {
     return getenv("DKR_BOTTOM_RACE") != NULL;
 }
 
+int plat_race_hud_covered(void) {
+    return 0;
+}
+
 void plat_set_race_hud(const RaceHud *hud) {
     const char *dir = getenv("DKR_BOTTOM_RACE");
     if (dir != NULL && hud != NULL) {
@@ -260,6 +264,17 @@ void plat_sem_wait(PlatSem *sem) {
     }
     sem->count--;
     pthread_mutex_unlock(&sem->mutex);
+}
+
+int plat_sem_try_wait(PlatSem *sem) {
+    int taken;
+    pthread_mutex_lock(&sem->mutex);
+    taken = sem->count > 0;
+    if (taken) {
+        sem->count--;
+    }
+    pthread_mutex_unlock(&sem->mutex);
+    return taken;
 }
 
 void plat_wait_vblank(void) {
