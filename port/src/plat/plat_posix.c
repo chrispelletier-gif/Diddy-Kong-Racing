@@ -73,6 +73,10 @@ int plat_race_hud_screen(void) {
     return getenv("DKR_BOTTOM_RACE") != NULL;
 }
 
+int plat_race_hud_covered(void) {
+    return 0;
+}
+
 void plat_set_race_hud(const RaceHud *hud) {
     const char *dir = getenv("DKR_BOTTOM_RACE");
     if (dir != NULL && hud != NULL) {

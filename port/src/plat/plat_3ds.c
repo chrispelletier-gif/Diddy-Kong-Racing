@@ -689,6 +689,11 @@ int plat_race_hud_screen(void) {
     return 1;
 }
 
+/* Whether the bottom screen shows something over the race HUD (the Settings menu, the profiler's lines). */
+int plat_race_hud_covered(void) {
+    return bs_race_hud_covered();
+}
+
 /* Whether a HUD only differs from the last one drawn in what moves every frame (the timer and the map). */
 static int same_standing(const RaceHud *a, const RaceHud *b) {
     int i;
