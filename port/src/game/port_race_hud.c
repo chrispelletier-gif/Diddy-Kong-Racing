@@ -274,6 +274,59 @@ static void best_load(s32 level, s32 vehicle) {
     free(data);
 }
 
+/*
+ * The tracks menu's companion shows each track's best total as the cursor moves. Opening a file on the SD card for
+ * every move held the game thread for 150 ms and more (bug report #217: the data directory keeps every bug report
+ * snapshot, and looking up a name that isn't there reads all of it), so the totals are read once, the first time a
+ * menu shows a companion: one pass over the directory, opening only the ttbest files it has.
+ */
+#define BEST_LEVELS 128
+#define BEST_VEHICLES 3
+static s32 sBestTotals[BEST_LEVELS][BEST_VEHICLES]; // 0: none.
+static s32 sBestTotalsRead;
+
+/* Reads a number at *text and moves past it; -1 if there is none. */
+static s32 best_number(const char **text) {
+    s32 value = -1;
+    while (**text >= '0' && **text <= '9' && value < 1000) {
+        value = (value < 0 ? 0 : value * 10) + (**text - '0');
+        (*text)++;
+    }
+    return value;
+}
+
+static void best_totals_read(void) {
+    static char sNames[BEST_LEVELS * BEST_VEHICLES][24];
+    char path[256];
+    unsigned long long start = plat_time_ns();
+    s32 count, found = 0, i;
+    sBestTotalsRead = TRUE;
+    count = plat_list_dir_prefix(plat_data_dir(), "ttbest_", sNames[0], sizeof(sNames[0]), ARRAY_COUNT(sNames));
+    for (i = 0; i < count; i++) {
+        // ttbest_LEVEL_VEHICLE.bin
+        const char *text = sNames[i] + 7;
+        s32 level = best_number(&text), vehicle = -1;
+        unsigned int size = 0;
+        void *data;
+        if (*text == '_') {
+            text++;
+            vehicle = best_number(&text);
+        }
+        if (level < 0 || level >= BEST_LEVELS || vehicle < 0 || vehicle >= BEST_VEHICLES ||
+            text[0] != '.' || text[1] != 'b' || text[2] != 'i' || text[3] != 'n' || text[4] != '\0') {
+            continue;
+        }
+        best_path(path, sizeof(path), level, vehicle);
+        data = plat_load_file(path, &size);
+        if (data != NULL && size == sizeof(BestRun) && ((BestRun *) data)->magic == BEST_MAGIC) {
+            sBestTotals[level][vehicle] = ((BestRun *) data)->total;
+            found++;
+        }
+        free(data);
+    }
+    plat_log("time trial bests: %d read in %d ms", (int) found, (int) ((plat_time_ns() - start) / 1000000ULL));
+}
+
 /* At the finish: this run becomes the best if it is (the stamps are the player's, sStamps[playerIndex]). */
 static void best_finish(s32 playerIndex, const RaceHud *hud) {
     char path[256];
@@ -296,6 +349,9 @@ static void best_finish(s32 playerIndex, const RaceHud *hud) {
     }
     best_path(path, sizeof(path), sBestLevel, sBestVehicle);
     plat_save_file(path, &sBest, sizeof(sBest));
+    if (sBestLevel >= 0 && sBestLevel < BEST_LEVELS && sBestVehicle >= 0 && sBestVehicle < BEST_VEHICLES) {
+        sBestTotals[sBestLevel][sBestVehicle] = sBest.total;
+    }
 }
 
 /* The bosses' rematches (the second race in each world). */
@@ -397,6 +453,9 @@ static s32 menu_companion(RaceHud *hud) {
     if (get_game_mode() != GAMEMODE_MENU) {
         return FALSE;
     }
+    if (!sBestTotalsRead) {
+        best_totals_read();
+    }
     switch (port_menu_focus(&level, &vehicle, &file, &name)) {
         case PORT_MENU_FOCUS_FILE:
             *hud = sEmpty;
@@ -416,14 +475,13 @@ static s32 menu_companion(RaceHud *hud) {
             hud->level = level;
             hud->vehicle = vehicle;
             hud->record = hud->recordLap = hud->bestTotal = -1;
-            if (vehicle >= 0 && vehicle < 3 && level >= 0) {
+            if (vehicle >= 0 && vehicle < BEST_VEHICLES && level >= 0) {
                 u16 course = settings->courseTimesPtr[vehicle][level];
                 u16 lap = settings->flapTimesPtr[vehicle][level];
                 hud->record = course > 0 && course < 10800 ? course : -1;
                 hud->recordLap = lap > 0 && lap < 10800 ? lap : -1;
-                best_load(level, vehicle);
-                if (sBest.magic == BEST_MAGIC) {
-                    hud->bestTotal = sBest.total;
+                if (level < BEST_LEVELS && sBestTotals[level][vehicle] > 0) {
+                    hud->bestTotal = sBestTotals[level][vehicle];
                 }
             }
             plat_snprintf(hud->name, sizeof(hud->name), "%s", trackName != NULL ? trackName : "");
