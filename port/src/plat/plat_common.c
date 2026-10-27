@@ -88,8 +88,36 @@ int plat_take_ui_sound(void) {
     return __atomic_exchange_n(&sUiSound, PLAT_UI_SOUND_NONE, __ATOMIC_ACQ_REL);
 }
 
-void *plat_load_file(const char *path, unsigned int *size) {
+/* plat_save_file's temporary copy of a file. */
+static void temp_path(char *out, size_t size, const char *path) {
+    snprintf(out, size, "%s.tmp", path);
+}
+
+/* Moves the finished temporary copy over the file. The 3DS's SD card driver won't rename over a file that exists. */
+static int replace_with_temp(const char *temp, const char *path) {
+    if (rename(temp, path) == 0) {
+        return 1;
+    }
+    remove(path);
+    return rename(temp, path) == 0;
+}
+
+/* Opens a file, first finishing a save that stopped between removing the old file and renaming the new one in. */
+static FILE *open_for_reading(const char *path) {
     FILE *f = fopen(path, "rb");
+    char temp[300];
+
+    if (f == NULL) {
+        temp_path(temp, sizeof(temp), path);
+        if (rename(temp, path) == 0) {
+            f = fopen(path, "rb");
+        }
+    }
+    return f;
+}
+
+void *plat_load_file(const char *path, unsigned int *size) {
+    FILE *f = open_for_reading(path);
     long len;
     void *data;
 
@@ -115,7 +143,7 @@ void *plat_load_file(const char *path, unsigned int *size) {
 }
 
 int plat_load_file_start(const char *path, void *data, unsigned int size) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = open_for_reading(path);
     size_t got;
 
     if (f == NULL) {
@@ -126,16 +154,28 @@ int plat_load_file_start(const char *path, void *data, unsigned int size) {
     return (int) got;
 }
 
+/*
+ * Written to a temporary file which then replaces the old one, so that losing power or crashing part way leaves either
+ * the old file or the new one, never a cut-off one. Returns 0 if anything failed (the old file is then kept).
+ */
 int plat_save_file(const char *path, const void *data, unsigned int size) {
-    FILE *f = fopen(path, "wb");
-    size_t written;
+    char temp[300];
+    FILE *f;
+    int ok;
 
+    temp_path(temp, sizeof(temp), path);
+    f = fopen(temp, "wb");
     if (f == NULL) {
         return 0;
     }
-    written = fwrite(data, 1, size, f);
-    fclose(f);
-    return written == size;
+    ok = fwrite(data, 1, size, f) == size;
+    ok = fflush(f) == 0 && ok;
+    ok = fclose(f) == 0 && ok;
+    if (!ok || !replace_with_temp(temp, path)) {
+        remove(temp);
+        return 0;
+    }
+    return 1;
 }
 
 void *plat_malloc(size_t size) {

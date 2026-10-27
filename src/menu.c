@@ -4737,6 +4737,7 @@ typedef struct PortSaveRow {
 } PortSaveRow;
 
 static PortSaveRow sPortSaveRows[PORT_SAVE_TABS][PORT_SAVE_MAX_ROWS];
+static SaveBackupList sPortSaveBackups; // The BACKUPS rows' index into it.
 static s32 sPortSaveRowCount[PORT_SAVE_TABS];
 static s32 sPortSaveRowsReady;
 static s32 sPortSaveTab;
@@ -4792,8 +4793,8 @@ static void port_savemenu_build_rows(void) {
     row = &sPortSaveRows[PORT_SAVE_TAB_BACKUPS][sPortSaveRowCount[PORT_SAVE_TAB_BACKUPS]++];
     row->kind = PORT_SAVE_ROW_BACK_UP;
     row->index = 0;
-    save_backups_scan();
-    for (i = 0; i < save_backups_count() && sPortSaveRowCount[PORT_SAVE_TAB_BACKUPS] < PORT_SAVE_MAX_ROWS; i++) {
+    save_backups_scan(&sPortSaveBackups);
+    for (i = 0; i < save_backups_count(&sPortSaveBackups) && sPortSaveRowCount[PORT_SAVE_TAB_BACKUPS] < PORT_SAVE_MAX_ROWS; i++) {
         row = &sPortSaveRows[PORT_SAVE_TAB_BACKUPS][sPortSaveRowCount[PORT_SAVE_TAB_BACKUPS]++];
         row->kind = PORT_SAVE_ROW_BACKUP;
         row->index = i;
@@ -4989,7 +4990,7 @@ static void port_savemenu_render_list(s32 highlight, s32 active) {
                 label = "BACK UP NOW";
                 break;
             default:
-                save_backups_name(row->index, buffer, sizeof(buffer));
+                save_backups_name(&sPortSaveBackups, row->index, buffer, sizeof(buffer));
                 label = buffer;
                 break;
         }
@@ -5046,7 +5047,7 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
         line2 = "TO THE SD CARD";
     } else if (row->kind == PORT_SAVE_ROW_BACKUP) {
         icon = gDrawTexFileIcon;
-        title = save_backups_is_undo(row->index) ? "BEFORE A RESTORE" : "BACKUP";
+        title = save_backups_is_undo(&sPortSaveBackups, row->index) ? "BEFORE A RESTORE" : "BACKUP";
         line1 = "GAME PAK";
         line2 = "AND CONTROLLER PAK";
     } else {
@@ -5321,7 +5322,7 @@ s32 port_savemenu_input_confirm(s32 buttonsPressed) {
         gMenuStage = SAVEMENU_CHOOSE_DEST;
     } else if (buttonsPressed & (A_BUTTON | START_BUTTON)) {
         if (row != NULL && row->kind == PORT_SAVE_ROW_BACKUP) {
-            result = save_backups_restore(row->index, TRUE);
+            result = save_backups_restore(&sPortSaveBackups, row->index, TRUE);
             if (result == SAVE_BACKUP_DONE) {
                 sound_play(SOUND_SELECT2, NULL);
                 sPortSaveQuitTimer = PORT_SAVE_QUIT_DELAY;
@@ -5329,7 +5330,11 @@ s32 port_savemenu_input_confirm(s32 buttonsPressed) {
                 sound_play(SOUND_MENU_BACK3, NULL);
                 sPortSaveMessage = result == SAVE_BACKUP_TEST_RUN    ? "NOT DURING A TEST RUN"
                                    : result == SAVE_BACKUP_TOO_SHORT ? "THAT BACKUP IS DAMAGED"
+                                   : result == SAVE_BACKUP_NOT_FOUND ? "THAT BACKUP IS GONE"
                                                                      : "COULD NOT WRITE TO SD";
+                if (result == SAVE_BACKUP_NOT_FOUND) {
+                    port_savemenu_build_rows();
+                }
             }
             gMenuStage = SAVEMENU_CHOOSE_SOURCE;
             return 0;
