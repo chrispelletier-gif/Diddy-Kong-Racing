@@ -24,6 +24,8 @@ typedef struct Huffman {
 typedef struct InflateState {
     const u8 *in;
     u8 *out;
+    u8 *start; // Of the output, and its end: a damaged stream stops instead of writing outside it.
+    u8 *end;
     u32 bitBuf;
     s32 bitCount;
 } InflateState;
@@ -35,9 +37,9 @@ static const u16 sDistBase[30] = { 1,   2,   3,   4,   5,   7,    9,    13,   17
                                    193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
 static const u8 sDistExtra[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
 
+/* Built once before main (build_fixed_tables), not on first use: several threads unpack at the same time. */
 static Huffman sFixedLen;
 static Huffman sFixedDist;
-static s32 sFixedBuilt;
 
 static inline void need_bits(InflateState *s, s32 n) {
     while (s->bitCount < n) {
@@ -160,6 +162,9 @@ static s32 inflate_codes(InflateState *s, const Huffman *lencode, const Huffman 
             return -1;
         }
         if (sym < 256) {
+            if (s->out >= s->end) {
+                return -1;
+            }
             *s->out++ = (u8) sym;
         } else if (sym == 256) {
             return 0;
@@ -174,6 +179,9 @@ static s32 inflate_codes(InflateState *s, const Huffman *lencode, const Huffman 
                 return -1;
             }
             dist = sDistBase[sym] + get_bits(s, sDistExtra[sym]);
+            if (dist > (u32) (s->out - s->start) || len > s->end - s->out) {
+                return -1;
+            }
             from = s->out - dist;
             while (len--) {
                 *s->out++ = *from++;
@@ -189,6 +197,9 @@ static s32 inflate_stored(InflateState *s) {
     s->bitBuf = 0;
     s->bitCount = 0;
     len = s->in[0] | (s->in[1] << 8);
+    if ((len ^ 0xFFFF) != (u32) (s->in[2] | (s->in[3] << 8)) || len > (u32) (s->end - s->out)) {
+        return -1;
+    }
     s->in += 4;
     while (len--) {
         *s->out++ = *s->in++;
@@ -196,29 +207,29 @@ static s32 inflate_stored(InflateState *s) {
     return 0;
 }
 
-static s32 inflate_fixed(InflateState *s) {
-    if (!sFixedBuilt) {
-        u8 lengths[FIXLCODES];
-        s32 sym;
-        for (sym = 0; sym < 144; sym++) {
-            lengths[sym] = 8;
-        }
-        for (; sym < 256; sym++) {
-            lengths[sym] = 9;
-        }
-        for (; sym < 280; sym++) {
-            lengths[sym] = 7;
-        }
-        for (; sym < FIXLCODES; sym++) {
-            lengths[sym] = 8;
-        }
-        build_huffman(&sFixedLen, lengths, FIXLCODES);
-        for (sym = 0; sym < MAXDCODES; sym++) {
-            lengths[sym] = 5;
-        }
-        build_huffman(&sFixedDist, lengths, MAXDCODES);
-        sFixedBuilt = TRUE;
+__attribute__((constructor)) static void build_fixed_tables(void) {
+    u8 lengths[FIXLCODES];
+    s32 sym;
+    for (sym = 0; sym < 144; sym++) {
+        lengths[sym] = 8;
     }
+    for (; sym < 256; sym++) {
+        lengths[sym] = 9;
+    }
+    for (; sym < 280; sym++) {
+        lengths[sym] = 7;
+    }
+    for (; sym < FIXLCODES; sym++) {
+        lengths[sym] = 8;
+    }
+    build_huffman(&sFixedLen, lengths, FIXLCODES);
+    for (sym = 0; sym < MAXDCODES; sym++) {
+        lengths[sym] = 5;
+    }
+    build_huffman(&sFixedDist, lengths, MAXDCODES);
+}
+
+static s32 inflate_fixed(InflateState *s) {
     return inflate_codes(s, &sFixedLen, &sFixedDist);
 }
 
@@ -280,13 +291,20 @@ static s32 inflate_dynamic(InflateState *s) {
     return inflate_codes(s, &lencode, &distcode);
 }
 
-/* Decompresses a raw deflate stream. Returns the number of bytes written, or -1 on error. */
+/*
+ * Decompresses a raw deflate stream. Every caller passes the stream that follows the game's 5 byte header, whose
+ * first 4 bytes are the unpacked size (little endian): nothing is written past that. Returns the number of bytes
+ * written, or -1 on error.
+ */
 s32 port_inflate(const u8 *in, u8 *out) {
     InflateState s;
     s32 last, type, err;
+    u32 size = in[-5] | (in[-4] << 8) | (in[-3] << 16) | ((u32) in[-2] << 24);
 
     s.in = in;
     s.out = out;
+    s.start = out;
+    s.end = out + size;
     s.bitBuf = 0;
     s.bitCount = 0;
     do {

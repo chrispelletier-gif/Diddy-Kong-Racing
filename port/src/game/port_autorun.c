@@ -463,15 +463,20 @@ static void build_race_list(void) {
     }
 }
 
-static void save_state(s32 running) {
-    char text[160];
+/* running: the race under way (-1: none). recorded: its result is already in the results file. */
+static void save_state_recorded(s32 running, s32 recorded) {
+    char text[176];
     char path[256];
     plat_snprintf(text, sizeof(text),
-                  "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nfinished=%d\nproblems=%d\n",
+                  "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nrecorded=%d\nfinished=%d\nproblems=%d\n",
                   (int) (sEnabled > 0), (unsigned int) sConfigHash, (int) sRun, (int) sNext, (int) running,
-                  (int) sFinished, (int) sProblems);
+                  (int) recorded, (int) sFinished, (int) sProblems);
     make_path(path, sizeof(path), state_file());
     plat_save_file(path, text, strlen(text));
+}
+
+static void save_state(s32 running) {
+    save_state_recorded(running, FALSE);
 }
 
 static s32 state_value(const char *text, const char *key, s32 fallback) {
@@ -718,7 +723,18 @@ static void init(void) {
             sNext = state_value(text, "next", 0);
             sFinished = state_value(text, "finished", 0);
             sProblems = state_value(text, "problems", 0);
-            if (running >= 0 && running < sNumRaces) {
+            if (running >= 0 && running < sNumRaces && state_value(text, "recorded", 0)) {
+                // The last launch stopped after the race's result was written (the results screen): carry on after it.
+                make_path(path, sizeof(path), HANG_FILE);
+                plat_save_file(path, "", 0);
+                sNext = running + 1;
+                if (sNext >= sNumRaces) {
+                    plat_free(text);
+                    plat_free(state);
+                    turn_off("finished");
+                    return;
+                }
+            } else if (running >= 0 && running < sNumRaces) {
                 // The last launch never got to the end of this race: it crashed, hung or was closed.
                 const char *outcome = "crash_or_closed";
                 sNext = running;
@@ -1371,6 +1387,8 @@ static void end_race(const char *outcome, s32 position) {
         record_problem(what);
     }
     set_phase(PHASE_FINISHED);
+    // So that a crash or hang in the results screen isn't recorded as a second result for this race.
+    save_state_recorded(sNext, TRUE);
     if (plat_getenv("DKR_AUTORUN_SNAPSHOT") != NULL) {
         gPlatSnapshotRequested = 1;
     }
@@ -1553,6 +1571,9 @@ void port_autorun_frame(s32 updateRate) {
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
                 sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
                 set_phase(PHASE_RACING);
+            } else if (plat_time_ns() - sPhaseStartNs > 120000000000ULL) {
+                // The game left the level, or never started the race (a boss's speech is far shorter than this).
+                end_race(racer == NULL ? "left_before_start" : "countdown_timeout", 0);
             }
             break;
         case PHASE_RACING:

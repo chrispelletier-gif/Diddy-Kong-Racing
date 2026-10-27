@@ -124,7 +124,16 @@ static void move_file(const char *from, const char *to) {
  * service directly.
  */
 static __thread const char *sThreadName;
-static u8 sCrashStack[0x4000] __attribute__((aligned(8)));
+/*
+ * Each watched thread has its own handler stack: the kernel puts the exception's details on it, so two threads that
+ * crash at once (the game's and the renderer on the other core) must not share one. A thread past the last one shares
+ * the last. Only one handler formats and writes at a time (sCrashing); another waits for it, then exits with it.
+ */
+#define CRASH_STACKS 16
+#define CRASH_STACK_SIZE 0x2000
+static u8 sCrashStacks[CRASH_STACKS][CRASH_STACK_SIZE] __attribute__((aligned(8)));
+static int sCrashStackCount;
+static volatile int sCrashing;
 static char sCrashText[24 * 1024];
 
 static void crash_write_file(const char *path, const char *text, u32 length) {
@@ -146,6 +155,12 @@ static void crash_handler(ERRF_ExceptionInfo *info, CpuRegisters *regs) {
     int length = 0, i;
     const u32 *sp = (const u32 *) regs->sp;
 
+    if (__atomic_exchange_n(&sCrashing, 1, __ATOMIC_ACQUIRE)) {
+        // Another thread is writing its crash: that one is reported, and it ends the process.
+        for (;;) {
+            svcSleepThread(1000000000LL);
+        }
+    }
 #define ADD(...) length += snprintf(sCrashText + length, sizeof(sCrashText) - length, __VA_ARGS__)
     ADD("%s in thread %s\n", (u32) info->type < 4 ? sTypes[info->type] : "exception",
         sThreadName != NULL ? sThreadName : "main");
@@ -178,8 +193,12 @@ static void crash_handler(ERRF_ExceptionInfo *info, CpuRegisters *regs) {
 }
 
 void bugreport_watch_thread(const char *name) {
+    int slot = __atomic_fetch_add(&sCrashStackCount, 1, __ATOMIC_RELAXED);
+    if (slot >= CRASH_STACKS) {
+        slot = CRASH_STACKS - 1;
+    }
     sThreadName = name;
-    threadOnException(crash_handler, sCrashStack + sizeof(sCrashStack), WRITE_DATA_TO_HANDLER_STACK);
+    threadOnException(crash_handler, sCrashStacks[slot] + CRASH_STACK_SIZE, WRITE_DATA_TO_HANDLER_STACK);
 }
 
 #if PLAT_DEBUG_TOOLS
@@ -426,15 +445,27 @@ static void show_console(const char *text) {
     plat_3ds_console_line(text);
 }
 
-/* The unattended test run is going (port_autorun.c): reports are sent without asking, as nobody is there to answer. */
+/*
+ * An unattended run is going (port_autorun.c: the test run, GPU bench, quick test, boss fights or switch bench, each
+ * with its own state file): reports are sent without asking, as nobody is there to answer.
+ */
 static int test_run_active(void) {
-    char text[200];
-    int length = plat_load_file_start(DATA_DIR "/autorun_state.txt", text, sizeof(text) - 1);
-    if (length <= 0) {
-        return 0;
+    static const char *const sStateFiles[] = { "autorun_state.txt", "gpu_bench_state.txt", "quick_test_state.txt",
+                                               "boss_test_state.txt", "switch_bench_state.txt" };
+    char text[200], path[96];
+    unsigned int i;
+    for (i = 0; i < sizeof(sStateFiles) / sizeof(sStateFiles[0]); i++) {
+        int length;
+        snprintf(path, sizeof(path), DATA_DIR "/%s", sStateFiles[i]);
+        length = plat_load_file_start(path, text, sizeof(text) - 1);
+        if (length > 0) {
+            text[length] = '\0';
+            if (strncmp(text, "active=1", 8) == 0) {
+                return 1;
+            }
+        }
     }
-    text[length] = '\0';
-    return strncmp(text, "active=1", 8) == 0;
+    return 0;
 }
 
 #endif
@@ -699,17 +730,28 @@ void bugreport_request(void) {
 /* Called by the test run when it ends; the report is sent from the button thread. */
 void plat_send_test_results(const char *title, const char *summary) {
     if (sResultsRequested) {
-        return; // The previous one is still being sent.
+        // An earlier one hasn't started sending yet: this one replaces it.
+        plat_log("bug report: test results replaced before they were sent: %s", sResultsTitle);
     }
+    sResultsRequested = 0;
+    __sync_synchronize();
     snprintf(sResultsTitle, sizeof(sResultsTitle), "%s", title);
     snprintf(sResultsSummary, sizeof(sResultsSummary), "%s", summary);
+    __sync_synchronize();
     sResultsRequested = 1;
 }
 
+/* Sends the requested results. They are copied first, so a run that ends while they are sent asks for its own. */
 static void send_test_results(void) {
     ReportConfig config;
     Report report;
     static char recent[16 * 1024];
+    static char sTitle[sizeof(sResultsTitle)], sSummary[sizeof(sResultsSummary)];
+
+    memcpy(sTitle, sResultsTitle, sizeof(sTitle));
+    memcpy(sSummary, sResultsSummary, sizeof(sSummary));
+    __sync_synchronize();
+    sResultsRequested = 0;
 
     if (!load_config(&config)) {
         show_status("Test run results: no token in bugreport.txt, so they stay on the SD card");
@@ -717,8 +759,8 @@ static void send_test_results(void) {
     }
     memset(&report, 0, sizeof(report));
     report.kind = REPORT_TEST_RUN;
-    report.extra = sResultsSummary;
-    snprintf(report.title, sizeof(report.title), "%s", sResultsTitle);
+    report.extra = sSummary;
+    snprintf(report.title, sizeof(report.title), "%s", sTitle);
     add_file(&report, "autorun_results.csv");
     add_file(&report, "gpu_bench_results.csv");
     add_file(&report, "quick_test_results.csv");
@@ -751,7 +793,6 @@ static void button_thread(void *arg) {
         if (sResultsRequested && !sBusy) {
             sBusy = 1;
             send_test_results();
-            sResultsRequested = 0;
             sBusy = 0;
         }
         last = keys;

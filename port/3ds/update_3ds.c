@@ -83,6 +83,8 @@ typedef struct Config {
 } Config;
 
 static char sSelfPath[256];
+/* What an update renames the running build to until the new one is in place. */
+#define PREVIOUS_SUFFIX "-previous.3dsx"
 static int sIsCia; // Installed as a .cia rather than started from the Homebrew Launcher.
 static volatile int sStarted;
 static volatile int sState;
@@ -173,6 +175,16 @@ static void show_busy(const char *fmt, ...) {
     vsnprintf(text, sizeof(text), fmt, args);
     va_end(args);
     plat_3ds_panel_text(text);
+}
+
+/* "sdmc:/3ds/dkr.3dsx" -> "sdmc:/3ds/dkr-previous.3dsx" (or "....old" for a name that isn't .3dsx). */
+static void previous_path(const char *path, char *out, size_t size) {
+    size_t length = strlen(path);
+    if (length > 5 && strcmp(path + length - 5, ".3dsx") == 0) {
+        snprintf(out, size, "%.*s" PREVIOUS_SUFFIX, (int) (length - 5), path);
+    } else {
+        snprintf(out, size, "%s.old", path);
+    }
 }
 
 #if PLAT_DEBUG_TOOLS
@@ -665,13 +677,14 @@ static int install(Channel *channel) {
     }
 
     snprintf(newPath, sizeof(newPath), "%s.new", sSelfPath);
-    snprintf(oldPath, sizeof(oldPath), "%s.old", sSelfPath);
+    previous_path(sSelfPath, oldPath, sizeof(oldPath));
     if (!download_verified(channel->binaryUrl, channel->size, channel->sha256, newPath, channel->label)) {
         return 0;
     }
 
     // The running build was read into memory at start, so its file can be replaced. The old one is kept until the
-    // new one is in place.
+    // new one is in place, under a .3dsx name: if the power goes between the two renames, the Homebrew Launcher still
+    // lists it, and it puts itself back when started (recover_install).
     remove(oldPath);
     if (rename(sSelfPath, oldPath) != 0 || rename(newPath, sSelfPath) != 0) {
         rename(oldPath, sSelfPath);
@@ -866,11 +879,44 @@ void update_3ds_race_changed(int racing) {
 }
 
 /* selfPath: the running dkr.3dsx (argv[0] from the Homebrew Launcher), or NULL if not known (always for a .cia). */
+/*
+ * Finishes an update that the power cut between its two renames. Started as dkr-previous.3dsx with no dkr.3dsx: this
+ * build goes back to being dkr.3dsx (the downloaded one, which didn't get there, is dropped). Started as dkr.3dsx:
+ * whatever an earlier update left is removed.
+ */
+static void recover_install(void) {
+    char path[272], other[272];
+    size_t length = strlen(sSelfPath), suffix = strlen(PREVIOUS_SUFFIX);
+    FILE *f;
+
+    if (length > suffix && strcmp(sSelfPath + length - suffix, PREVIOUS_SUFFIX) == 0) {
+        snprintf(path, sizeof(path), "%.*s.3dsx", (int) (length - suffix), sSelfPath);
+        if ((f = fopen(path, "rb")) != NULL) {
+            fclose(f);
+            return;
+        }
+        snprintf(other, sizeof(other), "%s.new", path);
+        remove(other);
+        if (rename(sSelfPath, path) == 0) {
+            plat_log("update: an update was cut short, %s put back", path);
+            snprintf(sSelfPath, sizeof(sSelfPath), "%s", path);
+        }
+        return;
+    }
+    previous_path(sSelfPath, path, sizeof(path));
+    remove(path);
+    snprintf(path, sizeof(path), "%s.new", sSelfPath);
+    remove(path);
+}
+
 void update_3ds_start(const char *selfPath) {
     sIsCia = !envIsHomebrew();
     // Only a file on the SD card can be replaced (3dslink, for one, sends the program over the network).
     if (selfPath != NULL && strncmp(selfPath, "sdmc:/", 6) == 0) {
         snprintf(sSelfPath, sizeof(sSelfPath), "%s", selfPath);
+        if (!sIsCia) {
+            recover_install();
+        }
     }
     LightEvent_Init(&sTapEvent, RESET_ONESHOT);
     sState = STATE_IDLE;

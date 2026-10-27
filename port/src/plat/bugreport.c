@@ -386,6 +386,7 @@ int bugreport_send(const BugReportConfig *config, const char *title, const char 
             char reason[256];
             snprintf(reason, sizeof(reason), "%s", result);
             snprintf(result, resultSize, "%s (sending %s: %s)", url, files[i].name, reason);
+            sb_free(&skipped);
             return 1;
         }
         if (outcome > 0) {

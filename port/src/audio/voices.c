@@ -60,6 +60,9 @@ static u32 sFiniteLoops;
 
 static s32 sEnabled = -1;
 static s32 sActive;
+/* Set once the synth makes its first frame. alInit sets alGlobals before it has built the reverb, and the DSP
+ * callback starts before alInit is called. */
+static s32 sSynthRunning;
 static u32 sSynthRate = 22050;
 static PlatSem *sLock;
 
@@ -375,6 +378,8 @@ s32 port_voices_frame(ALSynth *drvr, s32 outLen) {
     if (!sActive || sPVoices == NULL) {
         return FALSE;
     }
+    // The synth's first frame: alInit has finished, so its reverb is whole and the DSP callback may run it.
+    __atomic_store_n(&sSynthRunning, TRUE, __ATOMIC_RELEASE);
     plat_sem_wait(sLock);
     for (i = 0; i < sNumPVoices; i++) {
         ALEnvMixer *e = &sPVoices[i].envmixer;
@@ -889,7 +894,7 @@ void pv_aux_process(int bus, int *left, int *right, int count) {
     ALSynth *drvr;
     s32 done = 0;
 
-    if (!sActive || alGlobals == NULL || bus < 0 || bus > 1) {
+    if (!sActive || !__atomic_load_n(&sSynthRunning, __ATOMIC_ACQUIRE) || alGlobals == NULL || bus < 0 || bus > 1) {
         return;
     }
     drvr = &alGlobals->drvr;
