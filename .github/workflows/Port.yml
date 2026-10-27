@@ -129,7 +129,8 @@ jobs:
   # never swaps a debug build for a player build.
   publish-3ds:
     name: Publish the 3DS build
-    needs: build-3ds
+    # Only once the PC build has played its scenarios without a crash, hang or repeatability failure.
+    needs: [build-3ds, host]
     if: github.event_name == 'push' && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     permissions:
@@ -327,18 +328,17 @@ jobs:
           BASE_EXE: ${{ steps.base.outputs.exe }}
         run: |
           python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
-            --head port/build/host/dkr ${BASE_EXE:+--base "$BASE_EXE"} --out "$RUNNER_TEMP/regression"
+            --head port/build/host/dkr ${BASE_EXE:+--base "$BASE_EXE"} --out "$RUNNER_TEMP/regression" --max-images 0
 
-      - name: Upload the differences and logs
+      - name: Upload the report and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: frame-regression
-          # Frames that differ, side by side, and each run's log. The frames themselves are not kept.
+          # The report and each run's log only: no frames, since they are pictures of the game and the repository
+          # is public. Run port/tools/frame_regression.py locally to see the differing frames.
           path: |
             ${{ runner.temp }}/regression/report.md
-            ${{ runner.temp }}/regression/differences/
             ${{ runner.temp }}/regression/runs/*/*/log.txt
           if-no-files-found: ignore
-          # The side-by-side frames are pictures of the game; keep them a week, not GitHub's default 90 days.
           retention-days: 7

@@ -435,7 +435,8 @@ python3 port/tools/frame_regression.py --rom baserom.z64 --head port/build/host/
 
 It plays a few scripted scenarios (the intro and title, a spread of levels through `DKR_WARP`, and the Adventure hub
 from the complete save) on both builds, and writes `report.md` and side by side images (base, head, difference) of
-every frame that differs.
+every frame that differs. CI runs it on every push with `--max-images 0` and uploads only the report and logs (the
+repository is public, so no game frames), and publishes the 3DS build only once it passes.
 
 `port/tools/n64_compare/` checks the renderer against a real N64 instead: an accurate emulator (ares, running the
 game's own F3DDKR microcode on its emulated RSP and paraLLEl-RDP for the RDP) plays the ROM and saves chosen frames'
