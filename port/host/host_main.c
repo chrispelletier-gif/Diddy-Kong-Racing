@@ -68,6 +68,12 @@ static void add_game_menu_options(void) {
     options_add(OPTIONS_CONTROLS, &sControls);
 }
 
+static volatile int sQuitRequested;
+
+void plat_request_quit(void) {
+    sQuitRequested = 1;
+}
+
 int plat_main_loop_iteration(void) {
     static int maxFrames = -1;
     if (maxFrames == -1) {
@@ -75,7 +81,7 @@ int plat_main_loop_iteration(void) {
         maxFrames = env != NULL ? atoi(env) : 0;
     }
     usleep(10000);
-    if (maxFrames > 0 && host_frames_rendered() >= maxFrames) {
+    if (sQuitRequested || (maxFrames > 0 && host_frames_rendered() >= maxFrames)) {
         return 0;
     }
     return 1;

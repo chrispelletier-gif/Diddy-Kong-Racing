@@ -148,6 +148,8 @@ void plat_3ds_exit(void) __attribute__((noreturn));
  * the system's thread and taken once by the game thread at the start of its next frame.
  */
 void plat_request_game_pause(void);
+/* Ends the game the normal way, from any thread (after a save restore, or the update's "Quit to finish"). */
+void plat_request_quit(void);
 int plat_take_game_pause(void);
 
 /*

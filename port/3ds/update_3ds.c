@@ -42,7 +42,6 @@
 
 void plat_3ds_set_buttons(const char *const *labels, int count);
 void plat_3ds_panel_text(const char *text);
-void plat_3ds_request_quit(void);
 void bugreport_watch_thread(const char *name);
 void bugreport_request(void);
 long port_autorun_enabled(void);
@@ -851,7 +850,7 @@ static void update_thread(void *arg) {
                 break;
             case STATE_INSTALLED:
                 show_busy("Closing...");
-                plat_3ds_request_quit();
+                plat_request_quit();
                 break;
         }
     }
