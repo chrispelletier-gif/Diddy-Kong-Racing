@@ -1848,22 +1848,40 @@ typedef struct TexQueueEntry {
 } TexQueueEntry;
 
 static TexQueueEntry sTexQueue[TEX_QUEUE_SIZE];
-static u32 sTexQueueHead; // Written by the game thread
+static u32 sTexQueueHead; // Written by the game threads, under sTexQueueLock
 static u32 sTexQueueTail; // Written by the renderer
 static u32 sTexQueueDropped;
 static s32 sPrewarmOff = -1;
+/* The game thread and the background track loader (thread30) both load and free textures, so writers take turns:
+   otherwise both could fill the same slot, or the renderer read a slot still being filled. */
+static PlatSem *sTexQueueLock;
 
+/* Takes the writers' lock and returns the next free slot, or NULL (lock released) when the queue is full. */
 static TexQueueEntry *tex_queue_slot(void) {
-    u32 head = sTexQueueHead;
+    u32 head;
+    PlatSem *lock = __atomic_load_n(&sTexQueueLock, __ATOMIC_ACQUIRE);
+    if (lock == NULL) {
+        PlatSem *expected = NULL;
+        lock = plat_sem_create(1);
+        if (!__atomic_compare_exchange_n(&sTexQueueLock, &expected, lock, FALSE, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE)) {
+            lock = expected; // Another writer made it first (the one made here is never used: a one-off leak).
+        }
+    }
+    plat_sem_wait(lock);
+    head = sTexQueueHead;
     if (head - __atomic_load_n(&sTexQueueTail, __ATOMIC_ACQUIRE) >= TEX_QUEUE_SIZE) {
         sTexQueueDropped++; // The renderer catches up at its next frame; the texture is decoded when drawn instead.
+        plat_sem_post(lock);
         return NULL;
     }
     return &sTexQueue[head % TEX_QUEUE_SIZE];
 }
 
+/* Publishes the slot from tex_queue_slot and releases the writers' lock. */
 static void tex_queue_push(void) {
     __atomic_store_n(&sTexQueueHead, sTexQueueHead + 1, __ATOMIC_RELEASE);
+    plat_sem_post(sTexQueueLock);
 }
 
 /* Game thread: a texture was loaded, and these commands (from material_init) load it for drawing. */

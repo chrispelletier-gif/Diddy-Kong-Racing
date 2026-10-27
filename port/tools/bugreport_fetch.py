@@ -47,10 +47,14 @@ def get_all(api, path):
         page += 1
 
 
-def attachments(comments):
-    """Returns {name: bytes} from the attachment comments, checking every part is there."""
+def attachments(comments, author):
+    """Returns {name: bytes} from the attachment comments, checking every part is there. Only the comments of the
+    account that opened the issue (the console's) count, and a part's first copy wins: on a public repository anyone
+    can comment, and must not be able to swap a report's files."""
     parts = {}
     for comment in comments:
+        if (comment.get("user") or {}).get("login") != author:
+            continue
         body = comment.get("body") or ""
         match = MARKER.search(body)
         if not match:
@@ -59,7 +63,7 @@ def attachments(comments):
         fence = body.find("```", match.end())
         end = body.find("```", fence + 3)
         text = "".join(body[fence + 3:end].split())
-        parts.setdefault(name, {"count": count, "size": size, "parts": {}})["parts"][part] = text
+        parts.setdefault(name, {"count": count, "size": size, "parts": {}})["parts"].setdefault(part, text)
     files = {}
     for name, info in parts.items():
         missing = [i for i in range(1, info["count"] + 1) if i not in info["parts"]]
@@ -88,14 +92,17 @@ def main():
         return
     if not args.issue:
         parser.error("give an issue number, or --list")
-    number = re.search(r"(\d+)\s*$", args.issue).group(1)
+    match = re.search(r"/issues/(\d+)", args.issue) or re.fullmatch(r"\s*#?(\d+)\s*", args.issue)
+    if not match:
+        parser.error(f"not an issue number or URL: {args.issue}")
+    number = match.group(1)
     issue = get(args.api, f"/repos/{args.repo}/issues/{number}")
     comments = get_all(args.api, f"/repos/{args.repo}/issues/{number}/comments")
     out = args.out or f"bugreport_{number}"
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "issue.md"), "w") as f:
         f.write(f"# {issue['title']}\n\n{issue.get('body') or ''}\n")
-    for name, data in attachments(comments).items():
+    for name, data in attachments(comments, (issue.get("user") or {}).get("login")).items():
         # The names come from the console; keep them inside the output directory.
         with open(os.path.join(out, os.path.basename(name)), "wb") as f:
             f.write(data)

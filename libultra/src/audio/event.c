@@ -27,6 +27,13 @@
    self-perpetuating API event was one of the thrown away ones); shown in the watchdog's stall report. */
 volatile u32 gPortAudioEventsDropped;
 volatile u32 gPortAudioQueueEmpty;
+
+/* A queue that runs out of items takes one from here for good, instead of dropping the event. A dropped event can be
+   a player's self-perpetuating API event: with other events still queued, the empty-queue restart never runs and the
+   player stops taking new sounds. Only touched with interrupts off, like the queues themselves. */
+#define PORT_SPARE_EVENTS 256
+static ALEventListItem sPortSpareEvents[PORT_SPARE_EVENTS];
+static s32 sPortSpareEventsUsed;
 #endif
 
 void alEvtqNew(ALEventQueue *evtq, ALEventListItem *items, s32 itemCount)
@@ -88,6 +95,14 @@ void alEvtqPostEvent(ALEventQueue *evtq, ALEvent *evt, ALMicroTime delta)
     mask = osSetIntMask(OS_IM_NONE);
 
     item = (ALEventListItem *)evtq->freeList.next;
+#ifdef TARGET_PORT
+    if (!item && sPortSpareEventsUsed < PORT_SPARE_EVENTS) {
+        item = &sPortSpareEvents[sPortSpareEventsUsed++];
+        item->node.next = 0;
+        item->node.prev = 0;
+        alLink((ALLink *)item, &evtq->freeList);
+    }
+#endif
     if (!item) {
 #ifdef TARGET_PORT
         gPortAudioEventsDropped++;

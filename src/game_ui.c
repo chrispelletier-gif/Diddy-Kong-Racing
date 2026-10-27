@@ -3935,6 +3935,10 @@ void hud_element_render(Gfx **dList, Mtx **mtx, Vertex **vtxList, HudElement *hu
     // Pieces the race HUD on the bottom screen shows instead (their sounds and animations still run).
     if (hud >= gCurrentHud->entry && hud < gCurrentHud->entry + HUD_ELEMENT_COUNT &&
         port_race_hud_hides(hud - gCurrentHud->entry)) {
+        // Keep an already loaded piece loaded, so it doesn't free and reload with a hitch when it shows again.
+        if (gAssetHudElements->entry[hud->spriteID] != NULL) {
+            gAssetHudElementStaleCounter[hud->spriteID] = 0;
+        }
         return;
     }
 #endif

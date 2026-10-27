@@ -146,7 +146,13 @@ void audio_init(OSSched *sc) {
 #else
     synth_config.maxPVoices = 40;
 #endif
+#ifdef TARGET_PORT
+    // At 60 fps the game changes its sounds twice as often a sound frame; a full pool silently drops changes, stops
+    // included.
+    synth_config.maxUpdates = 192;
+#else
     synth_config.maxUpdates = 96;
+#endif
     synth_config.dmaproc = NULL;
     synth_config.fxType[0] = AL_FX_CUSTOM;
     synth_config.fxType[1] = AL_FX_BIGROOM;

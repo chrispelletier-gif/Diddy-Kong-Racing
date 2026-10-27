@@ -21,8 +21,8 @@ u16 sTransitionFadeTimer = 0;
 u16 gTransitionEndTimer = 0;
 u16 sTransitionFadeDuration = 0;
 s8 gTransitionFadeIn = 0;
-Vertex *sTransitionVtx[2] = { NULL, NULL };
-Triangle *sTransitionTris[2] = { NULL, NULL };
+Vertex *sTransitionVtx[FRAME_BUFFERS] = { NULL, NULL };
+Triangle *sTransitionTris[FRAME_BUFFERS] = { NULL, NULL };
 s32 sTransitionTaskNum = 0;
 
 Gfx dTransitionFadeSettings[] = {
@@ -295,7 +295,7 @@ s32 transition_update(s32 updateRate) {
             transition_end();
         } else {
             if (sTransitionFadeTimer > 0) {
-                sTransitionTaskNum = 1 - sTransitionTaskNum; // Haven't you heard of a XOR, Rareware employee?
+                sTransitionTaskNum = FRAME_FLIP(sTransitionTaskNum); // Haven't you heard of a XOR, Rareware employee?
             }
             switch (gCurFadeTransition) {
                 case FADE_FULLSCREEN:
@@ -372,6 +372,13 @@ void transition_end(void) {
         sTransitionTris[0] = NULL;
         sTransitionTris[1] = NULL;
     }
+#ifdef TARGET_PORT
+    if (sTransitionVtx[2] != NULL) {
+        mempool_free(sTransitionVtx[2]);
+        sTransitionVtx[2] = NULL;
+        sTransitionTris[2] = NULL;
+    }
+#endif
     sTransitionStatus = TRANSITION_NONE;
     sTransitionTaskNum = 0;
 }
@@ -446,6 +453,19 @@ void transition_render_fullscreen(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex *
     rendermode_reset(dList);
 }
 
+#ifdef TARGET_PORT
+/**
+ * Render ahead keeps a third frame in flight (FRAME_FLIP), so the shape gets a third copy of its vertices and
+ * triangles, set up like the first.
+ */
+static void transition_add_third_copy(s32 sizeVerts, s32 sizeTris) {
+    sTransitionVtx[2] = (Vertex *) mempool_alloc_safe(sizeVerts + sizeTris, COLOUR_TAG_YELLOW);
+    sTransitionTris[2] = (Triangle *) (((u8 *) sTransitionVtx[2]) + sizeVerts);
+    bcopy(sTransitionVtx[0], sTransitionVtx[2], sizeVerts);
+    bcopy(sTransitionTris[0], sTransitionTris[2], sizeTris);
+}
+#endif
+
 /**
  * Allocate space for the new transitions vertices and triangles, then build the geometry based on the vertex and
  * triangle shapes given.
@@ -519,6 +539,9 @@ void transition_init_shape(FadeTransition *transition, s32 numVerts, s32 numTris
         }
     }
 
+#ifdef TARGET_PORT
+    transition_add_third_copy(sizeVerts, sizeTris);
+#endif
     sTransitionStatus = TRANSITION_ACTIVE;
     gTransitionVertexCount = numVerts;
 }
@@ -686,6 +709,9 @@ void transition_init_circle(FadeTransition *transition) {
         }
     }
 
+#ifdef TARGET_PORT
+    transition_add_third_copy(sizeVerts, sizeTris);
+#endif
     sTransitionStatus = TRANSITION_ACTIVE;
 }
 

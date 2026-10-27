@@ -92,7 +92,8 @@ s32 port_apply_test_save(void *settingsPtr) {
     Settings *settings = (Settings *) settingsPtr;
     s32 numLevels, numWorlds, i;
 
-    if (plat_getenv("DKR_TEST_SAVE") == NULL) {
+    // A debug tool: a player build ignores the env.txt line, so it can't change a player's save for good.
+    if (!PLAT_DEBUG_TOOLS || plat_getenv("DKR_TEST_SAVE") == NULL) {
         return FALSE;
     }
     level_count(&numLevels, &numWorlds);

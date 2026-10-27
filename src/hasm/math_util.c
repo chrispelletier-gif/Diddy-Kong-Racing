@@ -649,8 +649,8 @@ void vec3f_rotate_py(Vec3s *rotation, Vec3f *vec) {
 
     z = vec->z;
 
-    vec->x = z * cosY * sinX;
-    vec->y = -z * sinY;
+    vec->x = z * cosX * sinY;
+    vec->y = -z * sinX;
     vec->z = z * cosX * cosY;
 }
 #else
@@ -736,56 +736,50 @@ GLOBAL_ASM("asm/math_util/mtxf_from_scale.s")
 #endif
 
 #ifdef NON_MATCHING
-// Blatantly stolen from SM64 :)
-static u16 atan2_lookup(f32 y, f32 x) {
-    u16 ret;
-
-    if (x == 0) {
-        ret = gArcTanTable[0];
-    } else {
-        ret = gArcTanTable[(s32) (y / x * 1024 + 0.5f)];
-    }
-    return ret;
+/**
+ * Mirrors the asm: the table index is truncated, (small << 10) / big, not rounded.
+ */
+static u16 atan2_lookup(u32 small, u32 big) {
+    return gArcTanTable[(u32) ((((u64) small << 11) / big) & 0xFFE) >> 1];
 }
 
 s32 atan2s(s32 xDelta, s32 zDelta) {
+    u32 a;
+    u32 b;
+    u32 tmp;
     u16 ret;
 
     if (xDelta == 0 && zDelta == 0) {
         return 0;
     }
-
+    a = xDelta;
+    b = zDelta;
     if (xDelta >= 0) {
         if (zDelta >= 0) {
-            if (zDelta >= xDelta) {
-                ret = atan2_lookup(xDelta, zDelta);
-            } else {
-                ret = 0x4000 - atan2_lookup(zDelta, xDelta);
-            }
+            ret = 0;
         } else {
-            zDelta = -zDelta;
-            if (zDelta < xDelta) {
-                ret = 0x4000 + atan2_lookup(zDelta, xDelta);
-            } else {
-                ret = 0x8000 - atan2_lookup(xDelta, zDelta);
-            }
+            b = -b;
+            ret = 0x4000;
+            tmp = a;
+            a = b;
+            b = tmp;
         }
     } else {
-        xDelta = -xDelta;
+        a = -a;
         if (zDelta < 0) {
-            zDelta = -zDelta;
-            if (zDelta >= xDelta) {
-                ret = 0x8000 + atan2_lookup(xDelta, zDelta);
-            } else {
-                ret = 0xC000 - atan2_lookup(zDelta, xDelta);
-            }
+            b = -b;
+            ret = 0x8000;
         } else {
-            if (zDelta < xDelta) {
-                ret = 0xC000 + atan2_lookup(zDelta, xDelta);
-            } else {
-                ret = -atan2_lookup(xDelta, zDelta);
-            }
+            ret = 0xC000;
+            tmp = a;
+            a = b;
+            b = tmp;
         }
+    }
+    if ((s32) (a - b) < 0) {
+        ret += atan2_lookup(a, b);
+    } else {
+        ret += 0x4000 - atan2_lookup(b, a);
     }
     return ret;
 }
@@ -795,7 +789,8 @@ GLOBAL_ASM("asm/math_util/atan2s.s")
 
 #ifdef NON_MATCHING
 u16 arctan2_f(f32 y, f32 x) {
-    return atan2s((s32) (y * 255.0f), (s32) (x * 255.0f));
+    // cvt.w.s rounds to nearest under the N64's default FPU mode; a C cast would truncate.
+    return atan2s((s32) __builtin_rintf(y * 255.0f), (s32) __builtin_rintf(x * 255.0f));
 }
 #else
 GLOBAL_ASM("asm/math_util/arctan2_f.s")

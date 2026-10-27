@@ -15,10 +15,20 @@ for f in "$D"/task_*.rdram.gz; do
     n=$(printf "%06d" $((10#$t + 1)))
     echo "$t $(ls "$D"/sync_${t}_*.fb "$D"/sync_${n}_*.fb 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')"
 done > "$O/jobs.txt"
+# A replay that fails, or whose colour image matches no candidate, is left out (with a warning) rather than scored
+# against the wrong picture.
 xargs -P "$(nproc)" -L 1 sh -c '
 t=$0
+ok=0
 for fb in "$@"; do
-    "'"$R"'" "'"$D"'/task_$t.rdram.gz" "$fb" "'"$O"'/$t" > /dev/null 2> "'"$O"'/$t.log" || true
-    grep -q "note: RDP colour image" "'"$O"'/$t.log" || break
-done' < "$O/jobs.txt"
+    if "'"$R"'" "'"$D"'/task_$t.rdram.gz" "$fb" "'"$O"'/$t" > /dev/null 2> "'"$O"'/$t.log" &&
+        ! grep -q "note: RDP colour image" "'"$O"'/$t.log"; then
+        ok=1
+        break
+    fi
+done
+if [ $ok = 0 ]; then
+    echo "task $t: no replay matched (see $t.log); left out" >&2
+    rm -rf "'"$O"'/$t"
+fi' < "$O/jobs.txt"
 python3 "$(dirname "$0")/compare.py" "$O" 10

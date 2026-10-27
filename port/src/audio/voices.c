@@ -488,12 +488,20 @@ static u32 sLastQueueFrame;
 static s32 sMuted;
 
 void pv_output_queue(unsigned numBytes) {
+    // Under the lock: the DSP callback reads the 64-bit count and moves sFrame0 (pv_frame_tick), and a 64-bit value
+    // can be read half written on the 3DS's 32-bit CPU.
+    if (sLock != NULL) {
+        plat_sem_wait(sLock);
+    }
     if (!sClockStarted) {
         sFrame0 = pv_backend_frames();
         sClockStarted = TRUE;
     }
     sLastQueueFrame = pv_backend_frames();
     sQueuedBytes += numBytes;
+    if (sLock != NULL) {
+        plat_sem_post(sLock);
+    }
 }
 
 unsigned pv_output_remaining(void) {
@@ -873,7 +881,15 @@ static void fx_process(ALFx *r, int *left, int *right, s32 count, f32 rateScale)
     s16 *prevOut = NULL;
     s32 i, s;
 
-    if (!alFXEnabled || r->section_count == 0 || r->length == 0) {
+    if (!alFXEnabled) {
+        // As reverb.c does with the effect off, what the voices sent to it goes on to the main mix dry.
+        for (i = 0; i < count; i++) {
+            left[i] = clamp_s16(left[i]);
+            right[i] = clamp_s16(right[i]);
+        }
+        return;
+    }
+    if (r->section_count == 0 || r->length == 0) {
         for (i = 0; i < count; i++) {
             left[i] = right[i] = 0;
         }

@@ -546,6 +546,10 @@ f32 gTrackSelectWoodFrameHeightScale = 1.0f;
 // screen's middle, so the frame around it, its picture and the arrows on it are spread by as much. Set while the
 // frame model draws.
 static f32 sTrackFrameWiden = 1.0f;
+// This frame's vertex heap (thread3_main.c), to bound the widened frame copies.
+extern Vertex *gVertexHeap[];
+extern s32 gSPTaskNum;
+extern s32 gCurrNumHudVertsPerPlayer;
 // The frame model's inner edge, in model units (x = +-331; its outer edge is at +-441).
 #define TRACK_FRAME_INNER 331.0f
 #define TRACK_FRAME_X(x) (SCREEN_WIDTH_HALF + (s32) (((x) - SCREEN_WIDTH_HALF) * plat_aspect_scale()))
@@ -757,8 +761,9 @@ u8 gTitleCinematicTextColours[] = {
 UNUSED u8 unused_800DFA0C[] = { 0, 0, 15, 120 };
 
 #ifdef TARGET_PORT
-// Room for the port's VIDEO, CAMERA and CONTROL OPTIONS rows (port_options_menu_strings).
-char *gOptionMenuStrings[] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+// Room for a row per port settings category (port_options_menu_strings): the game's first three rows, the
+// categories, SAVE OPTIONS, MAGIC CODES, RETURN and the closing NULL.
+char *gOptionMenuStrings[3 + OPTIONS_CATEGORY_COUNT + 3 + 1] = { NULL };
 #else
 char *gOptionMenuStrings[] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL };
 #endif
@@ -5122,7 +5127,7 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
 
 /* The right column: the chosen row, then (A) what can be done with it, then (A again) the question. */
 static void port_savemenu_render_card(s32 highlight) {
-    s32 colour, stage, y, i;
+    s32 colour, stage, y, i, visible;
     TextureHeader *texture;
     PortSaveRow *row = port_savemenu_row();
     char buffer[24];
@@ -5150,10 +5155,15 @@ static void port_savemenu_render_card(s32 highlight) {
                                ALIGN_MIDDLE_CENTER);
             return;
         }
-        // Up to three choices show; the list scrolls if a Controller Pak save could go to many places.
-        i = sPortSaveAction - 1;
-        if (i > gSaveMenuOptionCountLower - 3) {
-            i = gSaveMenuOptionCountLower - 3;
+        // As many choices as fit below the card head show (two today), with the one above the highlighted choice
+        // when there is room; the list scrolls when a save could go to many places.
+        visible = (PORT_SAVE_TOP + PORT_SAVE_CARD_H - 8 - y + 14) / 15;
+        if (visible < 1) {
+            visible = 1;
+        }
+        i = (visible > 2) ? sPortSaveAction - 1 : sPortSaveAction - (visible - 1);
+        if (i > gSaveMenuOptionCountLower - visible) {
+            i = gSaveMenuOptionCountLower - visible;
         }
         if (i < 0) {
             i = 0;
@@ -15385,7 +15395,10 @@ void render_track_selection_viewport_border(ObjectModel *objMdl) {
             }
             material_set(&sMenuCurrDisplayList, tex, flags, texOffset);
 #ifdef TARGET_PORT
-            if (sTrackFrameWiden != 1.0f) {
+            // The copy goes in this frame's vertex heap (300 vertices in menus), which nothing else bounds; a frame
+            // that would not fit is drawn unwidened.
+            if (sTrackFrameWiden != 1.0f &&
+                sMenuCurrHudVerts + numVerts <= gVertexHeap[gSPTaskNum] + gCurrNumHudVertsPerPlayer) {
                 // Widen a copy: the opening by sTrackFrameWiden, the sides moved out by as much, so they keep
                 // their thickness.
                 s32 v;

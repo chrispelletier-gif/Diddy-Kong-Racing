@@ -285,8 +285,12 @@ extern s32 gPortSkipTick;
 #define PORT_DECAY(k) (gPortHalfStep ? sqrtf(k) : (k))
 #define PORT_LERP(k) (gPortHalfStep ? 1.0f - sqrtf(1.0f - (k)) : (k))
 #define PORT_TICK() (!gPortSkipTick)
-/* A whole-number "x >> n" each frame (an angle closing a share of its gap): one more shift at half step. */
-#define PORT_SHIFT(x, n) (gPortHalfStep ? (x) >> ((n) + 1) : (x) >> (n))
+/* A whole-number "x >> n" each frame (an angle closing a share of its gap): half the step at half step, but never
+   less than the 30 fps step once that is down to 1, so the gap closes as far as it does at 30 fps. */
+#define PORT_SHIFT(x, n) (gPortHalfStep ? port_half_shift((x) >> (n)) : (x) >> (n))
+static inline s32 port_half_shift(s32 step) {
+    return (step / 2 != 0) ? step / 2 : step;
+}
 /* A whole number added each frame: half of it at half step (odd amounts round toward zero). */
 #define PORT_HALF(x) (gPortHalfStep ? (x) / 2 : (x))
 void port_set_logic_rate(s32 updateRate);

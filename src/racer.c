@@ -38,7 +38,7 @@
 #define ZIPPER_BOOSTS_AT_ONCE(racer) ((racer)->playerIndex == PLAYER_COMPUTER || port_autorun_drives())
 // The Modern chase camera (Settings > Camera, port_camera.c): how quickly the boom follows its target length. It
 // reaches out quicker than the N64's, but closes in slower, so a wall hit or a sudden stop doesn't yank it forward.
-#define MODERN_BOOM_RATE(target, current) ((target) > (current) ? 0.25f : 0.0625f)
+#define MODERN_BOOM_RATE(target, current) ((target) > (current) ? PORT_LERP(0.25f) : PORT_LERP(0.0625f))
 // Modern: a boost pulls the camera back a little, instead of swooping in close and then far out.
 #define MODERN_BOOST_DISTANCE 25.0f
 #else
@@ -5006,15 +5006,15 @@ void update_car(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Racer 
                 spB4 += racer->unk120;
             }
             if (gRacerInputBlocked != 0) {
-                spB8 *= 0.65;
-                spB4 *= 0.65;
+                spB8 *= PORT_DECAY(0.65); //!@Delta
+                spB4 *= PORT_DECAY(0.65); //!@Delta
                 if (racer->velocity < -0.5 || racer->velocity > 0.5) {
-                    racer->velocity *= 0.65;
+                    racer->velocity *= PORT_DECAY(0.65); //!@Delta
                 } else {
                     racer->velocity = 0.0f;
                 }
                 if (racer->lateral_velocity < -0.5 || racer->lateral_velocity > 0.5) {
-                    racer->lateral_velocity *= 0.65;
+                    racer->lateral_velocity *= PORT_DECAY(0.65); //!@Delta
                 } else {
                     racer->lateral_velocity = 0.0f;
                 }
@@ -5520,13 +5520,13 @@ void update_player_car_velocity_ground(Object *obj, Object_Racer *racer, s32 upd
         surfaceTraction = ((1.0 - tempVel) * 0.7) + (surfaceTraction * tempVel);
     }
     // Multiply current velocity by the surface grip levels.
-    racer->lateral_velocity *= surfaceTraction;
+    racer->lateral_velocity *= PORT_DECAY(surfaceTraction); //!@Delta
     velocityDiff = coss_f(racer->x_rotation_vel);
     if (velocityDiff < 0.0f) {
         velocityDiff = -velocityDiff;
     }
     // Multiply lateral velocity by pitch
-    racer->lateral_velocity *= velocityDiff;
+    racer->lateral_velocity *= PORT_DECAY(velocityDiff); //!@Delta
     gCurrentSurfaceType = surfaceType;
     if (stoneWheels != 0) {
         miscAsset = (f32 *) get_misc_asset(ASSET_MISC_32);
@@ -5637,7 +5637,8 @@ void update_player_car_velocity_ground(Object *obj, Object_Racer *racer, s32 upd
     }
     tempVel = PORT_STEP((racer->brake * traction) * 0.32);
     racer->velocity -= PORT_STEP(traction * racer->throttle);
-    if (racer->velocity > -0.04 && racer->velocity < 0.04) {
+    // At 60 fps the step above is halved, so the standstill snap is too (a step the N64 could start from still starts).
+    if (racer->velocity > -PORT_STEP(0.04) && racer->velocity < PORT_STEP(0.04)) {
         racer->velocity = 0.0f;
     }
     if (racer->velocity < 0.0f) {
@@ -6711,7 +6712,8 @@ void update_car_velocity_ground(Object *obj, Object_Racer *racer, s32 updateRate
     }
     forwardVel = PORT_STEP((vel * racer->brake) * 0.32); //!@Delta
     racer->velocity -= PORT_STEP(vel * racer->throttle); //!@Delta
-    if (racer->velocity > -0.04 && racer->velocity < 0.04) {
+    // At 60 fps the step above is halved, so the standstill snap is too (a step the N64 could start from still starts).
+    if (racer->velocity > -PORT_STEP(0.04) && racer->velocity < PORT_STEP(0.04)) {
         racer->velocity = 0.0f;
     }
     if (racer->velocity < 0.0f) {
@@ -8647,6 +8649,11 @@ s32 load_tt_ghost(s32 ghostOffset, s32 size, s16 *outTime) {
     GhostHeader *ghost = mempool_alloc_safe(size, COLOUR_TAG_RED);
     if (ghost != NULL) {
         asset_load(ASSET_TTGHOSTS, (u32) ghost, ghostOffset, size);
+#ifdef TARGET_PORT
+        // From the ROM, big endian: the header's time and node count, then the nodes, six s16s each.
+        port_swap16_array(&ghost->time, 2);
+        port_swap16_array((u8 *) ghost + sizeof(GhostHeader), (size - (s32) sizeof(GhostHeader)) / 2);
+#endif
         if (gGhostData[GHOST_STAFF] != NULL) {
             mempool_free(gGhostData[GHOST_STAFF]);
         }
