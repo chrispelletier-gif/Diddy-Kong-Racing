@@ -36,7 +36,7 @@
 #endif
 
 #define CONFIG_PATH "sdmc:/3ds/dkr/bugreport.txt"
-#define DEFAULT_REPO "chrispelletier-gif/Diddy-Kong-Racing"
+#define DEFAULT_REPO "chrispelletier-gif/Diddy-Kong-Racing-3DS"
 #define MAX_DOWNLOAD (16 * 1024 * 1024)
 #define CIA_DOWNLOAD_PATH "sdmc:/3ds/dkr/update.cia"
 

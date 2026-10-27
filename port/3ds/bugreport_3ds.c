@@ -34,7 +34,7 @@
 #define DATA_DIR "sdmc:/3ds/dkr"
 #define CONFIG_PATH DATA_DIR "/bugreport.txt"
 #define RUNNING_PATH DATA_DIR "/running"
-#define DEFAULT_REPO "chrispelletier-gif/Diddy-Kong-Racing"
+#define DEFAULT_REPO "chrispelletier-gif/Diddy-Kong-Racing-3DS"
 #define REPORT_LABEL "3ds-bug-report"
 /* Compressed size of all the files of one report; each 45 KB is one comment on the issue. */
 #define MAX_ATTACHMENT_BYTES (900 * 1024)
