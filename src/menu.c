@@ -550,9 +550,18 @@ static f32 sTrackFrameWiden = 1.0f;
 #define TRACK_FRAME_INNER 331.0f
 #define TRACK_FRAME_X(x) (SCREEN_WIDTH_HALF + (s32) (((x) - SCREEN_WIDTH_HALF) * plat_aspect_scale()))
 #define TRACK_FRAME_TEXRECT TEXRECT_PORT_WIDE
+// Draws a wooden frame centred on the screen (x_position 0) around the 3D preview, widened to fit it: the frame shown
+// when a track is picked and the one on the post-race TRY AGAIN screen.
+#define TRACK_FRAME_RENDER(elementID)           \
+    do {                                        \
+        sTrackFrameWiden = plat_aspect_scale(); \
+        menu_element_render(elementID);         \
+        sTrackFrameWiden = 1.0f;                \
+    } while (0)
 #else
 #define TRACK_FRAME_X(x) (x)
 #define TRACK_FRAME_TEXRECT 0
+#define TRACK_FRAME_RENDER(elementID) menu_element_render(elementID)
 #endif
 
 s32 gResetTitleScale = TRUE;
@@ -10523,7 +10532,7 @@ void trackmenu_setup_render(UNUSED s32 updateRate) {
         if (osTvType == OS_TV_TYPE_PAL) {
             gTrackSelectWoodFrameHeightScale = 1.2f;
         }
-        menu_element_render(sp84);
+        TRACK_FRAME_RENDER(sp84);
         gTrackSelectWoodFrameHeightScale = 1.0f;
     }
     if (gMenuDelay >= -22 && gMenuDelay <= 30) {
@@ -12195,7 +12204,7 @@ void postrace_viewport(UNUSED s32 updateRate) {
                 gTrackSelectWoodFrameHeightScale = 1.2f;
             }
             if (gMenuStage > 0) {
-                menu_element_render(4);
+                TRACK_FRAME_RENDER(4);
             }
             gTrackSelectWoodFrameHeightScale = 1.0f;
         }
