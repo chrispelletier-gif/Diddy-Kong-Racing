@@ -22,7 +22,7 @@ import re
 import sys
 import urllib.request
 
-DEFAULT_REPO = "chrispelletier-gif/Diddy-Kong-Racing"
+DEFAULT_REPO = "chrispelletier-gif/Diddy-Kong-Racing-3DS"
 LABEL = "3ds-bug-report"
 MARKER = re.compile(r"<!-- dkr-attachment name=(\S+) part=(\d+) parts=(\d+) size=(\d+) encoding=gzip\+base64 -->")
 
