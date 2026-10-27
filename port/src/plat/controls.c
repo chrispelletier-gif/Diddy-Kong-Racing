@@ -370,10 +370,16 @@ static int wrap_step(int v, int step, int lo, int hi, int unit) {
     return v;
 }
 
+/* The game's CONTROL OPTIONS (game thread) and the bottom screen's Controls page (its own thread) both change them. */
+static volatile int sBusy;
+
 void controls_option_change(int index, int step) {
     int count, layout;
 
     controls_init();
+    while (__atomic_exchange_n(&sBusy, 1, __ATOMIC_ACQUIRE)) {
+        plat_sleep_ns(1000 * 1000);
+    }
     step = step < 0 ? -1 : 1;
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
         unsigned short *slot = &sSettings.map[index - OPT_KEY_FIRST];
@@ -401,8 +407,10 @@ void controls_option_change(int index, int step) {
                 set_defaults();
                 break;
             default:
+                __atomic_store_n(&sBusy, 0, __ATOMIC_RELEASE);
                 return;
         }
     }
     save();
+    __atomic_store_n(&sBusy, 0, __ATOMIC_RELEASE);
 }

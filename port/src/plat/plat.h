@@ -79,6 +79,8 @@ typedef struct PlatSem PlatSem;
 PlatSem *plat_sem_create(int initial);
 void plat_sem_post(PlatSem *sem);
 void plat_sem_wait(PlatSem *sem);
+/* Takes the semaphore if it can without waiting: nonzero if it did. */
+int plat_sem_try_wait(PlatSem *sem);
 
 /* Waits for the next display refresh (60Hz). */
 void plat_wait_vblank(void);

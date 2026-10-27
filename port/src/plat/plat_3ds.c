@@ -378,6 +378,10 @@ void plat_sem_wait(PlatSem *sem) {
     LightSemaphore_Acquire(&sem->sem, 1);
 }
 
+int plat_sem_try_wait(PlatSem *sem) {
+    return LightSemaphore_TryAcquire(&sem->sem, 1) == 0;
+}
+
 void plat_wait_vblank(void) {
     gspWaitForVBlank();
 }

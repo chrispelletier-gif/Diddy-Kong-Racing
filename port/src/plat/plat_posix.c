@@ -266,6 +266,17 @@ void plat_sem_wait(PlatSem *sem) {
     pthread_mutex_unlock(&sem->mutex);
 }
 
+int plat_sem_try_wait(PlatSem *sem) {
+    int taken;
+    pthread_mutex_lock(&sem->mutex);
+    taken = sem->count > 0;
+    if (taken) {
+        sem->count--;
+    }
+    pthread_mutex_unlock(&sem->mutex);
+    return taken;
+}
+
 void plat_wait_vblank(void) {
     unsigned long long now = plat_time_ns();
     const unsigned long long period = 1000000000ULL / 60;

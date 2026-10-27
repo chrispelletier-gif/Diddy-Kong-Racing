@@ -257,8 +257,8 @@ const char *plat_getenv(const char *name) {
 
 #define MAX_SWITCH_OVERRIDES 16
 
-static struct {
-    const char *name; // NULL: a free entry
+static volatile struct {
+    const char *volatile name; // NULL: a free entry
     int value;
 } sSwitchOverrides[MAX_SWITCH_OVERRIDES];
 volatile int gPlatSwitchEpoch;
@@ -267,7 +267,9 @@ int plat_switch(const char *name, int fallback) {
     const char *env;
     int i;
     for (i = 0; i < MAX_SWITCH_OVERRIDES; i++) {
-        if (sSwitchOverrides[i].name != NULL && strcmp(sSwitchOverrides[i].name, name) == 0) {
+        const char *entry = sSwitchOverrides[i].name;
+        if (entry != NULL && strcmp(entry, name) == 0) {
+            __sync_synchronize(); // Pairs with plat_override_switch's: the value is read after the name.
             return sSwitchOverrides[i].value;
         }
     }
@@ -278,7 +280,8 @@ int plat_switch(const char *name, int fallback) {
 void plat_override_switch(const char *name, int value) {
     int i, free = -1;
     for (i = 0; i < MAX_SWITCH_OVERRIDES; i++) {
-        if (sSwitchOverrides[i].name != NULL && strcmp(sSwitchOverrides[i].name, name) == 0) {
+        const char *entry = sSwitchOverrides[i].name;
+        if (entry != NULL && strcmp(entry, name) == 0) {
             break;
         }
         if (sSwitchOverrides[i].name == NULL && free < 0) {
@@ -293,6 +296,7 @@ void plat_override_switch(const char *name, int value) {
     }
     // The value before the name, as the renderer may be reading the table on the other core.
     sSwitchOverrides[i].value = value;
+    __sync_synchronize();
     sSwitchOverrides[i].name = value < 0 ? NULL : name;
     gPlatSwitchEpoch++;
 }

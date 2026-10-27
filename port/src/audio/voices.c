@@ -298,7 +298,53 @@ s32 port_voices_max_pvoices(s32 requested) {
     return pv_enabled() ? PV_CHANNELS : requested;
 }
 
+/*
+ * Makes room in a full event queue (the HOME menu holds the DSP, so nothing is played out while the game's sound thread
+ * goes on queueing) by dropping the events that change nothing in the end: any of a voice's events before a later
+ * stop of that voice, and a volume, pan, effect mix or pitch change that a later one of the same kind replaces.
+ * Dropping the newest instead would lose stops, and leave looping voices sounding after the resume.
+ */
+static void compact_events(void) {
+    static u8 sKeep[MAX_EVENTS];
+    s32 lastStop[PV_CHANNELS], i, n;
+    u8 seen[PV_CHANNELS];
+
+    for (i = 0; i < PV_CHANNELS; i++) {
+        lastStop[i] = -1;
+        seen[i] = 0;
+    }
+    for (i = 0; i < sEventCount; i++) {
+        if (sEvents[i].type == EV_STOP && sEvents[i].voice < PV_CHANNELS) {
+            lastStop[sEvents[i].voice] = i;
+        }
+    }
+    for (i = sEventCount - 1; i >= 0; i--) {
+        const Event *ev = &sEvents[i];
+        s32 v = ev->voice;
+        sKeep[i] = TRUE;
+        if (v >= PV_CHANNELS) {
+            continue;
+        }
+        if (i < lastStop[v]) {
+            sKeep[i] = FALSE;
+        } else if (ev->type >= EV_VOLUME) {
+            u8 bit = 1 << (ev->type - EV_VOLUME);
+            sKeep[i] = !(seen[v] & bit);
+            seen[v] |= bit;
+        }
+    }
+    for (i = 0, n = 0; i < sEventCount; i++) {
+        if (sKeep[i]) {
+            sEvents[n++] = sEvents[i];
+        }
+    }
+    sEventCount = n;
+}
+
 static void post_event(const Event *ev) {
+    if (sEventCount == MAX_EVENTS) {
+        compact_events();
+    }
     if (sEventCount == MAX_EVENTS) {
         sEventsDropped++;
         return;
@@ -601,7 +647,11 @@ void pv_frame_tick(void) {
     if (!sActive) {
         return;
     }
-    plat_sem_wait(sLock);
+    // Not waited for: this is the DSP's thread, which must not stall on the sound thread (it holds the lock for a
+    // whole synth frame). The events wait for the next tick instead, 5 ms on.
+    if (!plat_sem_try_wait(sLock)) {
+        goto events_done;
+    }
     now = played_samples();
     if (sClockStarted && (double) (sQueuedBytes / 4) - now > (double) sSynthRate / 4) {
         /*
@@ -634,6 +684,7 @@ void pv_frame_tick(void) {
     }
     sEventCount = n;
     plat_sem_post(sLock);
+events_done:
 
     if (sClockStarted) {
         s32 stalled = (pv_backend_frames() - sLastQueueFrame) > PV_STALL_FRAMES;

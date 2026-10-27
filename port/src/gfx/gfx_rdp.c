@@ -78,6 +78,7 @@ static struct {
     TmemLoad tmem[512 / 8 + 1]; // Indexed by TMEM address in units of 8 words (64 bytes)
     const u8 *tlutAddr;
     u32 tlutCount;
+    s32 tlutFirst; // The TLUT entry tlutAddr is (TMEM word - 256).
     const u8 *colorImage;
     const u8 *depthImage;
     s16 scissor[4];
@@ -321,11 +322,12 @@ static void decode_texture(u32 *out, const TmemLoad *load, const Tile *tile, u32
                     b0 = tex_byte(load, y, rowBytes, x >> 1, swapMask);
                     b0 = (x & 1) ? (b0 & 0xF) : (b0 >> 4);
                     if (tile->fmt == G_IM_FMT_CI) {
-                        const u8 *p = tlut + ((tile->palette << 4) + b0) * 2;
+                        const u8 *p = tlut + b0 * 2; // tlut is the tile's palette (find_texture)
                         c = (g.omH & (3 << G_MDSFT_TEXTLUT)) == G_TT_IA16 ? ia16_to_8888((p[0] << 8) | p[1])
                                                                           : rgba5551_to_8888((p[0] << 8) | p[1]);
                     } else if (tile->fmt == G_IM_FMT_IA) {
-                        u32 i = (b0 >> 1) * 255 / 7;
+                        // Widened by repeating the bits, as the RDP does.
+                        u32 i3 = b0 >> 1, i = (i3 << 5) | (i3 << 2) | (i3 >> 1);
                         c = rgba(i, i, i, (b0 & 1) ? 255 : 0);
                     } else {
                         u32 i = b0 * 17;
@@ -336,7 +338,8 @@ static void decode_texture(u32 *out, const TmemLoad *load, const Tile *tile, u32
                     b0 = tex_byte(load, y, rowBytes, x, swapMask);
                     if (tile->fmt == G_IM_FMT_CI) {
                         const u8 *p = tlut + b0 * 2;
-                        c = rgba5551_to_8888((p[0] << 8) | p[1]);
+                        c = (g.omH & (3 << G_MDSFT_TEXTLUT)) == G_TT_IA16 ? ia16_to_8888((p[0] << 8) | p[1])
+                                                                          : rgba5551_to_8888((p[0] << 8) | p[1]);
                     } else if (tile->fmt == G_IM_FMT_IA) {
                         u32 i = (b0 >> 4) * 17, a = (b0 & 0xF) * 17;
                         c = rgba(i, i, i, a);
@@ -377,7 +380,7 @@ static u8 texture_format(const Tile *tile, u8 tlutType) {
             return (tile->fmt == G_IM_FMT_IA) ? GFX_TEXFMT_LA8 : GFX_TEXFMT_LA4;
         case G_IM_SIZ_8b:
             if (tile->fmt == G_IM_FMT_CI) {
-                return GFX_TEXFMT_RGBA5551;
+                return (tlutType == (G_TT_IA16 >> G_MDSFT_TEXTLUT)) ? GFX_TEXFMT_LA8 : GFX_TEXFMT_RGBA5551;
             }
             return (tile->fmt == G_IM_FMT_IA) ? GFX_TEXFMT_LA4 : GFX_TEXFMT_LA8;
         case G_IM_SIZ_16b:
@@ -470,19 +473,32 @@ static inline u32 cycle_type(void) {
 /* Returns the texture for the given tile, decoding it if it isn't in the cache. */
 static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
     Tile *tile = &g.tiles[tileIndex & 7];
-    TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63];
+    TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63], shifted;
     u32 width, height, size, hash, i, slot, oldest;
     const u8 *tlut = NULL;
+    u32 tlutHashBytes = 0;
     u8 filter, wrapS, wrapT, tlutType;
     TexCacheEntry *e;
     u32 *pixels;
     unsigned long long texStart;
 
     if (!load->valid) {
-        // Loaded at an unaligned TMEM address. Search for the load covering it.
+        // Loaded at an unaligned TMEM address, or inside a bigger load. Search for the load covering it, and start
+        // where the tile does.
         for (i = 0; i < 64; i++) {
             if (g.tmem[i].valid && i * 8 <= tile->tmem && tile->tmem < i * 8 + (g.tmem[i].size + 7) / 8) {
-                load = &g.tmem[i];
+                u32 skip = (tile->tmem - i * 8) * 8;
+                shifted = g.tmem[i];
+                if (shifted.rowStride == 0) {
+                    shifted.addr += skip;
+                    shifted.size -= skip;
+                } else if (skip % shifted.rowStride == 0) {
+                    shifted.addr += skip;
+                    shifted.size -= skip;
+                } else {
+                    break;
+                }
+                load = &shifted;
                 break;
             }
         }
@@ -499,7 +515,12 @@ static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
         return NULL;
     }
     // Bound the texture by what was actually loaded.
-    if (load->rowStride == 0 && tile->line != 0) {
+    if (load->rowStride != 0 && height > load->size / load->rowStride) {
+        height = load->size / load->rowStride;
+        if (height == 0) {
+            return NULL;
+        }
+    } else if (load->rowStride == 0 && tile->line != 0) {
         u32 rows = load->size / tile_row_bytes(tile);
         if (rows == 0) {
             rows = 1;
@@ -509,15 +530,24 @@ static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
         }
     }
     if (tile->fmt == G_IM_FMT_CI) {
-        tlut = g.tlutAddr;
-        if (tlut == NULL) {
+        // The palette's first entry: CI4 tiles pick one of 16 palettes of 16, CI8 uses all 256 entries. The TLUT
+        // load put entries from g.tlutFirst on, g.tlutCount of them.
+        s32 first = (tile->siz == G_IM_SIZ_4b ? tile->palette * 16 : 0) - g.tlutFirst;
+        s32 entries = tile->siz == G_IM_SIZ_4b ? 16 : 256;
+        if (g.tlutAddr == NULL || first < 0 || first >= (s32) g.tlutCount) {
             return NULL;
         }
+        if (entries > (s32) g.tlutCount - first) {
+            // CI8 with a short palette (DKR loads 64 entries): only those can change the texture.
+            entries = (s32) g.tlutCount - first;
+        }
+        tlut = g.tlutAddr + first * 2;
+        tlutHashBytes = entries * 2;
     }
     size = load->rowStride ? load->rowStride * height : load->size;
     hash = frame_hash(load->addr, size);
     if (tlut != NULL) {
-        hash ^= frame_hash(tlut, (tile->siz == G_IM_SIZ_4b) ? 32 : 512) * 31;
+        hash ^= frame_hash(tlut, tlutHashBytes) * 31;
     }
     // Copy mode never filters.
     filter = ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT || cycle_type() == G_CYC_COPY) ? GFX_FILTER_POINT
@@ -1006,6 +1036,17 @@ static void read_switches(void) {
 int gGfxSweep, gGfxSweepLevel;
 extern s32 port_sweep_level_vertex(const void *vertices);
 
+/* How billboard vertices are placed and sized next to their anchor, g.verts[0] (see load_vertices). */
+static void billboard_scales(u8 *flatOut, float *scaleX, float *scaleY, float *scaleZ) {
+    *flatOut = g.verts[0].flat ? GFX_FLAT_PLACED : 0;
+    *scaleX = *scaleY = *scaleZ = 1.0f;
+    if (g.billboard && !*flatOut) {
+        *scaleY = 1.0f / plat_fov_tan_scale();
+        *scaleX = *scaleY / plat_aspect_scale();
+        *scaleZ = plat_camera_near() / 10.0f;
+    }
+}
+
 static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float(*m)[4] = g.matrices[g.curMatrix];
     s32 i, fog = (g.geometryMode & G_FOG) != 0;
@@ -1021,13 +1062,9 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     // plat_camera_near) maps the same clip-space offset to 4 times the depth, which stood Player Select's bushes in
     // front of the log they grow behind. So the offset past the anchor's depth (the depth offset less the matrix's z
     // scale, about 1, that comes with the vertex's extra w of 1) is scaled by the near plane / 10.
-    float bbScaleY = 1.0f, bbScaleX = 1.0f, bbScaleZ = 1.0f;
-    u8 bbFlat = g.verts[0].flat ? GFX_FLAT_PLACED : 0;
-    if (g.billboard && !bbFlat) {
-        bbScaleY = 1.0f / plat_fov_tan_scale();
-        bbScaleX = bbScaleY / plat_aspect_scale();
-        bbScaleZ = plat_camera_near() / 10.0f;
-    }
+    float bbScaleY, bbScaleX, bbScaleZ;
+    u8 bbFlat;
+    billboard_scales(&bbFlat, &bbScaleX, &bbScaleY, &bbScaleZ);
 
     if (gGfxSweep) {
         int level = port_sweep_level_vertex(src) != 0;
@@ -1056,7 +1093,10 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
             v->w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
         }
         v->flat = flat;
-        if (g.billboard && dest + i > 0) {
+        if (g.billboard && dest + i == 0) {
+            // A new anchor: the vertices after it are placed and sized by this one.
+            billboard_scales(&bbFlat, &bbScaleX, &bbScaleY, &bbScaleZ);
+        } else if (g.billboard) {
             // Billboard vertices are offsets from the anchor vertex, in clip space.
             v->x = v->x * bbScaleX + g.verts[0].x;
             v->y = v->y * bbScaleY + g.verts[0].y;
@@ -1348,14 +1388,19 @@ static void texture_rectangle(u32 w0, u32 w1, s32 flip) {
     float s1, t1;
 
     if (cycle_type() == G_CYC_COPY) {
-        // Copy mode draws 4 pixels per step and includes the last column/row.
-        dsdx *= 0.25f;
+        // Copy mode draws 4 pixels per step along x and includes the last column/row.
+        if (flip) {
+            dtdy *= 0.25f;
+        } else {
+            dsdx *= 0.25f;
+        }
         lrx += 1.0f;
         lry += 1.0f;
     }
     if (flip) {
-        s1 = s + dtdy * (lry - uly);
-        t1 = t + dsdx * (lrx - ulx);
+        // Flipped, s steps down the rectangle (by DsDx) and t across it (by DtDy).
+        s1 = s + dsdx * (lry - uly);
+        t1 = t + dtdy * (lrx - ulx);
     } else {
         s1 = s + dsdx * (lrx - ulx);
         t1 = t + dtdy * (lry - uly);
@@ -1483,6 +1528,14 @@ static s32 bad_list_address(u32 addr, const Gfx *where) {
                  (int) sFrameCount);
     }
     return TRUE;
+}
+
+/* A load at TMEM word tmem of bytes bytes overwrote the later 64 byte slots it covers: earlier loads there are gone. */
+static void forget_covered_loads(u32 tmem, u32 bytes) {
+    u32 first = (tmem / 8) & 63, end = (tmem + (bytes + 7) / 8 + 7) / 8, i;
+    for (i = first + 1; i < end && i < ARRAY_COUNT(g.tmem); i++) {
+        g.tmem[i].valid = FALSE;
+    }
 }
 
 static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
@@ -1736,6 +1789,7 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 load->rowStride = 0;
                 load->lineSwapped = (dxt == 0);
                 load->valid = TRUE;
+                forget_covered_loads(t->tmem, bytes);
                 break;
             }
 
@@ -1751,13 +1805,16 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 load->size = (lrt - ult + 1) * stride;
                 load->lineSwapped = FALSE;
                 load->valid = TRUE;
+                forget_covered_loads(t->tmem, load->size);
                 (void) lrs;
                 break;
             }
 
             case OP(G_LOADTLUT): {
+                // TLUT entries sit from TMEM word 256, one per word: the tile's address says which entry this is.
                 g.tlutAddr = g.timg.addr;
                 g.tlutCount = ((w1 >> 14) & 0x3FF) + 1;
+                g.tlutFirst = (s32) (g.tiles[(w1 >> 24) & 7].tmem & 0x1FF) - 256;
                 break;
             }
 
@@ -1865,6 +1922,7 @@ static void prewarm_textures(void) {
     u32 savedOmH;
     const u8 *savedTlut;
     u32 savedTlutCount;
+    s32 savedTlutFirst;
     s32 decoded = 0, freed = 0, i;
     unsigned long long start, elapsed;
 
@@ -1889,6 +1947,7 @@ static void prewarm_textures(void) {
     savedOmH = g.omH;
     savedTlut = g.tlutAddr;
     savedTlutCount = g.tlutCount;
+    savedTlutFirst = g.tlutFirst;
     g.omH = (g.omH & ~((3 << G_MDSFT_TEXTFILT) | (3 << G_MDSFT_TEXTLUT))) | G_TF_BILERP | G_TT_RGBA16;
     sPrewarming = TRUE;
     for (; tail != head; tail++) {
@@ -1917,6 +1976,7 @@ static void prewarm_textures(void) {
     g.omH = savedOmH;
     g.tlutAddr = savedTlut;
     g.tlutCount = savedTlutCount;
+    g.tlutFirst = savedTlutFirst;
     sTriStateValid = FALSE;
     elapsed = plat_time_ns() - start;
     // Level loads, not the odd object texture coming and going mid-race.
