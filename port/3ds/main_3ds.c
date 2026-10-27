@@ -53,8 +53,7 @@ const char *saves_option_hint(int i);
 
 static volatile int sQuitRequested;
 
-/* Ends the game the normal way, from another thread (the update's "Quit to finish the update"). */
-void plat_3ds_request_quit(void) {
+void plat_request_quit(void) {
     sQuitRequested = 1;
 }
 

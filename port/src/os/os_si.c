@@ -134,13 +134,18 @@ static void do_save_request(void) {
     __atomic_store_n(&sRequestState, REQUEST_DONE, __ATOMIC_RELEASE);
 }
 
-/* From another thread: hands the request to the game's thread and waits for it. */
-static s32 run_save_request(s32 kind) {
+/* From another thread: hands the request to the game's thread and waits for it. On the game's own: does it now. */
+static s32 run_save_request(s32 kind, s32 onGameThread) {
     unsigned long long start = plat_time_ns();
     s32 expected;
 
     sRequestKind = kind;
     __atomic_store_n(&sRequestState, REQUEST_ASKED, __ATOMIC_RELEASE);
+    if (onGameThread) {
+        do_save_request();
+        sRequestState = REQUEST_NONE;
+        return sRequestResult;
+    }
     for (;;) {
         plat_sleep_ns(20000000ULL);
         expected = REQUEST_ASKED;
@@ -157,16 +162,16 @@ static s32 run_save_request(s32 kind) {
     }
 }
 
-s32 port_save_backup(const char *dir) {
+s32 port_save_backup(const char *dir, s32 onGameThread) {
     sRequestDir = dir;
-    return run_save_request(REQUEST_BACKUP);
+    return run_save_request(REQUEST_BACKUP, onGameThread);
 }
 
-s32 port_save_restore(const u8 *eeprom, const u8 *pak, const char *undoDir) {
+s32 port_save_restore(const u8 *eeprom, const u8 *pak, const char *undoDir, s32 onGameThread) {
     sRequestDir = undoDir;
     sRestoreEeprom = eeprom;
     sRestorePak = pak;
-    return run_save_request(REQUEST_RESTORE);
+    return run_save_request(REQUEST_RESTORE, onGameThread);
 }
 
 void port_si_flush(void) {

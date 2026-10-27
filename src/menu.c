@@ -3,6 +3,8 @@
 #include "port.h"
 #ifdef TARGET_PORT
 #include "plat/options.h"
+#include "plat/plat.h"
+#include "plat/save_backups.h"
 #endif
 #endif
 #include "asset_enums.h"
@@ -4704,6 +4706,665 @@ void soundoptions_free(void) {
 #endif
 }
 
+#ifdef TARGET_PORT
+/*
+ * The port's SAVE OPTIONS screen. The N64's shows every save as a card in a row that scrolls sideways, then a second
+ * row of where it can go. This one sorts them into tabs (GAME PAK, CONTROLLER PAK and BACKUPS, the port's copies of
+ * the saves on the SD card) with a list on the left and a card on the right that shows the chosen save and then what
+ * can be done with it. The game's own steps still do the work (savemenu_load_sources, savemenu_load_destinations,
+ * savemenu_write and the Controller Pak messages); only how they are shown and chosen is new.
+ */
+enum { PORT_SAVE_TAB_GAME_PAK, PORT_SAVE_TAB_PAK, PORT_SAVE_TAB_BACKUPS, PORT_SAVE_TABS };
+enum { PORT_SAVE_ROW_FILE, PORT_SAVE_ROW_EMPTY_SLOT, PORT_SAVE_ROW_BACK_UP, PORT_SAVE_ROW_BACKUP };
+
+#define PORT_SAVE_MAX_ROWS 40
+#define PORT_SAVE_VISIBLE_ROWS 5
+#define PORT_SAVE_LIST_X 20
+#define PORT_SAVE_LIST_W 136
+#define PORT_SAVE_ROW_H 24
+#define PORT_SAVE_ROW_STEP 26
+#define PORT_SAVE_TOP 74
+#define PORT_SAVE_CARD_X 164
+#define PORT_SAVE_CARD_W 136
+#define PORT_SAVE_CARD_H (PORT_SAVE_VISIBLE_ROWS * PORT_SAVE_ROW_STEP - 2)
+#define PORT_SAVE_CARD_MID (PORT_SAVE_CARD_X + PORT_SAVE_CARD_W / 2)
+/* How long a restore's message shows before the game closes, in frames. */
+#define PORT_SAVE_QUIT_DELAY 120
+
+typedef struct PortSaveRow {
+    u8 kind;
+    s8 index; // PORT_SAVE_ROW_FILE: of gSaveMenuFilesSource; EMPTY_SLOT: the slot; BACKUP: of save_backups.
+} PortSaveRow;
+
+static PortSaveRow sPortSaveRows[PORT_SAVE_TABS][PORT_SAVE_MAX_ROWS];
+static s32 sPortSaveRowCount[PORT_SAVE_TABS];
+static s32 sPortSaveRowsReady;
+static s32 sPortSaveTab;
+static s32 sPortSaveRow[PORT_SAVE_TABS];
+static s32 sPortSaveFirst[PORT_SAVE_TABS];
+static s32 sPortSaveAction;          // Of gSaveMenuFilesDest, or 0 (RESTORE) for a backup.
+static const char *sPortSaveMessage; // What the last action did, shown on the card until the next move.
+static s32 sPortSaveQuitTimer;
+static const char *sPortSaveDoneMessage; // Shown once the write the game is doing finishes.
+
+static const char *const sPortSaveTabNames[PORT_SAVE_TABS] = { "GAME PAK", "CONTROLLER PAK", "BACKUPS" };
+static const char sPortSaveSlotNames[NUMBER_OF_SAVE_FILES][7] = { "SLOT A", "SLOT B", "SLOT C" };
+
+/* Each tab's rows from the files the game found (and the backups' folders). */
+static void port_savemenu_build_rows(void) {
+    s32 tab, i, slot;
+    PortSaveRow *row;
+
+    for (tab = 0; tab < PORT_SAVE_TABS; tab++) {
+        sPortSaveRowCount[tab] = 0;
+    }
+    // The Game Pak's three slots in order, the empty ones too, then its time records and bonuses.
+    for (slot = 0; slot < NUMBER_OF_SAVE_FILES; slot++) {
+        row = &sPortSaveRows[PORT_SAVE_TAB_GAME_PAK][sPortSaveRowCount[PORT_SAVE_TAB_GAME_PAK]++];
+        row->kind = PORT_SAVE_ROW_EMPTY_SLOT;
+        row->index = slot;
+        for (i = 0; i < gSaveMenuOptionCountUpper; i++) {
+            if (gSaveMenuFilesSource[i].saveFileType == SAVE_FILE_TYPE_CART_SAVE &&
+                gSaveMenuFilesSource[i].controllerIndex == slot) {
+                row->kind = PORT_SAVE_ROW_FILE;
+                row->index = i;
+            }
+        }
+    }
+    for (i = 0; i < gSaveMenuOptionCountUpper; i++) {
+        switch (gSaveMenuFilesSource[i].saveFileType) {
+            case SAVE_FILE_TYPE_CART_SAVE:
+                continue;
+            case SAVE_FILE_TYPE_CART_TIMES:
+            case SAVE_FILE_TYPE_CART_BONUSES:
+                tab = PORT_SAVE_TAB_GAME_PAK;
+                break;
+            default:
+                tab = PORT_SAVE_TAB_PAK;
+                break;
+        }
+        if (sPortSaveRowCount[tab] < PORT_SAVE_MAX_ROWS) {
+            row = &sPortSaveRows[tab][sPortSaveRowCount[tab]++];
+            row->kind = PORT_SAVE_ROW_FILE;
+            row->index = i;
+        }
+    }
+    row = &sPortSaveRows[PORT_SAVE_TAB_BACKUPS][sPortSaveRowCount[PORT_SAVE_TAB_BACKUPS]++];
+    row->kind = PORT_SAVE_ROW_BACK_UP;
+    row->index = 0;
+    save_backups_scan();
+    for (i = 0; i < save_backups_count() && sPortSaveRowCount[PORT_SAVE_TAB_BACKUPS] < PORT_SAVE_MAX_ROWS; i++) {
+        row = &sPortSaveRows[PORT_SAVE_TAB_BACKUPS][sPortSaveRowCount[PORT_SAVE_TAB_BACKUPS]++];
+        row->kind = PORT_SAVE_ROW_BACKUP;
+        row->index = i;
+    }
+    for (tab = 0; tab < PORT_SAVE_TABS; tab++) {
+        if (sPortSaveRow[tab] >= sPortSaveRowCount[tab]) {
+            sPortSaveRow[tab] = sPortSaveRowCount[tab] - 1;
+        }
+        if (sPortSaveRow[tab] < 0) {
+            sPortSaveRow[tab] = 0;
+        }
+    }
+    sPortSaveRowsReady = TRUE;
+}
+
+static PortSaveRow *port_savemenu_row(void) {
+    if (sPortSaveRowCount[sPortSaveTab] == 0) {
+        return NULL;
+    }
+    return &sPortSaveRows[sPortSaveTab][sPortSaveRow[sPortSaveTab]];
+}
+
+static void port_savemenu_reset(void) {
+    sPortSaveRowsReady = FALSE;
+    sPortSaveTab = PORT_SAVE_TAB_GAME_PAK;
+    bzero(sPortSaveRow, sizeof(sPortSaveRow));
+    bzero(sPortSaveFirst, sizeof(sPortSaveFirst));
+    sPortSaveMessage = NULL;
+    sPortSaveDoneMessage = NULL;
+    sPortSaveQuitTimer = 0;
+}
+
+/* Each tab's panels: the Game Pak's are the wood of the N64's Game Pak cards, the Controller Pak's its blue cards. */
+static void port_savemenu_tab_panel(s32 tab, s32 *colour, TextureHeader **texture) {
+    switch (tab) {
+        case PORT_SAVE_TAB_GAME_PAK:
+            *colour = COLOUR_RGBA32(176, 224, 192, 255);
+            *texture = gMenuAssets[TEXTURE_SURFACE_BUTTON_WOOD];
+            break;
+        case PORT_SAVE_TAB_PAK:
+            *colour = gContPakSaveBgColours[0];
+            *texture = gMenuAssets[TEXTURE_UNK_44];
+            break;
+        default:
+            *colour = COLOUR_RGBA32(255, 200, 96, 255);
+            *texture = gMenuAssets[TEXTURE_SURFACE_BUTTON_WOOD];
+            break;
+    }
+}
+
+static s32 port_savemenu_dim(s32 colour) {
+    s32 r = ((colour >> 24) & 0xFF) * 9 / 16, g = ((colour >> 16) & 0xFF) * 9 / 16, b = ((colour >> 8) & 0xFF) * 9 / 16;
+    return COLOUR_RGBA32(r, g, b, 200);
+}
+
+/* The name of a row's file, as its list row and card show it. buffer has 24 bytes. */
+static char *port_savemenu_file_name(SaveFileData *file, char *buffer) {
+    s32 i, j;
+    switch (file->saveFileType) {
+        case SAVE_FILE_TYPE_CART_SAVE:
+            return (char *) sPortSaveSlotNames[file->controllerIndex];
+        case SAVE_FILE_TYPE_CART_TIMES:
+        case SAVE_FILE_TYPE_CPAK_TIMES:
+            return "TIME RECORDS";
+        case SAVE_FILE_TYPE_CART_BONUSES:
+            return "BONUSES";
+        case SAVE_FILE_TYPE_CPAK_GHOST:
+            return gMenuText[ASSET_MENU_TEXT_GHOSTS];
+        case SAVE_FILE_TYPE_CPAK_SAVE:
+            for (i = 0; "SAVE "[i] != '\0'; i++) {
+                buffer[i] = "SAVE "[i];
+            }
+            buffer[i++] = file->saveFileExt[0];
+            buffer[i] = '\0';
+            return buffer;
+        default:
+            for (i = 0, j = 0; file->saveFileExt[j] != '\0' && i < 15; j++) {
+                buffer[i++] = file->saveFileExt[j];
+            }
+            buffer[i] = '\0';
+            return buffer;
+    }
+}
+
+/* What a destination does, as the card's list of choices says it. */
+static char *port_savemenu_action_name(SaveFileData *dest, char *buffer) {
+    s32 i;
+    switch (dest->saveFileType) {
+        case SAVE_FILE_TYPE_CART_SAVE:
+            for (i = 0; "COPY TO "[i] != '\0'; i++) {
+                buffer[i] = "COPY TO "[i];
+            }
+            buffer[i++] = 'A' + dest->controllerIndex;
+            buffer[i] = '\0';
+            return buffer;
+        case SAVE_FILE_TYPE_CART_TIMES:
+            return "COPY TO GAME PAK";
+        case SAVE_FILE_TYPE_CPAK_EMPTY:
+            return "COPY TO PAK";
+        case SAVE_FILE_TYPE_UNK9:
+            return gMenuText[ASSET_MENU_TEXT_VIEWGHOSTS];
+        default:
+            return gMenuText[ASSET_MENU_TEXT_ERASE];
+    }
+}
+
+static void port_savemenu_text(s32 font, s32 x, s32 y, char *text, s32 highlight, s32 alpha, AlignmentFlags align) {
+    set_text_font(font);
+    set_text_colour(0, 0, 0, 255, alpha >> 1);
+    draw_text(&sMenuCurrDisplayList, x + 1, y + 1, text, align);
+    set_text_colour(255, 255, 255, highlight, alpha);
+    draw_text(&sMenuCurrDisplayList, x, y, text, align);
+}
+
+/* The balloon count of a save (the N64 card's balloon and digits) centred on x, y. */
+static void port_savemenu_balloons(s32 x, s32 y, s32 count, s32 adventureTwo) {
+    s32 spriteID = adventureTwo ? 12 : 11;
+    cam_set_sprite_anim_mode(SPRITE_ANIM_FRAME_INDEX);
+    sprite_opaque(0);
+    gMenuImages[2].trans.y_position = 120 - (y + 14);
+    gMenuImages[2].trans.x_position = x - 165;
+    gMenuImages[2].spriteOffset = count / 10;
+    menu_element_render(2);
+    gMenuImages[2].trans.x_position = x - 157;
+    gMenuImages[2].spriteOffset = count % 10;
+    menu_element_render(2);
+    sprite_opaque(1);
+    gMenuImages[spriteID].trans.y_position = 120 - (y - 11);
+    gMenuImages[spriteID].trans.x_position = x - 160;
+    menu_element_render(spriteID);
+    cam_set_sprite_anim_mode(SPRITE_ANIM_NORMALIZED);
+}
+
+static void port_savemenu_render_tabs(s32 highlight) {
+    s32 widths[PORT_SAVE_TABS], total, x, i;
+    total = 0;
+    for (i = 0; i < PORT_SAVE_TABS; i++) {
+        widths[i] = get_text_width((char *) sPortSaveTabNames[i], 0, ASSET_FONTS_FUNFONT);
+        total += widths[i];
+    }
+    total += (PORT_SAVE_TABS - 1) * 18;
+    x = SCREEN_WIDTH_HALF - (total >> 1);
+    for (i = 0; i < PORT_SAVE_TABS; i++) {
+        port_savemenu_text(ASSET_FONTS_FUNFONT, x + (widths[i] >> 1), 58, (char *) sPortSaveTabNames[i],
+                           i == sPortSaveTab ? highlight : 0, i == sPortSaveTab ? 255 : 96, ALIGN_MIDDLE_CENTER);
+        x += widths[i] + 18;
+    }
+}
+
+/* The left column: the tab's rows, PORT_SAVE_VISIBLE_ROWS at a time. */
+static void port_savemenu_render_list(s32 highlight, s32 active) {
+    s32 colour, i, y, first, count, selected;
+    TextureHeader *texture;
+    PortSaveRow *row;
+    SaveFileData *file;
+    char buffer[24];
+    char *label, *detail;
+
+    port_savemenu_tab_panel(sPortSaveTab, &colour, &texture);
+    count = sPortSaveRowCount[sPortSaveTab];
+    selected = sPortSaveRow[sPortSaveTab];
+    first = sPortSaveFirst[sPortSaveTab];
+    if (selected < first) {
+        first = selected;
+    } else if (selected >= first + PORT_SAVE_VISIBLE_ROWS) {
+        first = selected - PORT_SAVE_VISIBLE_ROWS + 1;
+    }
+    sPortSaveFirst[sPortSaveTab] = first;
+    if (count == 0) {
+        // An empty Controller Pak.
+        func_80080580(&sMenuCurrDisplayList, PORT_SAVE_LIST_X - 160, 120 - PORT_SAVE_TOP, PORT_SAVE_LIST_W,
+                      PORT_SAVE_ROW_H, 4, 4, port_savemenu_dim(colour), texture);
+        port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_LIST_X + (PORT_SAVE_LIST_W >> 1),
+                           PORT_SAVE_TOP + (PORT_SAVE_ROW_H >> 1), "NO SAVES", 0, 160, ALIGN_MIDDLE_CENTER);
+        return;
+    }
+    for (i = first; i < count && i < first + PORT_SAVE_VISIBLE_ROWS; i++) {
+        row = &sPortSaveRows[sPortSaveTab][i];
+        y = PORT_SAVE_TOP + (i - first) * PORT_SAVE_ROW_STEP;
+        func_80080580(&sMenuCurrDisplayList, PORT_SAVE_LIST_X - 160, 120 - y, PORT_SAVE_LIST_W, PORT_SAVE_ROW_H, 4, 4,
+                      i == selected ? colour : port_savemenu_dim(colour), texture);
+        detail = NULL;
+        switch (row->kind) {
+            case PORT_SAVE_ROW_FILE:
+                file = &gSaveMenuFilesSource[row->index];
+                label = port_savemenu_file_name(file, buffer);
+                break;
+            case PORT_SAVE_ROW_EMPTY_SLOT:
+                label = (char *) sPortSaveSlotNames[row->index];
+                detail = "EMPTY";
+                break;
+            case PORT_SAVE_ROW_BACK_UP:
+                label = "BACK UP NOW";
+                break;
+            default:
+                save_backups_name(row->index, buffer, sizeof(buffer));
+                label = buffer;
+                break;
+        }
+        port_savemenu_text(row->kind == PORT_SAVE_ROW_BACKUP ||
+                                   (row->kind == PORT_SAVE_ROW_FILE && file->saveFileType == SAVE_FILE_TYPE_CPAK_OTHER)
+                               ? ASSET_FONTS_SMALLFONT
+                               : ASSET_FONTS_FUNFONT,
+                           PORT_SAVE_LIST_X + 10, y + (PORT_SAVE_ROW_H >> 1), label,
+                           i == selected && active ? highlight : 0, i == selected ? 255 : 176, ALIGN_MIDDLE_LEFT);
+        if (detail != NULL) {
+            port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_LIST_X + PORT_SAVE_LIST_W - 8,
+                               y + (PORT_SAVE_ROW_H >> 1), detail, 0, 128, ALIGN_MIDDLE_RIGHT);
+        }
+    }
+    // More rows above or below.
+    if (first > 0) {
+        texrect_draw(&sMenuCurrDisplayList, gMenuSelectionArrowUp, PORT_SAVE_LIST_X + (PORT_SAVE_LIST_W >> 1),
+                     PORT_SAVE_TOP - 4 - ((gOptionBlinkTimer & 0x1F) >> 3), 255, 255, 255, 255);
+    }
+    if (first + PORT_SAVE_VISIBLE_ROWS < count) {
+        texrect_draw(&sMenuCurrDisplayList, gMenuSelectionArrowDown, PORT_SAVE_LIST_X + (PORT_SAVE_LIST_W >> 1),
+                     PORT_SAVE_TOP + PORT_SAVE_CARD_H + 4 + ((gOptionBlinkTimer & 0x1F) >> 3), 255, 255, 255, 255);
+    }
+}
+
+/* The card's top half: the chosen row's icon, balloons and name. Returns where its text may go on from. */
+static s32 port_savemenu_render_card_head(PortSaveRow *row) {
+    DrawTexture *icon;
+    SaveFileData *file;
+    Settings *save;
+    char buffer[24];
+    char name[8];
+    char *title, *line1, *line2;
+    s32 balloons, adventureTwo, y;
+
+    icon = gDrawTexFileIcon;
+    title = NULL;
+    line1 = NULL;
+    line2 = NULL;
+    balloons = -1;
+    adventureTwo = FALSE;
+    if (row == NULL) {
+        icon = gDrawTexContPakIcon;
+        title = "CONTROLLER PAK";
+        line1 = "HAS NO SAVES";
+    } else if (row->kind == PORT_SAVE_ROW_EMPTY_SLOT) {
+        icon = gDrawTexN64Icon;
+        title = (char *) sPortSaveSlotNames[row->index];
+        line1 = "EMPTY";
+    } else if (row->kind == PORT_SAVE_ROW_BACK_UP) {
+        icon = gDrawTexFileIcon;
+        title = "BACK UP NOW";
+        line1 = "COPIES EVERY SAVE";
+        line2 = "TO THE SD CARD";
+    } else if (row->kind == PORT_SAVE_ROW_BACKUP) {
+        icon = gDrawTexFileIcon;
+        title = save_backups_is_undo(row->index) ? "BEFORE A RESTORE" : "BACKUP";
+        line1 = "GAME PAK";
+        line2 = "AND CONTROLLER PAK";
+    } else {
+        file = &gSaveMenuFilesSource[row->index];
+        title = port_savemenu_file_name(file, buffer);
+        switch (file->saveFileType) {
+            case SAVE_FILE_TYPE_CART_SAVE:
+                icon = gDrawTexN64Icon;
+                save = gSavefileData[file->controllerIndex];
+                balloons = *save->balloonsPtr;
+                adventureTwo = (save->cutsceneFlags & 4) != 0;
+                line1 = adventureTwo ? "ADVENTURE TWO" : "ADVENTURE";
+                filename_decompress(save->filename, name, MAX_INITIALS_LENGTH);
+                filename_trim(name, name);
+                line2 = name;
+                break;
+            case SAVE_FILE_TYPE_CPAK_SAVE:
+                icon = gDrawTexN64Icon;
+                balloons = file->balloonCount;
+                adventureTwo = file->adventureTwo;
+                line1 = adventureTwo ? "ADVENTURE TWO" : "ADVENTURE";
+                filename_decompress(file->compressedFilename, name, MAX_INITIALS_LENGTH);
+                filename_trim(name, name);
+                line2 = name;
+                break;
+            case SAVE_FILE_TYPE_CART_TIMES:
+            case SAVE_FILE_TYPE_CPAK_TIMES:
+                icon = gDrawTexTTIcon;
+                line1 = "BEST LAPS AND";
+                line2 = "COURSE TIMES";
+                break;
+            case SAVE_FILE_TYPE_CPAK_GHOST:
+                icon = gDrawTexGhostIcon;
+                line1 = "TIME TRIAL GHOSTS";
+                break;
+            case SAVE_FILE_TYPE_CART_BONUSES:
+                icon = gDrawTexN64Icon;
+                line1 = "ADVENTURE TWO,";
+                line2 = "DRUMSTICK AND CODES";
+                break;
+            default:
+                icon = gDrawTexFileIcon;
+                line1 = "ANOTHER GAME'S SAVE";
+                break;
+        }
+    }
+    y = PORT_SAVE_TOP + 9;
+    if (balloons >= 0) {
+        port_savemenu_balloons(PORT_SAVE_CARD_MID - 28, y + 20, balloons, adventureTwo);
+        texrect_draw(&sMenuCurrDisplayList, icon, PORT_SAVE_CARD_MID - 6, y, 255, 255, 255, 255);
+    } else {
+        texrect_draw(&sMenuCurrDisplayList, icon, PORT_SAVE_CARD_MID - 20, y, 255, 255, 255, 255);
+    }
+    y += 50;
+    if (title != NULL) {
+        port_savemenu_text(row != NULL && row->kind == PORT_SAVE_ROW_FILE &&
+                                   gSaveMenuFilesSource[row->index].saveFileType == SAVE_FILE_TYPE_CPAK_OTHER
+                               ? ASSET_FONTS_SMALLFONT
+                               : ASSET_FONTS_FUNFONT,
+                           PORT_SAVE_CARD_MID, y, title, 0, 255, ALIGN_MIDDLE_CENTER);
+    }
+    y += 16;
+    if (line1 != NULL) {
+        port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y, line1, 0, 224, ALIGN_MIDDLE_CENTER);
+    }
+    y += 11;
+    if (line2 != NULL) {
+        port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y, line2, 0, 224, ALIGN_MIDDLE_CENTER);
+    }
+    return y + 14;
+}
+
+/* The right column: the chosen row, then (A) what can be done with it, then (A again) the question. */
+static void port_savemenu_render_card(s32 highlight) {
+    s32 colour, stage, y, i;
+    TextureHeader *texture;
+    PortSaveRow *row = port_savemenu_row();
+    char buffer[24];
+    char question[32];
+    char *text;
+
+    port_savemenu_tab_panel(sPortSaveTab, &colour, &texture);
+    func_80080580(&sMenuCurrDisplayList, PORT_SAVE_CARD_X - 160, 120 - PORT_SAVE_TOP, PORT_SAVE_CARD_W,
+                  PORT_SAVE_CARD_H, 4, 4, colour, texture);
+    y = port_savemenu_render_card_head(row);
+    stage = gMenuStage & 7;
+    if (sPortSaveQuitTimer > 0 || sPortSaveMessage != NULL) {
+        port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y + 4,
+                           sPortSaveQuitTimer > 0 ? "RESTORED" : (char *) sPortSaveMessage, highlight, 255,
+                           ALIGN_MIDDLE_CENTER);
+        if (sPortSaveQuitTimer > 0) {
+            port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y + 16, "THE GAME CLOSES TO LOAD IT", 0, 255,
+                               ALIGN_MIDDLE_CENTER);
+        }
+        return;
+    }
+    if (stage == SAVEMENU_CHOOSE_DEST) {
+        if (row != NULL && row->kind == PORT_SAVE_ROW_BACKUP) {
+            port_savemenu_text(ASSET_FONTS_FUNFONT, PORT_SAVE_CARD_MID, y + 2, "RESTORE", highlight, 255,
+                               ALIGN_MIDDLE_CENTER);
+            return;
+        }
+        // Up to three choices show; the list scrolls if a Controller Pak save could go to many places.
+        i = sPortSaveAction - 1;
+        if (i > gSaveMenuOptionCountLower - 3) {
+            i = gSaveMenuOptionCountLower - 3;
+        }
+        if (i < 0) {
+            i = 0;
+        }
+        for (; i < gSaveMenuOptionCountLower && y < PORT_SAVE_TOP + PORT_SAVE_CARD_H - 8; i++, y += 15) {
+            port_savemenu_text(ASSET_FONTS_FUNFONT, PORT_SAVE_CARD_MID, y + 2,
+                               port_savemenu_action_name(&gSaveMenuFilesDest[i], buffer),
+                               i == sPortSaveAction ? highlight : 0, i == sPortSaveAction ? 255 : 128,
+                               ALIGN_MIDDLE_CENTER);
+        }
+    } else if (stage == SAVEMENU_CONFIRM) {
+        if (row != NULL && row->kind == PORT_SAVE_ROW_BACKUP) {
+            text = "REPLACE YOUR SAVES?";
+        } else {
+            text = port_savemenu_action_name(&gSaveMenuFilesDest[sPortSaveAction], buffer);
+            for (i = 0; text[i] != '\0' && i < (s32) sizeof(question) - 2; i++) {
+                question[i] = text[i];
+            }
+            question[i++] = '?';
+            question[i] = '\0';
+            text = question;
+        }
+        port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y, text, 0, 255, ALIGN_MIDDLE_CENTER);
+        port_savemenu_text(ASSET_FONTS_FUNFONT, PORT_SAVE_CARD_MID, y + 16, "A YES   B NO", highlight, 255,
+                           ALIGN_MIDDLE_CENTER);
+    } else if (stage == SAVEMENU_WRITE || stage == SAVEMENU_WAIT || stage == SAVEMENU_INIT_SOURCE ||
+               stage == SAVEMENU_INIT_DEST) {
+        port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y + 4, gMenuText[ASSET_MENU_TEXT_PLEASEWAIT], 0,
+                           255, ALIGN_MIDDLE_CENTER);
+    } else if (row != NULL && row->kind != PORT_SAVE_ROW_EMPTY_SLOT) {
+        port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y + 4,
+                           row->kind == PORT_SAVE_ROW_BACK_UP ? "PRESS A TO BACK UP" : "PRESS A FOR OPTIONS", 0, 176,
+                           ALIGN_MIDDLE_CENTER);
+    }
+}
+
+void port_savemenu_render(void) {
+    s32 highlight, stage;
+
+    highlight = gOptionBlinkTimer * 8;
+    if (highlight > 255) {
+        highlight = 511 - highlight;
+    }
+    stage = gMenuStage & 7;
+    mtx_ortho(&sMenuCurrDisplayList, &sMenuCurrHudMat);
+    set_text_background_colour(0, 0, 0, 0);
+    set_text_font(ASSET_FONTS_BIGFONT);
+    set_text_colour(0, 0, 0, 255, 128);
+    draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF + 1, 35, gMenuText[ASSET_MENU_TEXT_SAVEOPTIONS],
+              ALIGN_MIDDLE_CENTER);
+    set_text_colour(255, 255, 255, 0, 255);
+    draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF, 32, gMenuText[ASSET_MENU_TEXT_SAVEOPTIONS],
+              ALIGN_MIDDLE_CENTER);
+    if (stage == SAVEMENU_INIT_SOURCE && !sPortSaveRowsReady) {
+        set_text_font(ASSET_FONTS_BIGFONT);
+        set_text_colour(255, 255, 255, 0, 255);
+        draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF, 128, gMenuText[ASSET_MENU_TEXT_PLEASEWAIT],
+                  ALIGN_MIDDLE_CENTER);
+    } else if (sPortSaveRowsReady) {
+        port_savemenu_render_tabs(stage == SAVEMENU_CHOOSE_SOURCE ? highlight : 0);
+        port_savemenu_render_list(highlight, stage == SAVEMENU_CHOOSE_SOURCE);
+        port_savemenu_render_card(highlight);
+    }
+    if (gMenuStage & 8) {
+        render_dialogue_box(&sMenuCurrDisplayList, NULL, NULL, 7);
+    }
+    menu_geometry_end();
+}
+
+/* The list: up and down pick a row, left and right a tab, A the row's choices (or a backup), B leaves. */
+s32 port_savemenu_input_source(s32 buttonsPressed, s32 xAxis, s32 yAxis) {
+    PortSaveRow *row;
+    s32 count = sPortSaveRowCount[sPortSaveTab];
+    s32 result;
+
+    if (sPortSaveQuitTimer > 0) {
+        return 0;
+    }
+    if (buttonsPressed & B_BUTTON) {
+        gMenuStage = SAVEMENU_ENTER;
+        if (gSaveMenuRumbleNag != gSaveMenuRumbleConnected) {
+            savemenu_render_error(CONTROLLER_PAK_SWITCH_TO_RUMBLE);
+            return 0;
+        }
+        sound_play(SOUND_MENU_BACK3, NULL);
+        return -1;
+    }
+    row = port_savemenu_row();
+    if (buttonsPressed & (A_BUTTON | START_BUTTON)) {
+        if (row == NULL || row->kind == PORT_SAVE_ROW_EMPTY_SLOT) {
+            sound_play(SOUND_MENU_BACK3, NULL);
+        } else if (row->kind == PORT_SAVE_ROW_BACK_UP) {
+            result = save_backups_back_up(TRUE);
+            sound_play(result == SAVE_BACKUP_DONE ? SOUND_SELECT2 : SOUND_MENU_BACK3, NULL);
+            sPortSaveMessage = result == SAVE_BACKUP_DONE       ? "BACKED UP"
+                               : result == SAVE_BACKUP_TEST_RUN ? "NOT DURING A TEST RUN"
+                                                                : "COULD NOT WRITE TO SD";
+            port_savemenu_build_rows();
+        } else if (row->kind == PORT_SAVE_ROW_BACKUP) {
+            sound_play(SOUND_SELECT2, NULL);
+            sPortSaveAction = 0;
+            sPortSaveMessage = NULL;
+            gMenuStage = SAVEMENU_CHOOSE_DEST;
+        } else {
+            sound_play(SOUND_SELECT2, NULL);
+            sPortSaveMessage = NULL;
+            gSaveMenuOptionSource = row->index;
+            gMenuStage = SAVEMENU_INIT_DEST;
+        }
+    } else if (xAxis != 0) {
+        sPortSaveTab = (sPortSaveTab + (xAxis < 0 ? PORT_SAVE_TABS - 1 : 1)) % PORT_SAVE_TABS;
+        sPortSaveMessage = NULL;
+        sound_play(SOUND_MENU_PICK2, NULL);
+    } else if (yAxis > 0 && sPortSaveRow[sPortSaveTab] > 0) {
+        sPortSaveRow[sPortSaveTab]--;
+        sPortSaveMessage = NULL;
+        sound_play(SOUND_MENU_PICK2, NULL);
+    } else if (yAxis < 0 && sPortSaveRow[sPortSaveTab] < count - 1) {
+        sPortSaveRow[sPortSaveTab]++;
+        sPortSaveMessage = NULL;
+        sound_play(SOUND_MENU_PICK2, NULL);
+    }
+    return 0;
+}
+
+/* The card's choices: A asks to make sure, B goes back to the list. */
+s32 port_savemenu_input_dest(s32 buttonsPressed, s32 yAxis) {
+    PortSaveRow *row = port_savemenu_row();
+    s32 count = (row != NULL && row->kind == PORT_SAVE_ROW_BACKUP) ? 1 : gSaveMenuOptionCountLower;
+
+    if (buttonsPressed & B_BUTTON) {
+        sound_play(SOUND_MENU_BACK3, NULL);
+        gMenuStage = SAVEMENU_CHOOSE_SOURCE;
+    } else if (buttonsPressed & (A_BUTTON | START_BUTTON)) {
+        sound_play(SOUND_SELECT2, NULL);
+        gMenuStage = SAVEMENU_CONFIRM;
+        if (count > 0 && !(row != NULL && row->kind == PORT_SAVE_ROW_BACKUP) &&
+            gSaveMenuFilesDest[sPortSaveAction].saveFileType == SAVE_FILE_TYPE_UNK9) {
+            // VIEW GHOSTS changes nothing, so it needn't ask.
+            gSaveMenuOptionDest = sPortSaveAction;
+            gMenuStage = SAVEMENU_WRITE;
+            gOpacityDecayTimer = 0;
+        }
+    } else if (yAxis > 0 && sPortSaveAction > 0) {
+        sound_play(SOUND_MENU_PICK2, NULL);
+        sPortSaveAction--;
+    } else if (yAxis < 0 && sPortSaveAction < count - 1) {
+        sound_play(SOUND_MENU_PICK2, NULL);
+        sPortSaveAction++;
+    }
+    return 0;
+}
+
+/* Sets the first choice of the chosen file once the game has found where it can go. */
+void port_savemenu_dest_loaded(void) {
+    sPortSaveAction = 0;
+}
+
+/* Yes (A) does it, no (B) goes back to the choices. A restore closes the game after a moment. */
+s32 port_savemenu_input_confirm(s32 buttonsPressed) {
+    PortSaveRow *row = port_savemenu_row();
+    s32 result, type;
+
+    if (buttonsPressed & B_BUTTON) {
+        sound_play(SOUND_MENU_BACK3, NULL);
+        gMenuStage = SAVEMENU_CHOOSE_DEST;
+    } else if (buttonsPressed & (A_BUTTON | START_BUTTON)) {
+        if (row != NULL && row->kind == PORT_SAVE_ROW_BACKUP) {
+            result = save_backups_restore(row->index, TRUE);
+            if (result == SAVE_BACKUP_DONE) {
+                sound_play(SOUND_SELECT2, NULL);
+                sPortSaveQuitTimer = PORT_SAVE_QUIT_DELAY;
+            } else {
+                sound_play(SOUND_MENU_BACK3, NULL);
+                sPortSaveMessage = result == SAVE_BACKUP_TEST_RUN    ? "NOT DURING A TEST RUN"
+                                   : result == SAVE_BACKUP_TOO_SHORT ? "THAT BACKUP IS DAMAGED"
+                                                                     : "COULD NOT WRITE TO SD";
+            }
+            gMenuStage = SAVEMENU_CHOOSE_SOURCE;
+            return 0;
+        }
+        sound_play(SOUND_SELECT2, NULL);
+        type = gSaveMenuFilesDest[sPortSaveAction].saveFileType;
+        sPortSaveDoneMessage = type == SAVE_FILE_TYPE_ERASE ? "ERASED" : type == SAVE_FILE_TYPE_UNK9 ? NULL : "COPIED";
+        gSaveMenuOptionDest = sPortSaveAction;
+        gMenuStage = SAVEMENU_WRITE;
+        gOpacityDecayTimer = 0;
+    }
+    return 0;
+}
+
+void port_savemenu_write_failed(void) {
+    sPortSaveDoneMessage = NULL;
+}
+
+/* Called each frame: closes the game once a restore's message has shown, and rebuilds the lists after a reload. */
+void port_savemenu_update(s32 updateRate, s32 sourcesLoaded) {
+    if (sourcesLoaded) {
+        port_savemenu_build_rows();
+        sPortSaveMessage = sPortSaveDoneMessage;
+        sPortSaveDoneMessage = NULL;
+    }
+    if (sPortSaveQuitTimer > 0) {
+        sPortSaveQuitTimer -= updateRate;
+        if (sPortSaveQuitTimer <= 0) {
+            sPortSaveQuitTimer = 1; // Stays on screen until the game has closed.
+            plat_request_quit();
+        }
+    }
+}
+#endif
+
 /**
  * Allocates space for the pak filesystem to load its results into, then resets all
  * the other variables related to the save options.
@@ -4729,7 +5390,13 @@ void menu_save_options_init(void) {
     gSaveMenuScrollDest = 0.0f;
     menu_assetgroup_load(gSaveMenuObjectIndices);
     menu_imagegroup_load(gSaveMenuImageIndices);
+#ifdef TARGET_PORT
+    // The list's rows and the card.
+    func_8007FFEC(PORT_SAVE_VISIBLE_ROWS + 2);
+    port_savemenu_reset();
+#else
     func_8007FFEC(10);
+#endif
 #if REGION != REGION_JP
     load_font(ASSET_FONTS_BIGFONT);
 #endif
@@ -5776,7 +6443,12 @@ s32 menu_save_options_loop(s32 updateRate) {
         savemenu_move(updateRate);
     }
     if (gMenuDelay > -20 && gMenuDelay < 20) {
+#ifdef TARGET_PORT
+        port_savemenu_update(updateRate, FALSE);
+        port_savemenu_render();
+#else
         savemenu_render(updateRate);
+#endif
     }
     if (gMenuDelay != 0) {
         if (gMenuDelay > 30) {
@@ -5819,10 +6491,17 @@ s32 menu_save_options_loop(s32 updateRate) {
                     savemenu_render_error(result);
                 } else {
                     gMenuStage = SAVEMENU_CHOOSE_SOURCE;
+#ifdef TARGET_PORT
+                    port_savemenu_update(0, TRUE);
+#endif
                 }
                 break;
             case SAVEMENU_CHOOSE_SOURCE:
+#ifdef TARGET_PORT
+                gMenuDelay = port_savemenu_input_source(buttonsPressed, xAxis, yAxis);
+#else
                 gMenuDelay = savemenu_input_source(buttonsPressed, xAxis);
+#endif
                 break;
             case SAVEMENU_INIT_DEST:
                 gSaveMenuOptionDest = 0;
@@ -5832,19 +6511,33 @@ s32 menu_save_options_loop(s32 updateRate) {
                     savemenu_render_error(result);
                 } else {
                     gMenuStage = SAVEMENU_CHOOSE_DEST;
+#ifdef TARGET_PORT
+                    port_savemenu_dest_loaded();
+#endif
                 }
                 break;
             case SAVEMENU_CHOOSE_DEST:
+#ifdef TARGET_PORT
+                gMenuDelay = port_savemenu_input_dest(buttonsPressed, yAxis);
+#else
                 gMenuDelay = savemenu_input_dest(buttonsPressed, xAxis);
+#endif
                 break;
             case SAVEMENU_CONFIRM:
+#ifdef TARGET_PORT
+                gMenuDelay = port_savemenu_input_confirm(buttonsPressed);
+#else
                 gMenuDelay = savemenu_input_confirm(buttonsPressed, xAxis);
+#endif
                 break;
             case SAVEMENU_WRITE:
                 gOpacityDecayTimer++;
                 if (gOpacityDecayTimer > 3) {
                     result = savemenu_write();
                     if (result != CONTROLLER_PAK_GOOD) {
+#ifdef TARGET_PORT
+                        port_savemenu_write_failed();
+#endif
                         savemenu_render_error(result);
                     } else {
                         gOpacityDecayTimer = 6;

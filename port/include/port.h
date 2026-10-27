@@ -162,14 +162,15 @@ void port_eep_convert(u8 *eeprom);
 void port_mpk_convert(u8 *pak, s32 toN64);
 /*
  * Save backups (os_si.c), asked for from another thread (the 3DS Settings menu) and done by the game's at its next
- * controller read. port_save_backup writes the saves, as they are now, as dkr.eep and dkr.mpk in dir (a folder under
- * the data folder, which must exist). port_save_restore first backs up to undoDir (if not NULL), then replaces the
- * saves with the N64 order images given (NULL: keep that one) and stops saving until the game restarts, as the game
- * still holds the old progress in its memory. Both return 1 when done, 0 if the files could not be written, -1 if the
- * game did not get to it in time (nothing done).
+ * controller read, or done at once when the game's thread asks (onGameThread: its SAVE OPTIONS screen).
+ * port_save_backup writes the saves, as they are now, as dkr.eep and dkr.mpk in dir (a folder under the data folder,
+ * which must exist). port_save_restore first backs up to undoDir (if not NULL), then replaces the saves with the N64
+ * order images given (NULL: keep that one) and stops saving until the game restarts, as the game still holds the old
+ * progress in its memory. Both return 1 when done, 0 if the files could not be written, -1 if the game did not get to
+ * it in time (nothing done).
  */
-s32 port_save_backup(const char *dir);
-s32 port_save_restore(const u8 *eeprom, const u8 *pak, const char *undoDir);
+s32 port_save_backup(const char *dir, s32 onGameThread);
+s32 port_save_restore(const u8 *eeprom, const u8 *pak, const char *undoDir, s32 onGameThread);
 #define PORT_EEPROM_SIZE 512
 #define PORT_MEMPAK_SIZE 0x8000
 
