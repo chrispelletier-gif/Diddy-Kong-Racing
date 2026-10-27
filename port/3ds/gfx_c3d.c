@@ -2449,6 +2449,22 @@ static int mipmaps_built(void) {
     return sBuild;
 }
 
+/* How many levels later textures clamped both ways (signs) switch to smaller ones: see gfx_mip_lod_bias.
+ * DKR_MIP_SIGN_BIAS changes it (0 treats them like the rest, as before; -1 is the default). */
+static float sign_bias(void) {
+    static int sRead;
+    static float sBias = -1.0f;
+    if (!sRead) {
+        const char *env = plat_getenv("DKR_MIP_SIGN_BIAS");
+        sRead = 1;
+        if (env != NULL) {
+            sBias = (float) atof(env);
+        }
+        plat_log("mipmaps: signs %.2f levels sharper", -sBias);
+    }
+    return sBias;
+}
+
 static GPU_TEXTURE_FILTER_PARAM mip_filter(void) {
     static int sFilter = -1;
     if (sFilter < 0) {
@@ -2476,8 +2492,8 @@ static int mip_levels(const GfxTexture *tex, unsigned int pw, unsigned int ph) {
     return C3D_TexCalcMaxLevel(pw, ph);
 }
 
-/* Sets the sampler: point or bilinear, with the mipmap levels in use or not. */
-static void set_texture_filter(C3DTexture *t, int point) {
+/* Sets the sampler: point or bilinear, with the mipmap levels in use or not, and their bias. */
+static void set_texture_filter(C3DTexture *t, const GfxTexture *tex, int point) {
     if (point) {
         C3D_TexSetFilter(&t->tex, GPU_NEAREST, GPU_NEAREST);
         C3D_TexSetFilterMipmap(&t->tex, GPU_NEAREST);
@@ -2487,6 +2503,7 @@ static void set_texture_filter(C3DTexture *t, int point) {
     }
     t->point = point;
     t->tex.maxLevel = (sMipmapsUsed && !point) ? t->levels : 0;
+    C3D_TexSetLodBias(&t->tex, t->levels > 0 ? gfx_mip_lod_bias(tex, sign_bias()) : 0.0f);
 }
 
 /* Swizzles an RGBA8888 image (w x h, both multiples of 8) into the GPU's 8x8 tiles, top row first. */
@@ -2620,7 +2637,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
     if (t->levels > 0 && !upload_mip_levels(t, tex, format)) {
         t->levels = 0; // Out of memory for the temporary image: the levels hold nothing, so they aren't used.
     }
-    set_texture_filter(t, tex->filter == GFX_FILTER_POINT);
+    set_texture_filter(t, tex, tex->filter == GFX_FILTER_POINT);
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
     gpu_flush(data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
     if (!t->toVram && plat_switch("DKR_TEX_VRAM", 0)) {
@@ -2713,7 +2730,7 @@ void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
     t->shared = 1;
     t->toVram = 0;
     texture_link(t); // Follows its memory when that moves (move_shares).
-    set_texture_filter(t, dst->filter == GFX_FILTER_POINT);
+    set_texture_filter(t, dst, dst->filter == GFX_FILTER_POINT);
     dst->backendData = t;
 }
 
