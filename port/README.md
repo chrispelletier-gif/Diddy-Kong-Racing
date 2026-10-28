@@ -180,14 +180,18 @@ Settings menu (until it has been set there, `DKR_AA=0` in `sdmc:/3ds/dkr/env.txt
 Mipmaps (on by default) stop distant track textures from shimmering: every texture that is opaque or repeats both
 ways (ground, walls, cliffs, water) also gets smaller, pre-filtered copies when it is loaded, and the GPU reads the one that
 fits the distance. That takes a third more memory for those textures. Clamped textures with transparency (shadows,
-start lines, track borders) and point sampled ones (text) are left as they were.
+start lines, track borders) and point sampled ones (text) are left as they were. Textures clamped on both axes, which
+are drawn once rather than repeated (the signs with track names, door numbers, banners, faces), switch to each smaller
+copy one step later, so their writing stays readable; `DKR_MIP_SIGN_BIAS` in `env.txt` changes how many steps (0 as
+before, -1 the default, -2 sharper still).
 
 Colour boost (off by default) makes colours more saturated, as the 3DS screen looks washed out next to a CRT. It is
 done in the GPU's colour combiner for every draw, so it costs no time; greys, black and white stay as they were.
 High is c + 0.5 (c - grey), Medium 0.3 and Low 0.15.
 
 The host build can preview both: `DKR_MIPMAP=1` and `DKR_COLOUR=1` to `3` (both off by default there, so frames stay
-comparable between commits).
+comparable between commits). It picks mipmaps as the 3DS does without anti-aliasing; `DKR_MIP_AA=1` picks them as with
+it, and `DKR_MIP_SIGN_BIAS` works there too.
 
 The Settings menu's Screen page has the top screen's modes, all on by default:
 - Widescreen fills the 400 pixel wide screen instead of a 4:3 picture in the middle. The game's camera sees more at

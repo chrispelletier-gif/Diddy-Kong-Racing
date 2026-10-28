@@ -30,6 +30,7 @@ static uint32_t sWinQ[MAX_W * H], sWinF[MAX_W * H]; // The opaque triangle each 
 static uint32_t sTriId;
 static volatile int sFramesRendered;
 static int sMipmaps = -1, sColour = -1; // DKR_MIPMAP, DKR_COLOUR: see read_upgrade_settings
+static float sSignBias = -1.0f, sAaBias;  // DKR_MIP_SIGN_BIAS, DKR_MIP_AA: see read_upgrade_settings
 static int sDumpEvery = -1;
 static const char *sDumpDir;
 
@@ -240,7 +241,9 @@ void gfxb_texture_upload(GfxTexture *tex) {
 /*
  * Mipmaps and the colour boost of the 3DS renderer (roadmap items G1 and G2), for previewing them: DKR_MIPMAP=1 and
  * DKR_COLOUR=1 to 3. Both are off by default, so frames stay comparable with the N64 and with earlier commits. The
- * level is picked as the 3DS GPU does without anti-aliasing (with it, the GPU uses one level sharper).
+ * level is picked as the 3DS GPU does without anti-aliasing (with it, the GPU uses one level sharper: DKR_MIP_AA=1
+ * does the same here). DKR_MIP_SIGN_BIAS sets the bias of textures clamped both ways, as on the 3DS
+ * (gfx_mip_lod_bias).
  */
 #define MAX_MIP_LEVELS 8
 
@@ -257,6 +260,10 @@ static void read_upgrade_settings(void) {
         env = getenv("DKR_COLOUR");
         sColour = env != NULL ? atoi(env) : 0;
         sColour = sColour < 0 ? 0 : sColour > 3 ? 3 : sColour;
+        env = getenv("DKR_MIP_SIGN_BIAS");
+        sSignBias = env != NULL ? (float) atof(env) : -1.0f;
+        env = getenv("DKR_MIP_AA");
+        sAaBias = (env != NULL && atoi(env) != 0) ? -1.0f : 0.0f;
     }
 }
 
@@ -376,7 +383,10 @@ static void sample(const GfxTexture *tex, float u, float v, float dudx, float dv
     x = sqrtf(dudx * dudx * tex->width * tex->width + dvdx * dvdx * tex->height * tex->height);
     y = sqrtf(dudy * dudy * tex->width * tex->width + dvdy * dvdy * tex->height * tex->height);
     rho = x > y ? x : y;
-    lod = rho > 1.0f ? log2f(rho) : 0.0f;
+    lod = (rho > 0.0f ? log2f(rho) : 0.0f) + gfx_mip_lod_bias(tex, sSignBias) + sAaBias;
+    if (lod < 0.0f) {
+        lod = 0.0f;
+    }
     if (lod >= m->levels) {
         lod = m->levels;
     }

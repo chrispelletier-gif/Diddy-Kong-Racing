@@ -246,6 +246,18 @@ static inline int gfx_wants_mipmaps(const GfxTexture *tex) {
 }
 
 /*
+ * The mipmap level bias of a texture that gets mipmaps (G1 follow-up), in levels: negative reads sharper ones. A
+ * texture clamped on both axes is drawn once across its polygon: the signs with track names, door numbers, banners,
+ * faces and eyes. Text there turned to mush with mipmaps, especially at an angle, where the GPU picks the level for
+ * the more squashed direction, and such textures barely shimmer anyway as they don't repeat into the distance. So they
+ * switch to each smaller level `signBias` levels later (the backends' setting, -1 by default); textures that repeat
+ * (ground, walls, water), where shimmer is what mipmaps are for, keep the plain choice.
+ */
+static inline float gfx_mip_lod_bias(const GfxTexture *tex, float signBias) {
+    return (tex->wrapS == GFX_WRAP_CLAMP && tex->wrapT == GFX_WRAP_CLAMP) ? signBias : 0.0f;
+}
+
+/*
  * The next smaller mipmap level (roadmap item G1): each 2x2 block of src (w x h, RGBA8888) averaged into one pixel of
  * dst ((w / 2) x (h / 2), which may be src itself). Colours are weighted by alpha, so the colour hidden under
  * transparent texels (often black) doesn't darken the edges of cutouts such as trees and fences.
