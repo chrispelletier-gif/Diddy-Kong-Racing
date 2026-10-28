@@ -116,6 +116,8 @@ int plat_input_script(int poll, unsigned short *buttons, signed char *stickX, si
 
 /* Lists the entries of a directory into names (maxNames entries of nameSize bytes). Returns the count. */
 int plat_list_dir(const char *dir, char *names, int nameSize, int maxNames);
+/* The same, only the entries whose names start with prefix. */
+int plat_list_dir_prefix(const char *dir, const char *prefix, char *names, int nameSize, int maxNames);
 
 /* NULL terminated list of directories to search for a ROM with any name. */
 const char *const *plat_rom_search_dirs(void);

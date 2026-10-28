@@ -310,15 +310,21 @@ void plat_clear_switch_overrides(void) {
 }
 
 int plat_list_dir(const char *dir, char *names, int nameSize, int maxNames) {
+    return plat_list_dir_prefix(dir, "", names, nameSize, maxNames);
+}
+
+int plat_list_dir_prefix(const char *dir, const char *prefix, char *names, int nameSize, int maxNames) {
     DIR *d = opendir(dir);
     struct dirent *entry;
+    size_t prefixLength = strlen(prefix);
     int count = 0;
 
     if (d == NULL) {
         return 0;
     }
     while (count < maxNames && (entry = readdir(d)) != NULL) {
-        if (entry->d_name[0] == '.' || (int) strlen(entry->d_name) >= nameSize) {
+        if (entry->d_name[0] == '.' || (int) strlen(entry->d_name) >= nameSize ||
+            strncmp(entry->d_name, prefix, prefixLength) != 0) {
             continue;
         }
         strcpy(names + count * nameSize, entry->d_name);
