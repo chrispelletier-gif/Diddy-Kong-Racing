@@ -10,6 +10,7 @@ name: 3DS port
 # Pushing a version tag (vX.Y.Z, or vX.Y.Z-label such as v0.1.0-beta) builds that commit and makes a draft GitHub
 # Release of it with the player's dkr.3dsx and dkr.cia (job release-3ds). Nothing is public until the draft is
 # published on GitHub. The builds take their version from the newest such tag (port/Makefile).
+# Without git, the tag can be made from the website with the "Tag a 3DS release" workflow (Tag.yml).
 
 on:
   push:
@@ -212,7 +213,9 @@ jobs:
   release-3ds:
     name: Release the 3DS build
     needs: build-3ds
-    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    # Tag.yml starts this workflow on a tag it made (workflow_dispatch), since its push doesn't.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' &&
+      startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: write

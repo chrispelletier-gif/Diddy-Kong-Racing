@@ -1,0 +1,54 @@
+name: Tag a 3DS release
+
+# Makes a version tag from the GitHub website (Actions > Tag a 3DS release > Run workflow), for when there is no
+# computer with git to hand. It tags the chosen commit (master by default) and then starts the 3DS port workflow on
+# that tag, which builds it and makes the draft GitHub Release (job release-3ds in Port.yml). A tag pushed with the
+# workflow's own token does not start other workflows by itself, hence the explicit start.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag, vX.Y.Z or vX.Y.Z-label (for example v0.1.0-alpha)
+        required: true
+      commit:
+        description: Commit to tag (empty for the newest master)
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    name: Tag and start the release build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Make the tag
+        env:
+          TAG: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::$TAG is not a version tag (vX.Y.Z or vX.Y.Z-label)."
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::$TAG already exists; pick a new version."
+            exit 1
+          fi
+          sha=$(git rev-parse --verify "${COMMIT:-HEAD}^{commit}")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Diddy Kong Racing 3DS ${TAG#v}" "$sha"
+          git push origin "refs/tags/$TAG"
+          gh workflow run Port.yml --ref "$TAG"
+          echo "Tagged $sha as $TAG and started the 3DS port workflow on it." >> "$GITHUB_STEP_SUMMARY"
