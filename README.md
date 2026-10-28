@@ -4,8 +4,8 @@ An unofficial, native Nintendo 3DS version of Diddy Kong Racing, built from the 
 game. It isn't an emulator: the game's own code runs on the 3DS, drawn by the 3DS GPU, with widescreen, stereo 3D and
 a race HUD on the bottom screen.
 
-**This is an early release (v0.1 alpha / release candidate).** It plays well on a New 3DS, but not every part of
-Adventure mode has been played through yet. Please report what you find (see [Reporting a problem](#reporting-a-problem)).
+**This is an early alpha (v0.1) and still a work in progress.** It plays well on a New 3DS, but not every part of
+Adventure mode has been played through yet, and it hasn't been tried on an original 3DS or 2DS. Please report what you find (see [Reporting a problem](#reporting-a-problem)).
 
 **No game files are included.** You need your own copy of the game: the port reads everything (models, textures,
 music, text) from your ROM when it starts.
@@ -13,7 +13,8 @@ music, text) from your ROM when it starts.
 ## What you need
 
 - **A New Nintendo 3DS, New 3DS XL or New 2DS XL** with homebrew (the Homebrew Launcher, or custom firmware for the
-  .cia). The older 3DS, 3DS XL and 2DS models aren't supported yet.
+  .cia). The original 3DS, 3DS XL and 2DS haven't been tested yet: they have a slower processor and less memory,
+  so the game may run slowly or not start. If you try one, please say how it went in an issue.
 - **A Diddy Kong Racing ROM, US version 1.0** (SHA1 `0cb115d8716dbbc2922fda38e533b9fe63bb9670`). `.z64`, `.n64` and
   `.v64` files all work. Other versions (US 1.1, PAL, Japan) will be supported in a later release; the game tells you
   if your ROM is a different version.
@@ -84,7 +85,7 @@ The game is one player only: a 3DS has one set of controls.
 ## Known issues
 
 - Only the US 1.0 ROM works for now.
-- New 3DS models only for now.
+- Not yet tested on the original 3DS, 3DS XL or 2DS.
 - Boss and Taj portraits need the optional files above.
 
 ## Reporting a problem
