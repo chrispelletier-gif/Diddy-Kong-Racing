@@ -4064,8 +4064,15 @@ void hud_element_render(Gfx **dList, Mtx **mtx, Vertex **vtxList, HudElement *hu
             sp48.drawTexture.xOffset = 0;
             sp48.drawTexture.yOffset = 0;
             sp48.unk8 = 0;
+#ifdef TARGET_PORT
+            // Port: a scaled element (the position number while it grows) may start left of the N64 screen when the
+            // HUD sits at the wide screen's edges; it would be cut off at x = 0 without TEXRECT_PORT_WIDE.
+            texrect_draw_scaled(&gHudDL, &sp48.drawTexture, hud->pos.x, hud->pos.y, hud->scale, hud->scale, gHudColour,
+                                TEXRECT_POINT | TEXRECT_PORT_WIDE);
+#else
             texrect_draw_scaled(&gHudDL, &sp48.drawTexture, hud->pos.x, hud->pos.y, hud->scale, hud->scale, gHudColour,
                                 TEXRECT_POINT);
+#endif
             rendermode_reset(&gHudDL);
         }
     } else if (gAssetHudElementIds[spriteID] & ASSET_MASK_SPRITE) {
