@@ -26,10 +26,18 @@
 #define SENSITIVITY_MIN 100
 #define SENSITIVITY_MAX 150
 #define SENSITIVITY_STEP 10
+/* Tilt steering: Off, On, or On with the direction reversed; full lock at this many degrees of tilt. */
+enum { TILT_OFF, TILT_ON, TILT_INVERTED, TILT_COUNT };
+#define TILT_RANGE_MIN 10
+#define TILT_RANGE_MAX 45
+#define TILT_RANGE_STEP 5
+#define TILT_RANGE_DEFAULT 25
+#define TILT_DEADZONE 2.0f // Degrees either side of the centre that steer straight on.
 
 enum { CURVE_LINEAR, CURVE_SOFT, CURVE_SOFTER, CURVE_QUICK, CURVE_COUNT };
 
 static const char *const sCurveNames[CURVE_COUNT] = { "Linear", "Soft", "Softer", "Quick" };
+static const char *const sTiltNames[TILT_COUNT] = { "Off", "On", "Reversed" };
 
 /* What a console button can press. */
 typedef struct Action {
@@ -80,6 +88,8 @@ static struct {
     int deadzone;    // Percent of the stick's range.
     int sensitivity; // Percent: at 150 the stick gives full lock at two thirds of its travel.
     int curve;
+    int tilt;      // TILT_*
+    int tiltRange; // Degrees of tilt for full lock.
 } sSettings;
 
 static int sLoaded;
@@ -94,6 +104,8 @@ enum {
     OPT_DEADZONE = OPT_KEY_FIRST + CTRL_KEY_COUNT,
     OPT_SENSITIVITY,
     OPT_CURVE,
+    OPT_TILT,
+    OPT_TILT_RANGE,
     OPT_RESET,
     OPT_COUNT
 };
@@ -111,6 +123,8 @@ static void set_defaults(void) {
     sSettings.deadzone = DEADZONE_DEFAULT;
     sSettings.sensitivity = SENSITIVITY_MIN;
     sSettings.curve = CURVE_LINEAR;
+    sSettings.tilt = TILT_OFF;
+    sSettings.tiltRange = TILT_RANGE_DEFAULT;
 }
 
 static int clamp(int v, int lo, int hi) {
@@ -157,6 +171,10 @@ static void parse_line(const char *line) {
         sSettings.sensitivity = clamp(atoi(value), SENSITIVITY_MIN, SENSITIVITY_MAX);
     } else if (strcmp(name, "curve") == 0) {
         sSettings.curve = clamp(atoi(value), 0, CURVE_COUNT - 1);
+    } else if (strcmp(name, "tilt") == 0) {
+        sSettings.tilt = clamp(atoi(value), 0, TILT_COUNT - 1);
+    } else if (strcmp(name, "tilt_range") == 0) {
+        sSettings.tiltRange = clamp(atoi(value), TILT_RANGE_MIN, TILT_RANGE_MAX);
     } else if (strncmp(name, "map.", 4) == 0) {
         for (i = 0; i < CTRL_KEY_COUNT; i++) {
             if (strcmp(name + 4, sKeyNames[i]) == 0) {
@@ -176,8 +194,10 @@ static void save(void) {
     char text[512];
     int length, i;
 
-    length = plat_snprintf(text, sizeof(text), "version=%d\ndeadzone=%d\nsensitivity=%d\ncurve=%d\n", CONTROLS_VERSION,
-                           sSettings.deadzone, sSettings.sensitivity, sSettings.curve);
+    length =
+        plat_snprintf(text, sizeof(text), "version=%d\ndeadzone=%d\nsensitivity=%d\ncurve=%d\ntilt=%d\ntilt_range=%d\n",
+                      CONTROLS_VERSION, sSettings.deadzone, sSettings.sensitivity, sSettings.curve, sSettings.tilt,
+                      sSettings.tiltRange);
     for (i = 0; i < CTRL_KEY_COUNT && length < (int) sizeof(text); i++) {
         length += plat_snprintf(text + length, sizeof(text) - length, "map.%s=%s\n", sKeyNames[i],
                                 sActions[action_index(sSettings.map[i])].name);
@@ -218,8 +238,10 @@ void controls_init(void) {
         sSettings.map[CTRL_KEY_ZL] = CTRL_N64_LOOK_BACK;
     }
     sLoaded = 1;
-    plat_log("controls: deadzone %d%%, sensitivity %d%%, %s, layout %s", sSettings.deadzone, sSettings.sensitivity,
-             sCurveNames[sSettings.curve], current_layout() >= 0 ? sLayouts[current_layout()].label : "custom");
+    plat_log("controls: deadzone %d%%, sensitivity %d%%, %s, layout %s, tilt %s (%d degrees)", sSettings.deadzone,
+             sSettings.sensitivity, sCurveNames[sSettings.curve],
+             current_layout() >= 0 ? sLayouts[current_layout()].label : "custom", sTiltNames[sSettings.tilt],
+             sSettings.tiltRange);
 }
 
 unsigned short controls_map_buttons(unsigned int heldKeys) {
@@ -274,6 +296,29 @@ void controls_map_stick(int rawX, int rawY, int fullRange, signed char *outX, si
     *outY = (signed char) y;
 }
 
+int controls_tilt_enabled(void) {
+    return sSettings.tilt != TILT_OFF;
+}
+
+void controls_apply_tilt(float roll, signed char *outX) {
+    float t;
+    int x;
+    if (sSettings.tilt == TILT_OFF) {
+        return;
+    }
+    if (sSettings.tilt == TILT_INVERTED) {
+        roll = -roll;
+    }
+    if (roll > -TILT_DEADZONE && roll < TILT_DEADZONE) {
+        return;
+    }
+    // Linear past the small deadzone, reaching the N64 stick's edge at the range; added to the stick's own steering.
+    t = (roll - (roll > 0.0f ? TILT_DEADZONE : -TILT_DEADZONE)) / (sSettings.tiltRange - TILT_DEADZONE);
+    x = clamp(*outX + (int) lrintf(t * STICK_EDGE), -STICK_MAX, STICK_MAX);
+    sLastOut[0] = x;
+    *outX = (signed char) x;
+}
+
 void controls_last_stick(int *rawX, int *rawY, int *outX, int *outY) {
     *rawX = sLastRaw[0];
     *rawY = sLastRaw[1];
@@ -296,14 +341,27 @@ void controls_keys_for(unsigned short actions, char *out, int size) {
     }
 }
 
+/* Tilt steering needs the 3DS's accelerometer: elsewhere its two rows are left out of the list. */
+#ifdef __3DS__
+#define TILT_ROWS 0
+#else
+#define TILT_ROWS 2
+#endif
+
+/* The option (OPT_*) the list's row index stands for. */
+static int option_at(int index) {
+    return index >= OPT_TILT ? index + TILT_ROWS : index;
+}
+
 int controls_option_count(void) {
-    return OPT_COUNT;
+    return OPT_COUNT - TILT_ROWS;
 }
 
 const char *controls_option_label(int index) {
     static const char *const sKeyLabels[CTRL_KEY_COUNT] = { "A button",  "B button",  "X button",
                                                             "Y button",  "L button",  "R button",
                                                             "ZL button", "ZR button", "SELECT button" };
+    index = option_at(index);
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
         return sKeyLabels[index - OPT_KEY_FIRST];
     }
@@ -316,6 +374,10 @@ const char *controls_option_label(int index) {
             return "Stick sensitivity";
         case OPT_CURVE:
             return "Stick response";
+        case OPT_TILT:
+            return "Tilt steering";
+        case OPT_TILT_RANGE:
+            return "Tilt for full lock";
         case OPT_RESET:
             return "Reset controls";
         default:
@@ -326,6 +388,7 @@ const char *controls_option_label(int index) {
 void controls_option_value(int index, char *out, int size) {
     int layout;
     controls_init();
+    index = option_at(index);
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
         plat_snprintf(out, size, "%s", sActions[action_index(sSettings.map[index - OPT_KEY_FIRST])].label);
         return;
@@ -343,6 +406,12 @@ void controls_option_value(int index, char *out, int size) {
             break;
         case OPT_CURVE:
             plat_snprintf(out, size, "%s", sCurveNames[sSettings.curve]);
+            break;
+        case OPT_TILT:
+            plat_snprintf(out, size, "%s", sTiltNames[sSettings.tilt]);
+            break;
+        case OPT_TILT_RANGE:
+            plat_snprintf(out, size, "%d degrees", sSettings.tiltRange);
             break;
         case OPT_RESET:
             // An action row: no value.
@@ -381,6 +450,7 @@ void controls_option_change(int index, int step) {
         plat_sleep_ns(1000 * 1000);
     }
     step = step < 0 ? -1 : 1;
+    index = option_at(index);
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
         unsigned short *slot = &sSettings.map[index - OPT_KEY_FIRST];
         *slot = sActions[wrap_step(action_index(*slot), step, 0, ACTION_COUNT - 1, 1)].n64;
@@ -402,6 +472,13 @@ void controls_option_change(int index, int step) {
                 break;
             case OPT_CURVE:
                 sSettings.curve = wrap_step(sSettings.curve, step, 0, CURVE_COUNT - 1, 1);
+                break;
+            case OPT_TILT:
+                sSettings.tilt = wrap_step(sSettings.tilt, step, 0, TILT_COUNT - 1, 1);
+                break;
+            case OPT_TILT_RANGE:
+                sSettings.tiltRange =
+                    wrap_step(sSettings.tiltRange, step, TILT_RANGE_MIN, TILT_RANGE_MAX, TILT_RANGE_STEP);
                 break;
             case OPT_RESET:
                 set_defaults();

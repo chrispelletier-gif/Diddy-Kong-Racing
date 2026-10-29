@@ -33,6 +33,8 @@ void plat_3ds_set_colour_setting(int level);
 int plat_3ds_colour_setting(void);
 void plat_3ds_set_screen_setting(int which, int on);
 int plat_3ds_screen_setting(int which);
+int plat_3ds_stereo_tuning(int which);
+void plat_3ds_step_stereo_tuning(int which, int step);
 int plat_3ds_wide800_supported(void);
 void plat_3ds_set_guard_band_setting(int on);
 int plat_3ds_guard_band_setting(void);
@@ -308,18 +310,23 @@ static void tools_change(int i, int step) {
 
 static const MenuPage sToolsPage = { "Tools", tools_count, tools_label, tools_value, tools_change, tools_hint, NULL };
 
-/* The top screen (roadmap phase 6, gfx_c3d.c): widescreen, the 800 pixel mode and stereo 3D, each on or off, where
- * widescreen puts the race HUD (plat_hud_edges), and edge trimming (the guard band clip, a test toggle for the blue
- * patches in widescreen, issue #147, which a player's build leaves out). As on the main page, the screen_row_* functions
- * number every row. */
-enum { SCREEN_HUD = 3, SCREEN_GUARD_BAND = 4, SCREEN_ROWS = 5 };
+/* The top screen (roadmap phase 6, gfx_c3d.c): widescreen, the 800 pixel mode and stereo 3D, each on or off, the 3D
+ * tuning (G5a-G5e: depth, convergence, HUD depth, auto convergence and its comfort target, in gfx_c3d.c's order),
+ * where widescreen puts the race HUD (plat_hud_edges), and edge trimming (the guard band clip, a test toggle for the
+ * blue patches in widescreen, issue #147, which a player's build leaves out). As on the main page, the screen_row_*
+ * functions number every row. */
+enum { SCREEN_STEREO_FIRST = 3, SCREEN_HUD = 8, SCREEN_GUARD_BAND = 9, SCREEN_ROWS = 10 };
+#define SCREEN_STEREO_ROW(i) ((i) >= SCREEN_STEREO_FIRST && (i) < SCREEN_HUD)
 
 static int screen_hidden(int row) {
     return !PLAT_DEBUG_TOOLS && row == SCREEN_GUARD_BAND;
 }
 
 static const char *screen_row_label(int i) {
-    static const char *const sLabels[5] = { "Widescreen", "800 pixels", "Stereo 3D", "HUD", "Edge trimming" };
+    static const char *const sLabels[SCREEN_ROWS] = { "Widescreen",       "800 pixels",     "Stereo 3D",
+                                                      "3D depth",         "3D convergence", "3D HUD depth",
+                                                      "Auto convergence", "Comfort target", "HUD",
+                                                      "Edge trimming" };
     return sLabels[i];
 }
 
@@ -328,6 +335,15 @@ static const char *const sWideStyles[4] = { "Off", "Wide", "Balanced", "Zoomed" 
 static void screen_row_value(int i, char *out, int size) {
     if (i == 0) {
         snprintf(out, size, "%s", sWideStyles[plat_3ds_screen_setting(0)]);
+    } else if (SCREEN_STEREO_ROW(i)) {
+        int which = i - SCREEN_STEREO_FIRST, v = plat_3ds_stereo_tuning(which);
+        if (which == 2) {
+            snprintf(out, size, v == 0 ? "On screen" : v > 0 ? "%d out" : "%d in", v > 0 ? v : -v);
+        } else if (which == 3) {
+            snprintf(out, size, "%s", v ? "On" : "Off");
+        } else {
+            snprintf(out, size, "%d%%", v);
+        }
     } else if (i == SCREEN_HUD) {
         snprintf(out, size, "%s", plat_hud_edges() ? "Screen edges" : "4:3");
     } else if (i == SCREEN_GUARD_BAND) {
@@ -344,6 +360,12 @@ static const char *screen_row_hint(int i) {
         return sHints[plat_3ds_screen_setting(0)];
     } else if (i == 1) {
         return plat_3ds_wide800_supported() ? "Sharper picture while 3D is off" : "Not on this console (2DS)";
+    } else if (SCREEN_STEREO_ROW(i)) {
+        static const char *const sStereoHints[5] = {
+            "How deep the 3D looks", "Higher: the kart comes out of the screen", "Where the HUD and text sit in 3D",
+            "Keeps close things from popping out", "How far auto convergence lets things out"
+        };
+        return sStereoHints[i - SCREEN_STEREO_FIRST];
     } else if (i == SCREEN_HUD) {
         return plat_hud_edges() ? "Widescreen HUD out at the sides" : "Widescreen HUD in the 4:3 middle";
     } else if (i == SCREEN_GUARD_BAND) {
@@ -355,6 +377,8 @@ static const char *screen_row_hint(int i) {
 static void screen_row_change(int i, int step) {
     if (i == 0) {
         plat_3ds_set_screen_setting(0, (plat_3ds_screen_setting(0) + step + 4) % 4);
+    } else if (SCREEN_STEREO_ROW(i)) {
+        plat_3ds_step_stereo_tuning(i - SCREEN_STEREO_FIRST, step);
     } else if (i == SCREEN_HUD) {
         plat_set_hud_edges(!plat_hud_edges());
     } else if (i == SCREEN_GUARD_BAND) {

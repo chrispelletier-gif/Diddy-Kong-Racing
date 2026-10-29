@@ -180,7 +180,7 @@ extern volatile int gPlatSnapshotSaved;
 /* What the player's kart is doing (lap, boost, item, ...), set by the game thread each frame (port_autorun.c) for bug
  * reports to show next to the renderer's frame timing. Kept as raw numbers; only a bug report formats them. */
 typedef struct PlatGameNote {
-    short racing, lap, checkpoint, bananas, boost, itemType, itemCount, shield, magnet, hit;
+    short racing, lap, checkpoint, bananas, boost, itemType, itemCount, shield, magnet, hit, paused;
 } PlatGameNote;
 void plat_set_game_note(const PlatGameNote *note);
 /* Copies the latest note from another thread. Returns 0 (and leaves out alone) if the game thread was halfway through

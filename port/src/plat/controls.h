@@ -57,6 +57,14 @@ unsigned short controls_map_buttons(unsigned int heldKeys);
  */
 void controls_map_stick(int rawX, int rawY, int fullRange, signed char *outX, signed char *outY);
 
+/*
+ * Tilt steering (roadmap O4b): whether it is on, and adding a tilt of the console (degrees of roll from where it was
+ * held when the race started, positive to the right) to the N64 stick's x. The platform reads the tilt; the setting
+ * decides the direction and how far a tilt goes.
+ */
+int controls_tilt_enabled(void);
+void controls_apply_tilt(float roll, signed char *outX);
+
 /* The last stick position mapped, raw and converted, for a live readout in the settings menu. */
 void controls_last_stick(int *rawX, int *rawY, int *outX, int *outY);
 
