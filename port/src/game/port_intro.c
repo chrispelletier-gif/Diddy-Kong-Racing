@@ -26,33 +26,45 @@ void port_set_skip_intro(s32 on) {
     settings_set("skipintro", sSkipIntro);
 }
 
-/* The Start-up page of the Settings menu (menu_3ds_add_page on the 3DS) and its row on the game's Options menu. */
+/*
+ * The Start-up page of the Settings menu (menu_3ds_add_page on the 3DS) and its rows (the intro logos row is also on the game's Options menu): the intro
+ * logos, and the first-run setup (port_setup.c), which can be asked for again at the next start.
+ */
 int intro_option_count(void) {
-    return 1;
+    return 2;
 }
 
 const char *intro_option_label(int index) {
-    (void) index;
-    return "Intro logos";
+    return index == 0 ? "Intro logos" : "First-run setup";
 }
 
 void intro_option_value(int index, char *out, int size) {
-    (void) index;
-    plat_snprintf(out, size, "%s", port_skip_intro() ? "Skip" : "Show");
+    if (index == 0) {
+        plat_snprintf(out, size, "%s", port_skip_intro() ? "Skip" : "Show");
+    } else {
+        plat_snprintf(out, size, "%s", port_setup_done() ? "Done" : "Next start");
+    }
 }
 
 void intro_option_change(int index, int step) {
-    (void) index;
     (void) step;
-    port_set_skip_intro(!port_skip_intro());
+    if (index == 0) {
+        port_set_skip_intro(!port_skip_intro());
+    } else if (port_setup_done()) {
+        port_setup_reset();
+    } else {
+        settings_set("setup", 1);
+    }
 }
 
 const char *intro_option_hint(int index) {
-    (void) index;
+    if (index == 1) {
+        return port_setup_done() ? "Language, play style and picture again" : "Shows at the title screen next start";
+    }
     return port_skip_intro() ? "Start at the title screen" : "A, B or START skips them";
 }
 
-/* Only the Options menu shows it: it is used at the next start. */
+/* Only the Options menu shows them: they are used at the next start. */
 int intro_option_in_race(int index) {
     (void) index;
     return 0;

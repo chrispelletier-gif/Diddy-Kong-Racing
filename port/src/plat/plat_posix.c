@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "plat.h"
 #include "race_hud.h"
+#include "setup_screen.h"
 
 #include <pthread.h>
 #include <semaphore.h>
@@ -61,6 +62,7 @@ void host_bottom_preview(const char *dir);
 
 void host_bottom_race_start(void);
 void host_bottom_race(const char *dir, const RaceHud *hud);
+void host_bottom_setup(const char *dir, const SetupScreen *screen);
 
 /*
  * DKR_BOTTOM_PREVIEW=dir: draws the 3DS bottom screen's views to PNG files in dir, then exits.
@@ -91,6 +93,57 @@ void plat_set_race_hud(const RaceHud *hud) {
     if (dir != NULL && hud != NULL) {
         host_bottom_race(dir, hud);
     }
+}
+
+/*
+ * The first-run setup (port_setup.c): only for DKR_SETUP=1, so that tests never meet it; DKR_SETUP_FRENCH=1 starts it
+ * in French, as a French 3DS would. DKR_SETUP_SHOTS=dir draws its pages to PNG files.
+ */
+int plat_first_run_setup(void) {
+    return getenv("DKR_SETUP") != NULL && atoi(getenv("DKR_SETUP")) != 0;
+}
+
+int plat_system_french(void) {
+    return getenv("DKR_SETUP_FRENCH") != NULL && atoi(getenv("DKR_SETUP_FRENCH")) != 0;
+}
+
+int plat_can_60fps(void) {
+    return getenv("DKR_SETUP_OLD_3DS") == NULL;
+}
+
+void plat_set_setup_screen(const SetupScreen *screen) {
+    const char *dir = getenv("DKR_SETUP_SHOTS");
+    if (dir != NULL) {
+        host_bottom_setup(dir, screen);
+    }
+}
+
+int plat_take_setup_tap(void) {
+    return SETUP_HIT_NONE;
+}
+
+int plat_picture_style(void) {
+    return plat_60fps_setting();
+}
+
+void plat_set_picture_style(int smooth) {
+    plat_set_60fps_setting(smooth);
+    plat_set_gpu_config(smooth ? PLAT_AA_OFF : PLAT_AA_4X, -1);
+}
+
+/* The PC build's picture keeps DKR_WIDESCREEN's style; the setup's choice is only kept. */
+static int sWidescreenStyle = -1;
+
+int plat_widescreen_style(void) {
+    if (sWidescreenStyle < 0) {
+        const char *env = getenv("DKR_WIDESCREEN");
+        sWidescreenStyle = env != NULL ? atoi(env) : 2;
+    }
+    return sWidescreenStyle;
+}
+
+void plat_set_widescreen_style(int style) {
+    sWidescreenStyle = style;
 }
 
 /* No bug reports on the host: the results summary goes to the log instead. */

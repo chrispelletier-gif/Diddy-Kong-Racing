@@ -246,6 +246,17 @@ void port_set_skip_intro(s32 on);
  */
 const char *port_text(const char *english);
 
+ * The first-run setup (port/src/game/port_setup.c): language, then a play style or a page each for the picture, the
+ * screen shape, the camera and the race HUD, on the bottom screen the first time the title screen shows (setup= in
+ * settings.txt; on PC only for DKR_SETUP=1). src/menu.c keeps START and OPTIONS back while it shows, gives it the
+ * title screen's input and draws its box (port_setup_caption) under the logo.
+ */
+s32 port_setup_active(void);
+void port_setup_update(u32 buttons, s32 stickX, s32 stickY);
+s32 port_setup_caption(const char **name, const char **tag, const char **about);
+s32 port_setup_done(void);
+void port_setup_reset(void);
+
 /*
  * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c, roadmap G9): port_race_hud_frame copies the
  * race's state for the bottom screen once a frame; port_race_hud_map takes the track map's sprite from minimap_init;

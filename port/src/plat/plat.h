@@ -297,6 +297,21 @@ int plat_gpu_maths_setting(void);
 void plat_set_gpu_maths_setting(int level);
 int plat_stereo_once_setting(void);
 void plat_set_stereo_once_setting(int on);
+
+/*
+ * The first-run setup (port/src/game/port_setup.c). Whether this platform shows it (the 3DS; the PC build only for
+ * DKR_SETUP=1); whether the console's own language is French; whether 60 fps can be had (not on an Old 3DS).
+ */
+int plat_first_run_setup(void);
+int plat_system_french(void);
+int plat_can_60fps(void);
+/* The picture: 0 sharp (30 fps, 4x anti-aliasing), 1 smooth (60 fps, no anti-aliasing). Saved, used from the next
+ * frame. */
+int plat_picture_style(void);
+void plat_set_picture_style(int smooth);
+/* The widescreen setting: 0 off (4:3), 1 Wide, 2 Balanced, 3 Zoomed. Saved, used from the next frame. */
+int plat_widescreen_style(void);
+void plat_set_widescreen_style(int style);
 /* What the renderer thread is doing right now. */
 extern const char *volatile gPlatGfxStage;
 

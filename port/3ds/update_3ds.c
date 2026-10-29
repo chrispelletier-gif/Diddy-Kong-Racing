@@ -713,9 +713,14 @@ static int install(Channel *channel) {
 }
 #endif
 
+int plat_3ds_setup_touch(int x, int y);
+
 /* The touch screen, from the game's controller polling (input_3ds.c). Returns nonzero if the touch was a button. */
 int update_3ds_touch(int x, int y) {
     int button, count = sButtonCount, cell = count > 1 ? 40 / count : 40;
+    if (plat_3ds_setup_touch(x, y)) {
+        return 1; // The first-run setup's tiles and buttons take every tap while they show.
+    }
     if (!sStarted || y >= BUTTON_BOTTOM) {
         return 0;
     }

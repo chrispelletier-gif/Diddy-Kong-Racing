@@ -406,3 +406,19 @@ void host_bottom_race(const char *dir, const RaceHud *hud) {
     snprintf(name, sizeof(name), "race_%04d", sRaceFrames / 60);
     save(dir, name);
 }
+
+/* DKR_SETUP_SHOTS=dir: each page of the first-run setup (port_setup.c) as it changes, as setup_NNN.png. */
+void host_bottom_setup(const char *dir, const SetupScreen *screen) {
+    static int sStarted, sShots;
+    char name[32];
+    if (!sStarted) {
+        sStarted = 1;
+        bs_init(NULL);
+        bs_load_assets();
+    }
+    bs_set_setup(screen);
+    if (screen != NULL) {
+        snprintf(name, sizeof(name), "setup_%03d", sShots++);
+        save(dir, name);
+    }
+}

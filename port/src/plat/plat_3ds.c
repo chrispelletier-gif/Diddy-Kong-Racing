@@ -1,6 +1,7 @@
 /* Nintendo 3DS (libctru) implementation of the platform layer. */
 #include "plat.h"
 #include "bottom_screen.h"
+#include "setup_screen.h"
 #include "settings.h"
 
 #include <3ds.h>
@@ -47,6 +48,7 @@ static int sRcpCore;
 static int sAudioCore;
 static int sSyscoreShare; // The system core's share lent to the renderer (percent), when it runs there.
 static LightLock sConsoleLock;
+static int sNew3DS;
 
 static void watchdog_start(void);
 
@@ -76,6 +78,7 @@ void plat_init(void) {
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
     // DKR_SINGLE_CORE=1 keeps everything on the application core, as on an Old 3DS.
     APT_CheckNew3DS(&isNew3DS);
+    sNew3DS = isNew3DS;
     if (isNew3DS) {
         osSetSpeedupEnable(true);
     }
@@ -793,6 +796,59 @@ void plat_set_race_hud(const RaceHud *hud) {
         sRacing = racing;
         update_3ds_race_changed(sRacing);
     }
+}
+
+/*
+ * The first-run setup (port_setup.c, setup_screen.h): the game thread's pages, drawn over the whole screen, buttons
+ * and all; while they show, every tap goes to them (plat_3ds_setup_touch), and the game thread takes it.
+ */
+static volatile int sSetupShown;
+static volatile int sSetupTap = SETUP_HIT_NONE;
+
+int plat_first_run_setup(void) {
+    return 1;
+}
+
+int plat_system_french(void) {
+    u8 language = CFG_LANGUAGE_EN;
+    if (R_SUCCEEDED(cfguInit())) {
+        CFGU_GetSystemLanguage(&language);
+        cfguExit();
+    }
+    return language == CFG_LANGUAGE_FR;
+}
+
+int plat_can_60fps(void) {
+    return sNew3DS;
+}
+
+void plat_set_setup_screen(const SetupScreen *screen) {
+    LightLock_Lock(&sConsoleLock);
+    bs_set_setup(screen);
+    sSetupShown = screen != NULL;
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+}
+
+int plat_take_setup_tap(void) {
+    int tap = sSetupTap;
+    sSetupTap = SETUP_HIT_NONE;
+    return tap;
+}
+
+/* A touch (update_3ds_touch): nonzero if the setup is showing, which takes it. */
+int plat_3ds_setup_touch(int x, int y) {
+    int hit;
+    if (!sSetupShown) {
+        return 0;
+    }
+    LightLock_Lock(&sConsoleLock);
+    hit = bs_setup_hit(x, y);
+    LightLock_Unlock(&sConsoleLock);
+    if (hit != SETUP_HIT_NONE) {
+        sSetupTap = hit;
+    }
+    return 1;
 }
 
 /* The profiler's readout, under the messages. */

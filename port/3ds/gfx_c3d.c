@@ -905,6 +905,24 @@ int plat_3ds_screen_setting(int which) {
     return which == 0 ? sWideSetting : which == 1 ? s800Setting : which == 2 ? sStereoSetting : 0;
 }
 
+/* The first-run setup's picture choice (port_setup.c): sharp is 30 fps with 4x anti-aliasing, smooth 60 fps without. */
+int plat_picture_style(void) {
+    return plat_60fps_setting();
+}
+
+void plat_set_picture_style(int smooth) {
+    plat_set_60fps_setting(smooth);
+    plat_3ds_set_antialias_setting(smooth ? PLAT_AA_OFF : PLAT_AA_4X);
+}
+
+int plat_widescreen_style(void) {
+    return sWideSetting;
+}
+
+void plat_set_widescreen_style(int style) {
+    plat_3ds_set_screen_setting(0, style);
+}
+
 /* Whether the 800 pixel mode can be shown (not on an original 2DS). */
 int plat_3ds_wide800_supported(void) {
     return !sWideUnsupported;

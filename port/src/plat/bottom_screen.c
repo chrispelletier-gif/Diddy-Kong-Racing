@@ -14,6 +14,7 @@
 #include <math.h>
 
 #include "bottom_screen.h"
+#include "setup_screen.h"
 #include "plat.h"
 #include "controls.h"
 #include "../../../include/asset_enums.h"
@@ -340,6 +341,7 @@ static void load_logo(void) {
 
 static unsigned sChanges;
 static void load_race_art(void);
+static void load_setup_art(void);
 
 void bs_load_assets(void) {
     static const int sFontAssets[3] = { ASSET_FONTS_SMALLFONT, ASSET_FONTS_BIGFONT, ASSET_FONTS_FUNFONT };
@@ -361,6 +363,7 @@ void bs_load_assets(void) {
     load_texture(ASSET_TEX2D_MENU_LABELOFFOPTIONNONSELECTED, &sOnOff[1][0]);
     load_texture(ASSET_TEX2D_MENU_LABELOFFOPTIONSELECTED, &sOnOff[1][1]);
     load_race_art();
+    load_setup_art();
     sChanges = (1 << BS_AREA_COUNT) - 1;
 }
 
@@ -612,6 +615,8 @@ typedef struct State {
     char status[2][48];
     int raceShown;
     RaceHud race;
+    int setupShown;
+    SetupScreen setup;
 } State;
 
 static State sState, sDrawn;
@@ -656,7 +661,15 @@ void bs_show_menu(const BsMenu *menu) {
 }
 
 int bs_race_hud_covered(void) {
-    return sState.menuShown || sState.overlayLines > 0;
+    return sState.menuShown || sState.overlayLines > 0 || sState.setupShown;
+}
+
+void bs_set_setup(const SetupScreen *setup) {
+    sState.setupShown = setup != NULL;
+    if (setup != NULL) {
+        sState.setup = *setup;
+    }
+    sChanges |= (1 << BS_AREA_TOP) | (1 << BS_AREA_BUTTONS);
 }
 
 void bs_set_buttons(const char *const *labels, int count) {
@@ -991,16 +1004,11 @@ static void draw_menu(const State *s) {
 }
 
 /* Buttons in the style of the game's blue arrows: blue, edged in yellow; grey if they can't be tapped, green if on. */
-static void draw_buttons(const State *s) {
-    int i, count = s->buttonCount, cell = count > 1 ? 40 / count : 40;
+static void draw_button_row(const char (*buttons)[40], int count) {
+    int i, cell = count > 1 ? 40 / count : 40;
 
-    if (count == 0) {
-        box(4, BS_BUTTONS_Y + 2, BS_WIDTH - 4, BS_STATUS_Y - 3, BOX_FILL, BOX_EDGE);
-        text_centred(FONT_SMALL, 8, BS_WIDTH - 8, BS_BUTTONS_Y + 6, s->panelText, YELLOW, 1);
-        return;
-    }
     for (i = 0; i < count; i++) {
-        const char *label = s->buttons[i];
+        const char *label = buttons[i];
         int grey = label[0] == '-', on = label[0] == '+', x0 = (i * cell + 1) * 8, x1 = (i + 1) * cell * 8, y, row;
         Colour top = { 70, 130, 255, 255 }, bottom = { 20, 50, 170, 255 }, edge = { 255, 214, 40, 255 };
         if (count == 1 || x1 > BS_WIDTH - 8) {
@@ -1036,6 +1044,23 @@ static void draw_buttons(const State *s) {
         } else {
             text_centred(FONT_SMALL, x0, x1, BS_BUTTONS_Y + 6, label + (grey || on), grey ? DIM : WHITE, !grey);
         }
+    }
+}
+
+static void draw_buttons(const State *s) {
+    if (s->setupShown) {
+        // The setup's own: Back, the middle one and Next, a gap where one is left out.
+        char labels[3][40];
+        int i;
+        for (i = 0; i < 3; i++) {
+            snprintf(labels[i], sizeof(labels[i]), "%s", s->setup.buttons[i][0] != '\0' ? s->setup.buttons[i] : "-");
+        }
+        draw_button_row(labels, 3);
+    } else if (s->buttonCount == 0) {
+        box(4, BS_BUTTONS_Y + 2, BS_WIDTH - 4, BS_STATUS_Y - 3, BOX_FILL, BOX_EDGE);
+        text_centred(FONT_SMALL, 8, BS_WIDTH - 8, BS_BUTTONS_Y + 6, s->panelText, YELLOW, 1);
+    } else {
+        draw_button_row(s->buttons, s->buttonCount);
     }
 }
 
@@ -2509,6 +2534,378 @@ static void draw_race(const State *s) {
     draw_map_markers(hud);
 }
 
+/******** The first-run setup (setup_screen.h, port_setup.c): its pages of tiles, each with a little picture. ********/
+
+static Picture sSetupFace; /* Diddy's portrait at its own size: the kart in the tiles' pictures. */
+
+static void load_setup_art(void) {
+    load_texture(ASSET_TEX2D_HUD_KRUNCHICON + 9, &sSetupFace); // Diddy's (load_race_art's portrait order).
+}
+
+typedef struct Rect {
+    int x0, y0, x1, y1;
+} Rect;
+
+#define SETUP_TILES_Y 24
+#define SETUP_DOTS_Y 158
+#define SETUP_HELP_Y 186
+
+/* Where tile i of the page is. */
+static Rect setup_tile(const SetupScreen *s, int i) {
+    Rect r;
+    int n = s->tileCount, width;
+    if (s->page == SETUP_PAGE_SCREEN) {
+        // Four, two by two: a picture on the left of each, the words on the right.
+        r.x0 = 8 + (i % 2) * 154;
+        r.y0 = SETUP_TILES_Y + (i / 2) * 66;
+        r.x1 = r.x0 + 150;
+        r.y1 = r.y0 + 62;
+        return r;
+    }
+    width = (BS_WIDTH - 16 - (n - 1) * 6) / n;
+    r.x0 = 8 + i * (width + 6);
+    r.x1 = r.x0 + width;
+    r.y0 = SETUP_TILES_Y;
+    r.y1 = s->page == SETUP_PAGE_STYLE ? 178 : 152;
+    return r;
+}
+
+/* A picture scaled to w by h at x, y (nearest pixel), only inside the clip rectangle, at alpha (255: as it is). */
+static void picture_stretched(const Picture *p, int x, int y, int w, int h, Rect clip, int alpha) {
+    int i, j;
+    if (p->rgba == NULL || w <= 0 || h <= 0) {
+        return;
+    }
+    for (j = 0; j < h; j++) {
+        if (y + j < clip.y0 || y + j >= clip.y1) {
+            continue;
+        }
+        for (i = 0; i < w; i++) {
+            const unsigned char *t;
+            if (x + i < clip.x0 || x + i >= clip.x1) {
+                continue;
+            }
+            t = p->rgba + ((j * p->height / h) * p->width + i * p->width / w) * 4;
+            if (t[3] != 0) {
+                plot(x + i, y + j, t[0], t[1], t[2], t[3] * alpha / 255);
+            }
+        }
+    }
+}
+
+static void fill_clipped(int x0, int y0, int x1, int y1, Rect clip, Colour c) {
+    fill(x0 < clip.x0 ? clip.x0 : x0, y0 < clip.y0 ? clip.y0 : y0, x1 > clip.x1 ? clip.x1 : x1,
+         y1 > clip.y1 ? clip.y1 : y1, c);
+}
+
+/*
+ * A little race seen from behind the kart, in r: sky, grass, the road to the horizon, bananas on each side and Diddy
+ * in his kart. zoom scales it (1: a 4:3 picture's height fills r), edge stretches what is out beyond the 4:3 picture's
+ * sides, as a wide view does, tilt leans the horizon (pixels across r), ghosts trails the kart as motion does, and
+ * hud adds the N64's race info along the top.
+ */
+typedef struct Scene {
+    float zoom, edge;
+    int tilt, ghosts, hud, kartOffset;
+} Scene;
+
+static void draw_scene(Rect r, Scene sc) {
+    int w = r.x1 - r.x0, h = r.y1 - r.y0, cx = (r.x0 + r.x1) / 2, cy = (r.y0 + r.y1) / 2, x, y, i;
+    float unit = h / 36.0f * sc.zoom; // The scene is 48 by 36 units, a 4:3 picture.
+    int horizon = cy - (int) (3 * unit);
+    static const int sBananas[4] = { -15, 15, -27, 27 };
+
+    for (y = r.y0; y < r.y1; y++) {
+        for (x = r.x0; x < r.x1; x++) {
+            int line = horizon + sc.tilt * (x - cx) / (w > 0 ? w : 1), t;
+            if (y < line) {
+                t = (y - r.y0) * 255 / (h > 0 ? h : 1);
+                plot(x, y, 90 + t / 4, 150 + t / 5, 250, 255);
+            } else {
+                // The road narrows to the horizon; grass either side.
+                float depth = (float) (y - line) / (float) (r.y1 - line > 0 ? r.y1 - line : 1);
+                float half = (1.5f + 13.0f * depth) * unit;
+                int road = x > cx - half && x < cx + half;
+                if (road) {
+                    plot(x, y, 210, 175, 110, 255);
+                } else {
+                    plot(x, y, 70 + (int) (40 * depth), 160, 60, 255);
+                }
+            }
+        }
+    }
+    // Bananas: the near ones inside the 4:3 picture, the far ones only in a wide one.
+    for (i = 0; i < 4 && sBanana.rgba != NULL; i++) {
+        float u = sBananas[i], size = 5.0f * unit, stretch = (u < -24 || u > 24) || i >= 2 ? sc.edge : 1.0f;
+        int bw = (int) (size * stretch), bh = (int) size;
+        int bx = cx + (int) (u * unit * (i >= 2 ? (sc.edge + 1.0f) / 2.0f : 1.0f)) - bw / 2;
+        picture_stretched(&sBanana, bx, horizon + (int) (2 * unit), bw, bh, r, 255);
+    }
+    // The kart, with fading copies behind it for motion.
+    if (sSetupFace.rgba != NULL) {
+        int size = (int) (13 * unit), kx = cx - size / 2 + (int) (sc.kartOffset * unit), ky = cy + (int) (2 * unit);
+        for (i = sc.ghosts; i > 0; i--) {
+            picture_stretched(&sSetupFace, kx - i * size / 3, ky, size, size, r, 70 / i);
+        }
+        picture_stretched(&sSetupFace, kx, ky, size, size, r, 255);
+    }
+    if (sc.hud) {
+        // The N64's race info: the place on the left, laps and bananas in the middle, the time on the right.
+        int bar = (int) (2 * unit) + 1;
+        fill_clipped(cx - (int) (21 * unit), r.y0 + bar, cx - (int) (17 * unit), r.y0 + 3 * bar, r, YELLOW);
+        fill_clipped(cx - (int) (6 * unit), r.y0 + bar, cx + (int) (3 * unit), r.y0 + 2 * bar, r, WHITE);
+        fill_clipped(cx + (int) (9 * unit), r.y0 + bar, cx + (int) (21 * unit), r.y0 + 2 * bar, r, YELLOW);
+    }
+}
+
+/* A frame in the colour of a tile's border round a picture. */
+static void picture_frame(Rect r, int lit) {
+    Colour c = lit ? PICKED_EDGE : (Colour){ 140, 180, 255, 200 };
+    fill(r.x0 - 1, r.y0 - 1, r.x1 + 1, r.y0, c);
+    fill(r.x0 - 1, r.y1, r.x1 + 1, r.y1 + 1, c);
+    fill(r.x0 - 1, r.y0, r.x0, r.y1, c);
+    fill(r.x1, r.y0, r.x1 + 1, r.y1, c);
+}
+
+/* A 5:3 screen, as tall as fits in r and centred in it. */
+static Rect wide_screen_in(Rect r, int maxHeight) {
+    Rect s;
+    int h = r.y1 - r.y0 < maxHeight ? r.y1 - r.y0 : maxHeight, w = h * 5 / 3;
+    if (w > r.x1 - r.x0) {
+        w = r.x1 - r.x0;
+        h = w * 3 / 5;
+    }
+    s.x0 = (r.x0 + r.x1 - w) / 2;
+    s.x1 = s.x0 + w;
+    s.y0 = r.y0;
+    s.y1 = s.y0 + h;
+    return s;
+}
+
+/* The widescreen styles' pictures (0 4:3, 1 Wide, 2 Balanced, 3 Zoomed). */
+static void draw_screen_style(Rect r, int style, Scene sc) {
+    static const float sZoom[4] = { 1.0f, 1.0f, 1.1f, 1.25f };
+    static const float sEdge[4] = { 1.0f, 1.6f, 1.3f, 1.0f };
+    if (style == 0) {
+        int inner = (r.y1 - r.y0) * 4 / 3;
+        Rect middle = { (r.x0 + r.x1 - inner) / 2, r.y0, (r.x0 + r.x1 + inner) / 2, r.y1 };
+        fill(r.x0, r.y0, r.x1, r.y1, (Colour){ 0, 0, 0, 255 });
+        draw_scene(middle, sc);
+        return;
+    }
+    sc.zoom = sZoom[style];
+    sc.edge = sEdge[style];
+    draw_scene(r, sc);
+}
+
+/* The two screens of a 3DS, with the race info where the tile puts it (0 bottom, 1 top, 2 both). */
+static void draw_two_screens(Rect r, int where) {
+    int h = (r.y1 - r.y0 - 2) / 2, w = h * 5 / 3, i;
+    Rect top = { (r.x0 + r.x1 - w) / 2, r.y0, (r.x0 + r.x1 + w) / 2, r.y0 + h };
+    Rect bottom = { (r.x0 + r.x1) / 2 - h * 2 / 3, r.y0 + h + 2, (r.x0 + r.x1) / 2 + h * 2 / 3, r.y0 + 2 * h + 2 };
+    Scene sc = { 1.1f, 1.3f, 0, 0, where != 0, 0 };
+    draw_scene(top, sc);
+    picture_frame(top, 0);
+    fill(bottom.x0, bottom.y0, bottom.x1, bottom.y1, (Colour){ 20, 40, 120, 255 });
+    picture_frame(bottom, 0);
+    if (where == 1) {
+        return; // Nothing on the bottom screen.
+    }
+    // The standings tower down the left, a track map on the right.
+    for (i = 0; i < 4; i++) {
+        int y = bottom.y0 + 2 + i * (bottom.y1 - bottom.y0 - 4) / 4, rowHeight = (bottom.y1 - bottom.y0 - 4) / 4 - 1;
+        Rect row = { bottom.x0 + 2, y, bottom.x0 + (bottom.x1 - bottom.x0) / 2, y + rowHeight };
+        fill(row.x0, row.y0, row.x1, row.y1, i == 1 ? (Colour){ 255, 200, 40, 200 } : (Colour){ 60, 90, 190, 255 });
+        picture_stretched(&sPortraits[(i * 3 + 2) % 10], row.x0 + 1, row.y0, rowHeight, rowHeight, row, 255);
+    }
+    {
+        int mx = (bottom.x0 + bottom.x1) * 3 / 4 - 2, my = (bottom.y0 + bottom.y1) / 2;
+        int rx = (bottom.x1 - bottom.x0) / 6, ry = (bottom.y1 - bottom.y0) / 3, a;
+        for (a = 0; a < 64; a++) {
+            float t = a * (6.2831853f / 64);
+            plot(mx + (int) (rx * cosf(t)), my + (int) (ry * sinf(t)), 255, 255, 255, 255);
+        }
+    }
+}
+
+/* The flags on the language page: the Union Flag for English, the French tricolour. */
+static void draw_flag(Rect r, int french) {
+    int w = r.x1 - r.x0, h = r.y1 - r.y0, x, y;
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            Colour c;
+            if (french) {
+                c = x < w / 3 ? (Colour){ 0, 35, 149, 255 } : x < w * 2 / 3 ? WHITE : (Colour){ 237, 41, 57, 255 };
+            } else {
+                // Distances from the diagonals and the middle lines, in pixels.
+                int d1 = abs(x * h - y * w) / (w > h ? w : h), d2 = abs((w - x) * h - y * w) / (w > h ? w : h);
+                int dx = abs(2 * x - w) / 2, dy = abs(2 * y - h) / 2, cross = h / 10 + 1, diag = h / 12 + 1;
+                c = (Colour){ 1, 33, 105, 255 };
+                if (d1 <= diag || d2 <= diag) {
+                    c = WHITE;
+                    if ((d1 <= diag / 2 && (x < w / 2) == (y < h / 2)) || (d2 <= diag / 2 && (x < w / 2) != (y < h / 2))) {
+                        c = (Colour){ 200, 16, 46, 255 };
+                    }
+                }
+                if (dx <= cross + 1 || dy <= cross + 1) {
+                    c = WHITE;
+                }
+                if (dx <= cross / 2 + 1 || dy <= cross / 2 + 1) {
+                    c = (Colour){ 200, 16, 46, 255 };
+                }
+            }
+            plot(r.x0 + x, r.y0 + y, c.r, c.g, c.b, 255);
+        }
+    }
+}
+
+/* Draws a tile's picture in r. */
+static void draw_tile_art(const SetupScreen *s, int i, Rect r) {
+    Scene plain = { 1.1f, 1.3f, 0, 0, 0, 0 };
+    switch (s->page) {
+        case SETUP_PAGE_LANGUAGE:
+            draw_flag(r, i == 1);
+            break;
+        case SETUP_PAGE_STYLE:
+            if (i == SETUP_STYLE_CLASSIC) {
+                plain.hud = 1;
+                draw_screen_style(r, 0, plain);
+            } else {
+                plain.ghosts = i == SETUP_STYLE_SPEEDY ? 2 : 0;
+                draw_screen_style(r, 2, plain);
+            }
+            break;
+        case SETUP_PAGE_PICTURE: {
+            int d;
+            plain.ghosts = i == 1 ? 2 : 0;
+            draw_screen_style(r, 2, plain);
+            // The frame rate in the HUD's digits, top left.
+            for (d = 0; d < 2; d++) {
+                const Picture *digit = &sDigits[d == 0 ? (i == 1 ? 6 : 3) : 0];
+                picture_stretched(digit, r.x0 + 3 + d * (digit->width - 1), r.y0 + 3, digit->width, digit->height, r,
+                                  255);
+            }
+            break;
+        }
+        case SETUP_PAGE_SCREEN:
+            draw_screen_style(r, i, plain);
+            break;
+        case SETUP_PAGE_CAMERA:
+            // The N64's camera swings out and leans; the Modern one stays behind the kart, level.
+            if (i == 1) {
+                plain.tilt = (r.y1 - r.y0) / 3;
+                plain.kartOffset = 6;
+            }
+            draw_scene(r, plain);
+            break;
+        default:
+            draw_two_screens(r, i == 0 ? 0 : i == 1 ? 1 : 2);
+            return; // Its screens have their own frames.
+    }
+    picture_frame(r, i == s->chosen);
+}
+
+static void draw_setup_tile(const SetupScreen *s, int i) {
+    const SetupTile *t = &s->tiles[i];
+    Rect r = setup_tile(s, i), art;
+    int lit = i == s->chosen, y, l, textX0 = r.x0, textX1 = r.x1;
+    Colour lineColour = lit ? YELLOW : DIM;
+
+    if (lit) {
+        box(r.x0, r.y0, r.x1, r.y1, (Colour){ 255, 200, 40, 90 }, PICKED_EDGE);
+        box(r.x0 + 1, r.y0 + 1, r.x1 - 1, r.y1 - 1, (Colour){ 0, 0, 0, 0 }, PICKED_EDGE);
+    } else {
+        box(r.x0, r.y0, r.x1, r.y1, BOX_FILL, BOX_EDGE);
+    }
+    if (s->page == SETUP_PAGE_SCREEN) {
+        // The picture on the left, the words on the right.
+        art = (Rect){ r.x0 + 6, r.y0 + 13, r.x0 + 66, r.y0 + 49 };
+        draw_tile_art(s, i, art);
+        textX0 = r.x0 + 68;
+        heading(textX0, textX1, r.y0 + 5, t->name, 1);
+        for (l = 0; l < t->lineCount && l < 2; l++) {
+            text_centred(FONT_SMALL, textX0, textX1 - 2, r.y0 + 24 + l * 11, t->lines[l], lineColour, 1);
+        }
+        if (t->tag[0] != '\0') {
+            text_centred(FONT_SMALL, textX0, textX1 - 2, r.y0 + 47, t->tag, lit ? WHITE : HINT, 1);
+        }
+        return;
+    }
+    if (s->page == SETUP_PAGE_LANGUAGE) {
+        art = (Rect){ (r.x0 + r.x1) / 2 - 42, r.y0 + 8, (r.x0 + r.x1) / 2 + 42, r.y0 + 64 };
+    } else if (s->page == SETUP_PAGE_HUD) {
+        art = (Rect){ r.x0 + 4, r.y0 + 5, r.x1 - 4, r.y0 + 59 };
+    } else {
+        art = wide_screen_in((Rect){ r.x0 + 6, r.y0 + 6, r.x1 - 6, r.y1 }, s->page == SETUP_PAGE_STYLE ? 52 : 56);
+    }
+    draw_tile_art(s, i, art);
+    y = art.y1 + 6;
+    heading(textX0, textX1, y, t->name, 1);
+    y += 18;
+    if (s->page == SETUP_PAGE_STYLE && t->tag[0] != '\0') {
+        text_centred(FONT_SMALL, textX0, textX1, y, t->tag, lit ? WHITE : HINT, 1);
+        y += 15;
+    }
+    for (l = 0; l < t->lineCount; l++, y += 11) {
+        text_centred(FONT_SMALL, textX0 + 2, textX1 - 2, y, t->lines[l], lineColour, 1);
+    }
+    if (s->page != SETUP_PAGE_STYLE && t->tag[0] != '\0') {
+        text_centred(FONT_SMALL, textX0, textX1, y + 3, t->tag, lit ? WHITE : HINT, 1);
+    }
+}
+
+/* A filled dot of radius r. */
+static void disc(int cx, int cy, int r, Colour c) {
+    int x, y;
+    for (y = -r; y <= r; y++) {
+        for (x = -r; x <= r; x++) {
+            if (x * x + y * y <= r * r + r) {
+                plot(cx + x, cy + y, c.r, c.g, c.b, c.a);
+            }
+        }
+    }
+}
+
+static void draw_setup(const SetupScreen *s) {
+    int i;
+    heading(0, BS_WIDTH, 4, s->question, 1);
+    for (i = 0; i < s->tileCount && i < SETUP_TILES; i++) {
+        draw_setup_tile(s, i);
+    }
+    // The fine tuning's steps: done in white, this one in gold, the rest grey.
+    for (i = 0; i < s->stepCount && i < SETUP_STEPS; i++) {
+        int width = (BS_WIDTH - 16) / s->stepCount, x0 = 8 + i * width, cx = x0 + width / 2;
+        Colour c = i == s->step ? YELLOW : i < s->step ? WHITE : (Colour){ 150, 155, 175, 255 };
+        disc(cx, SETUP_DOTS_Y + 4, 4, i <= s->step ? c : (Colour){ 60, 70, 110, 255 });
+        text_centred(FONT_SMALL, x0, x0 + width, SETUP_DOTS_Y + 11, s->steps[i], c, 1);
+    }
+    text_centred(FONT_SMALL, 4, BS_WIDTH - 4, SETUP_HELP_Y, s->help, HINT, 1);
+}
+
+int bs_setup_hit(int x, int y) {
+    const SetupScreen *s = &sState.setup;
+    int i;
+    if (!sState.setupShown) {
+        return SETUP_HIT_NONE;
+    }
+    if (y >= BS_BUTTONS_Y && y < BS_STATUS_Y) {
+        // As draw_button_row lays out three: 13 columns of 8 pixels each, the first one a gap.
+        int column = x / 8;
+        i = column / 13;
+        if (i < 3 && column % 13 != 0 && s->buttons[i][0] != '\0') {
+            return SETUP_HIT_BACK + i;
+        }
+        return SETUP_HIT_NONE;
+    }
+    for (i = 0; i < s->tileCount && i < SETUP_TILES; i++) {
+        Rect r = setup_tile(s, i);
+        if (x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1) {
+            return i;
+        }
+    }
+    return SETUP_HIT_NONE;
+}
+
 void bs_area_rows(int area, int *first, int *end) {
     static const int sRows[BS_AREA_COUNT + 1] = { 0, BS_BUTTONS_Y, BS_STATUS_Y, BS_HEIGHT };
     *first = sRows[area];
@@ -2525,7 +2922,9 @@ void bs_draw(unsigned short *image, int area) {
            (sClipEnd - sClipTop) * BS_WIDTH * sizeof(unsigned short));
     switch (area) {
         case BS_AREA_TOP:
-            if (sDrawn.menuShown) {
+            if (sDrawn.setupShown) {
+                draw_setup(&sDrawn.setup);
+            } else if (sDrawn.menuShown) {
                 draw_menu(&sDrawn);
             } else if (sDrawn.raceShown && sDrawn.overlayLines == 0) {
                 draw_race(&sDrawn);
