@@ -158,8 +158,9 @@ static int sStereo;             // This frame is drawn twice, once for each eye
 static int s800;                // The screen shows 800 pixels across
 static int sWideUnsupported;    // An original 2DS, which can't show 800 pixels
 /* Stereo: the shader moves each vertex across by sEyeSep * (w - sEyeConv) in clip space, in opposite directions for
- * the two eyes, so what is sEyeConv away from the camera stays at the depth of the screen. */
-static float sEyeSep, sEyeConv = 130.0f;
+ * the two eyes, so what is sEyeConv away from the camera stays at the depth of the screen. Flat draws (HUD, text) get
+ * w = sEyeConv * sHudW. The player's tuning (roadmap G5a-G5e, "stereo tuning" below) sets all three each frame. */
+static float sEyeSep, sEyeConv = 130.0f, sHudW = 1.0f;
 static int sEyeUniform = -1; // The shader's eye uniform register, if found
 
 /*
@@ -408,10 +409,11 @@ static inline void to_screen(const GfxVertex *v, float *pos) {
 }
 
 /* The same for a flat draw: its 4:3 shape kept on a wide screen (gfx_flat_x), and in stereo its w made sEyeConv, so
- * that it sits at the depth of the screen (scaling the whole position leaves where it lands unchanged). */
+ * that it sits at the depth of the screen, or nearer or farther by the HUD depth setting (scaling the whole position
+ * leaves where it lands unchanged). */
 static inline void to_screen_flat(const GfxVertex *v, float *pos, int flat) {
     float z = 0.5f * (v->z - v->w);
-    float f = (sStereo && v->w > 0.0f) ? sEyeConv / v->w : 1.0f;
+    float f = (sStereo && v->w > 0.0f) ? sEyeConv * sHudW / v->w : 1.0f;
     pos[0] = v->y * f;
     pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW, flat) : v->x * NARROW) * f;
     pos[2] = (z < 0.0f ? z : 0.0f) * f;
@@ -894,7 +896,10 @@ float plat_camera_fov(float fovy) {
  * The stereo depth: how far apart the eyes' pictures are, as a fraction of the screen's half width, for the farthest
  * things with the 3D slider all the way up (DKR_STEREO_SEP, in thousandths), and the distance from the camera that
  * stays at the screen's depth (DKR_STEREO_CONV, in the game's units: the camera follows the kart about 130 behind).
+ * The player's 3D depth and convergence settings scale these.
  */
+static float sBaseConv = 130.0f;
+
 static float stereo_max_sep(void) {
     static float sSep = -1.0f;
     if (sSep < 0.0f) {
@@ -902,11 +907,193 @@ static float stereo_max_sep(void) {
         const char *conv = plat_getenv("DKR_STEREO_CONV");
         sSep = (env != NULL ? atoi(env) : 25) / 1000.0f;
         if (conv != NULL && atoi(conv) > 0) {
-            sEyeConv = (float) atoi(conv);
+            sBaseConv = (float) atoi(conv);
         }
-        plat_log("stereo: separation %.3f, screen depth at %.0f", sSep, sEyeConv);
+        plat_log("stereo: separation %.3f, screen depth at %.0f", sSep, sBaseConv);
     }
     return sSep;
+}
+
+/******************************** Stereo tuning ********************************/
+
+/*
+ * The 3D settings on the Screen page (roadmap G5a-G5e, after the Donkey Kong 64 3DS port's): 3D depth (percent of the
+ * usual separation), convergence (percent of the usual screen depth: higher brings the kart and what is near it out
+ * of the screen), HUD depth (steps out of the screen, or into it when negative), auto convergence and its comfort
+ * target. Saved in settings.txt, changed from the menu's thread and read by the renderer between frames.
+ */
+enum { STEREO_DEPTH, STEREO_CONV, STEREO_HUD, STEREO_AUTO, STEREO_COMFORT, STEREO_TUNING_COUNT };
+static const struct {
+    const char *key;
+    int lo, hi, step, usual;
+} sTuningRange[STEREO_TUNING_COUNT] = {
+    { "stereo_depth", 25, 200, 25, 100 }, { "stereo_conv", 50, 200, 10, 100 },  { "stereo_hud", -5, 5, 1, 0 },
+    { "stereo_auto", 0, 1, 1, 1 },        { "stereo_comfort", 0, 100, 25, 50 },
+};
+static volatile int sTuning[STEREO_TUNING_COUNT];
+
+static void read_stereo_tuning(void) {
+    int i, v;
+    for (i = 0; i < STEREO_TUNING_COUNT; i++) {
+        v = settings_get(sTuningRange[i].key, sTuningRange[i].usual);
+        sTuning[i] = v < sTuningRange[i].lo || v > sTuningRange[i].hi ? sTuningRange[i].usual : v;
+    }
+    plat_log("stereo tuning: depth %d%%, convergence %d%%, HUD %d, auto convergence %d, comfort %d%%",
+             sTuning[STEREO_DEPTH], sTuning[STEREO_CONV], sTuning[STEREO_HUD], sTuning[STEREO_AUTO],
+             sTuning[STEREO_COMFORT]);
+}
+
+int plat_3ds_stereo_tuning(int which) {
+    return which >= 0 && which < STEREO_TUNING_COUNT ? sTuning[which] : 0;
+}
+
+/* Steps a setting by step, wrapping round at either end, and saves it. */
+void plat_3ds_step_stereo_tuning(int which, int step) {
+    int v;
+    if (which < 0 || which >= STEREO_TUNING_COUNT) {
+        return;
+    }
+    v = sTuning[which] + (step < 0 ? -1 : 1) * sTuningRange[which].step;
+    v = v > sTuningRange[which].hi ? sTuningRange[which].lo : v < sTuningRange[which].lo ? sTuningRange[which].hi : v;
+    sTuning[which] = v;
+    settings_set(sTuningRange[which].key, v);
+}
+
+/*
+ * Auto convergence (G5d/G5e). While a frame is drawn in 3D, near_depth_note keeps the nearest vertex of the 3D draws in
+ * each patch of a grid over the screen (leaving out its bottom quarter, where the track under the kart is always
+ * close, and the very edges). Between frames, near_depth_take makes one value of them: the second nearest patch, so
+ * one small thing (a banana, a spark) is not the whole story, or none when fewer than three patches had anything (a
+ * sky). auto_convergence then smooths it, quick to follow something coming close and slow to let go, jumping at a
+ * camera cut, and brings the screen's depth near enough that the nearest thing comes out of the screen by at most the
+ * comfort target: a percentage of how far the farthest things go into it. The vertices are already transformed on the
+ * CPU, so nothing has to be read back from the GPU.
+ */
+#define NEAR_COLS 8
+#define NEAR_ROWS 4
+static float sNear[NEAR_COLS * NEAR_ROWS];
+
+static void near_depth_clear(void) {
+    int i;
+    for (i = 0; i < NEAR_COLS * NEAR_ROWS; i++) {
+        sNear[i] = 0.0f;
+    }
+}
+
+static void near_depth_note(const GfxVertex *verts, int numVerts) {
+    int i, col, row;
+    for (i = 0; i < numVerts; i++) {
+        const GfxVertex *v = &verts[i];
+        float w = v->w, x, y;
+        if (!(w > 1.0f)) {
+            continue;
+        }
+        // Over x -0.9..0.9 and y -0.5..0.9 of the screen (+y up).
+        x = (v->x / w + 0.9f) * (NEAR_COLS / 1.8f);
+        y = (v->y / w + 0.5f) * (NEAR_ROWS / 1.4f);
+        if (!(x >= 0.0f && x < NEAR_COLS && y >= 0.0f && y < NEAR_ROWS)) {
+            continue;
+        }
+        col = (int) x;
+        row = (int) y;
+        if (sNear[row * NEAR_COLS + col] == 0.0f || w < sNear[row * NEAR_COLS + col]) {
+            sNear[row * NEAR_COLS + col] = w;
+        }
+    }
+}
+
+static float near_depth_take(void) {
+    float nears[NEAR_COLS * NEAR_ROWS], t;
+    int i, j, n = 0;
+    for (i = 0; i < NEAR_COLS * NEAR_ROWS; i++) {
+        if (sNear[i] > 0.0f) {
+            // Kept in order, nearest first.
+            for (j = n++; j > 0 && nears[j - 1] > sNear[i]; j--) {
+                nears[j] = nears[j - 1];
+            }
+            nears[j] = sNear[i];
+        }
+    }
+    near_depth_clear();
+    if (n < 3) {
+        return -1.0f;
+    }
+    t = nears[n >= 4 ? 1 : 0];
+    return t;
+}
+
+static struct {
+    float history[5];
+    int count, cursor, cutFrames;
+    float near;    // The smoothed nearest distance
+    float invConv; // 1 / the screen's depth, eased
+    float last;
+} sAuto;
+
+static void auto_convergence_reset(void) {
+    memset(&sAuto, 0, sizeof(sAuto));
+}
+
+static float auto_convergence(float nearest, float manual, float comfort) {
+    float sorted[5], median, target;
+    int i, j;
+
+    if (nearest <= 0.0f) {
+        // Nothing to go by this frame: keep the last.
+        return sAuto.last > 0.0f && sAuto.last < manual ? sAuto.last : manual;
+    }
+    sAuto.history[sAuto.cursor] = nearest;
+    sAuto.cursor = (sAuto.cursor + 1) % 5;
+    sAuto.count = sAuto.count < 5 ? sAuto.count + 1 : 5;
+    for (i = 0; i < sAuto.count; i++) {
+        float h = sAuto.history[(sAuto.cursor + 4 - i) % 5];
+        for (j = i; j > 0 && sorted[j - 1] > h; j--) {
+            sorted[j] = sorted[j - 1];
+        }
+        sorted[j] = h;
+    }
+    median = sorted[sAuto.count / 2];
+    if (sAuto.near <= 0.0f) {
+        sAuto.near = median;
+    } else {
+        // A camera cut stays changed for a second frame, a flicker does not: then jump straight to it.
+        sAuto.cutFrames = nearest * 2.0f < sAuto.near ? sAuto.cutFrames + 1 : 0;
+        if (sAuto.cutFrames >= 2) {
+            sAuto.near = nearest;
+            sAuto.invConv = 0.0f;
+            sAuto.cutFrames = 0;
+        } else {
+            sAuto.near += (median - sAuto.near) * (median < sAuto.near ? 0.3f : 0.05f);
+        }
+    }
+    // What is at distance d comes out of the screen by sep * (conv / d - 1); the farthest go in by sep.
+    target = sAuto.near * (1.0f + comfort);
+    target = target < manual ? target : manual;
+    target = target > sAuto.near * 0.25f ? target : sAuto.near * 0.25f;
+    target = target > 10.0f ? target : 10.0f;
+    if (sAuto.invConv <= 0.0f) {
+        sAuto.invConv = 1.0f / target;
+    } else {
+        sAuto.invConv += (1.0f / target - sAuto.invConv) * (1.0f / target > sAuto.invConv ? 0.25f : 0.04f);
+    }
+    sAuto.last = 1.0f / sAuto.invConv;
+    return sAuto.last < manual ? sAuto.last : manual;
+}
+
+/* Between frames: the separation for the slider, the screen's depth and the HUD's for the coming frame. */
+static void apply_stereo_tuning(int stereo, float slider) {
+    float manual;
+    sEyeSep = stereo ? slider * stereo_max_sep() * sTuning[STEREO_DEPTH] / 100.0f : 0.0f;
+    manual = sBaseConv * sTuning[STEREO_CONV] / 100.0f;
+    if (stereo && sTuning[STEREO_AUTO]) {
+        sEyeConv = auto_convergence(near_depth_take(), manual, sTuning[STEREO_COMFORT] / 100.0f);
+    } else {
+        near_depth_clear();
+        auto_convergence_reset();
+        sEyeConv = manual;
+    }
+    // Each step out of the screen brings the HUD an eighth of the way to the eyes.
+    sHudW = 1.0f - sTuning[STEREO_HUD] * 0.08f;
 }
 
 /*
@@ -930,7 +1117,7 @@ static void apply_screen_mode(void) {
     }
     sWide = sWideSetting != 0;
     sScale3D = sWide ? 1.0f : NARROW;
-    sEyeSep = stereo ? slider * stereo_max_sep() : 0.0f;
+    apply_stereo_tuning(stereo, slider);
     if (sTarget == NULL ||
         (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX && fb16 == sTargetFb16)) {
         return;
@@ -996,6 +1183,7 @@ static void read_screen_settings(void) {
     sWideSetting = sWideSetting < 0 || sWideSetting > 3 ? 2 : sWideSetting;
     s800Setting = settings_get("wide800", 1) != 0;
     sStereoSetting = settings_get("stereo3d", 1) != 0;
+    read_stereo_tuning();
     if (R_SUCCEEDED(cfguInit())) {
         if (R_SUCCEEDED(CFGU_GetSystemModel(&model))) {
             sWideUnsupported = model == CFG_MODEL_2DS;
@@ -3948,6 +4136,9 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         vertex = use_vertex_format(fmt);
     }
     write_vertices(fmt, sVbo + sVboUsed, verts, written, indexed ? NULL : indices, flat, su0, sv0, su1, sv1);
+    if (sStereo && !flat && sTuning[STEREO_AUTO]) {
+        near_depth_note(verts, numVerts);
+    }
     if (indexed) {
         int i;
         ibo = sIbo + sIboUsed;
