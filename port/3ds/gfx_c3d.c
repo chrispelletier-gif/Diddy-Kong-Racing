@@ -1086,7 +1086,14 @@ static void apply_stereo_tuning(int stereo, float slider) {
     sEyeSep = stereo ? slider * stereo_max_sep() * sTuning[STEREO_DEPTH] / 100.0f : 0.0f;
     manual = sBaseConv * sTuning[STEREO_CONV] / 100.0f;
     if (stereo && sTuning[STEREO_AUTO]) {
-        sEyeConv = auto_convergence(near_depth_take(), manual, sTuning[STEREO_COMFORT] / 100.0f);
+        static float sLogged;
+        float nearest = near_depth_take();
+        sEyeConv = auto_convergence(nearest, manual, sTuning[STEREO_COMFORT] / 100.0f);
+        if (sEyeConv < sLogged * 0.8f || sEyeConv > sLogged * 1.25f) {
+            // Only when it moves a good way, so the log shows what it does without a line every frame.
+            plat_log("stereo: auto convergence %.0f of %.0f (nearest %.0f)", sEyeConv, manual, nearest);
+            sLogged = sEyeConv;
+        }
     } else {
         near_depth_clear();
         auto_convergence_reset();
