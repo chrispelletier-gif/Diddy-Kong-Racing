@@ -1054,8 +1054,8 @@ static void read_switches(void) {
     }
     sSwitchEpoch = gPlatSwitchEpoch;
     sVfpVectors = plat_switch("DKR_VFP_VECTORS", 0) != 0;
-    sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", GFX_SURVEY_DEFAULT) != 0;
-    sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", GFX_SURVEY_DEFAULT) != 0;
+    sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
+    sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the

@@ -2351,8 +2351,8 @@ static void read_switches(void) {
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
-    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", GFX_SURVEY_DEFAULT) != 0;
-    sStereoOnce = plat_switch("DKR_STEREO_ONCE", GFX_SURVEY_DEFAULT) != 0;
+    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
+    sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();

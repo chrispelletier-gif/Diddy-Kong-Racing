@@ -869,7 +869,7 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
  * PC build checks that path's frames against the plain one (with the meshes, P31 and P34, too).
  */
 int gfxb_gpu_transform(void) {
-    return plat_switch("DKR_GPU_TRANSFORM", GFX_SURVEY_DEFAULT) != 0;
+    return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
 }
 
 int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]) {

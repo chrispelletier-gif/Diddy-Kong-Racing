@@ -368,6 +368,33 @@ void plat_set_render_ahead(int frames) {
     settings_set("renderahead", sRenderAhead);
 }
 
+/* The other ports survey's switches (see plat.h): -1 until first read. */
+static volatile int sGpuMaths = -1, sStereoOnce = -1;
+
+int plat_gpu_maths_setting(void) {
+    if (sGpuMaths < 0) {
+        sGpuMaths = settings_get("gpumaths", GFX_SURVEY_DEFAULT ? 3 : 0) & 3;
+    }
+    return sGpuMaths;
+}
+
+void plat_set_gpu_maths_setting(int level) {
+    sGpuMaths = level & 3;
+    settings_set("gpumaths", sGpuMaths);
+}
+
+int plat_stereo_once_setting(void) {
+    if (sStereoOnce < 0) {
+        sStereoOnce = settings_get("stereoonce", GFX_SURVEY_DEFAULT) != 0;
+    }
+    return sStereoOnce;
+}
+
+void plat_set_stereo_once_setting(int on) {
+    sStereoOnce = on != 0;
+    settings_set("stereoonce", sStereoOnce);
+}
+
 /* The 60 fps setting (see plat_frame_retraces): -1 until first read. sFps60 is what frames use now. sFps20 is the
  * steady 20 fps cap (settings.txt "fps20", else DKR_20FPS) for an Old 3DS that can't keep 30: every frame then takes
  * three retraces instead of jumping between two and three; 60 fps wins over it. */

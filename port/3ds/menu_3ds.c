@@ -96,6 +96,8 @@ enum {
     MAIN_COLOUR,
     MAIN_SCREEN,
     MAIN_AHEAD,
+    MAIN_GPU_MATHS,
+    MAIN_STEREO_ONCE,
     MAIN_PROFILER,
     MAIN_UPDATES,
     MAIN_BUGREPORT,
@@ -121,7 +123,7 @@ static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
 /* The performance switches and the debug tools: the profiler, updates (which install test builds) and bug reports
  * (which need a GitHub token). */
 static int main_hidden(int row) {
-    return !PLAT_DEBUG_TOOLS && (row == MAIN_FB16 || row == MAIN_AHEAD || row >= MAIN_PROFILER);
+    return !PLAT_DEBUG_TOOLS && (row == MAIN_FB16 || row == MAIN_AHEAD || row >= MAIN_GPU_MATHS);
 }
 
 static const char *row_label(int i) {
@@ -139,6 +141,10 @@ static const char *row_label(int i) {
         return "Screen";
     } else if (i == MAIN_AHEAD) {
         return "Render ahead";
+    } else if (i == MAIN_GPU_MATHS) {
+        return "GPU vertex maths";
+    } else if (i == MAIN_STEREO_ONCE) {
+        return "3D made once";
     } else if (i == MAIN_PROFILER) {
         return "Profiler";
     } else if (i == MAIN_UPDATES) {
@@ -162,6 +168,11 @@ static void row_value(int i, char *out, int size) {
         snprintf(out, size, "%s", sColourLevels[plat_3ds_colour_setting()]);
     } else if (i == MAIN_AHEAD) {
         snprintf(out, size, "%d frame%s", plat_render_ahead(), plat_render_ahead() == 1 ? "" : "s");
+    } else if (i == MAIN_GPU_MATHS) {
+        static const char *const sLevels[4] = { "Off", "On", "+ track", "+ track, models" };
+        snprintf(out, size, "%s", sLevels[plat_gpu_maths_setting()]);
+    } else if (i == MAIN_STEREO_ONCE) {
+        snprintf(out, size, "%s", plat_stereo_once_setting() ? "On" : "Off");
     } else if (i == MAIN_PROFILER) {
         snprintf(out, size, "%s", prof_user_enabled() ? "On" : "Off");
     } else if (i == MAIN_O3DS_RENDER) {
@@ -187,6 +198,10 @@ static const char *row_hint(int i) {
         return "Widescreen, 800 pixels, 3D";
     } else if (i == MAIN_AHEAD) {
         return plat_render_ahead() == 2 ? "Fewer dropped frames, a frame more lag" : "The N64's timing";
+    } else if (i == MAIN_GPU_MATHS) {
+        return "Test: P30, then P31 track, P34 models";
+    } else if (i == MAIN_STEREO_ONCE) {
+        return "Test (P33): needs the 3D slider up";
     } else if (i == MAIN_PROFILER) {
         return "Frame times on this screen";
     } else if (i == MAIN_UPDATES) {
@@ -219,6 +234,10 @@ static void row_change(int i, int step) {
         open_page(&sScreenPage);
     } else if (i == MAIN_AHEAD) {
         plat_set_render_ahead(plat_render_ahead() == 1 ? 2 : 1);
+    } else if (i == MAIN_GPU_MATHS) {
+        plat_set_gpu_maths_setting((plat_gpu_maths_setting() + step + 4) % 4);
+    } else if (i == MAIN_STEREO_ONCE) {
+        plat_set_stereo_once_setting(!plat_stereo_once_setting());
     } else if (i == MAIN_PROFILER) {
         prof_set_user_enabled(!prof_user_enabled());
     } else if (i == MAIN_UPDATES) {
@@ -231,18 +250,19 @@ static void row_change(int i, int step) {
 }
 
 /* The Picture page: the players' settings first, then the performance switches. */
-static const int sPictureRows[6] = { MAIN_AA, MAIN_FPS, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_FB16, MAIN_AHEAD };
+static const int sPictureRows[8] = { MAIN_AA,   MAIN_FPS,   MAIN_MIPMAPS,   MAIN_COLOUR,
+                                     MAIN_FB16, MAIN_AHEAD, MAIN_GPU_MATHS, MAIN_STEREO_ONCE };
 
 static int picture_hidden(int row) {
     return main_hidden(sPictureRows[row]);
 }
 
 static int picture_row(int i) {
-    return sPictureRows[options_visible_row(6, picture_hidden, i)];
+    return sPictureRows[options_visible_row(8, picture_hidden, i)];
 }
 
 static int picture_count(void) {
-    return options_visible_count(6, picture_hidden);
+    return options_visible_count(8, picture_hidden);
 }
 
 static const char *picture_label(int i) {

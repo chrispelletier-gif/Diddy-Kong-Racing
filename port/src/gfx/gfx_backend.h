@@ -172,12 +172,6 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
  * transforms them; everything else (billboards, flat draws, triangles whose box may cross the guard band) still comes
  * as GfxVertex. A model vertex is one of the game's vertices with one triangle corner's texture coordinates.
  */
-/* The usual setting of the switches from the other ports survey (DKR_GPU_TRANSFORM, DKR_TRACK_MESH, DKR_MODEL_MESH,
- * DKR_STEREO_ONCE): off, until hardware says otherwise; a test build can be made with them all on. */
-#ifndef GFX_SURVEY_DEFAULT
-#define GFX_SURVEY_DEFAULT 0
-#endif
-
 typedef struct GfxModelVertex {
     short x, y, z, one; // Model space; one is 1
     short u, v;         // The corner's texture coordinates, in the game's units (s10.5 texels, before the tile shift)

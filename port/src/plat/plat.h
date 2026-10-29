@@ -280,6 +280,18 @@ extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
  */
 int plat_render_ahead(void);
 void plat_set_render_ahead(int frames);
+
+/* The usual setting of the switches from the other ports survey (DKR_GPU_TRANSFORM, DKR_TRACK_MESH, DKR_MODEL_MESH,
+ * DKR_STEREO_ONCE) while settings.txt has none: off, until hardware says otherwise; a test build can be made with
+ * them all on. Settings > Picture changes them mid-race (debug builds): GPU vertex maths 0 off, 1 on (P30), 2 also
+ * the track recorded (P31), 3 also models (P34); 3D made once (P33) 0 or 1. A DKR_* variable wins over both. */
+#ifndef GFX_SURVEY_DEFAULT
+#define GFX_SURVEY_DEFAULT 0
+#endif
+int plat_gpu_maths_setting(void);
+void plat_set_gpu_maths_setting(int level);
+int plat_stereo_once_setting(void);
+void plat_set_stereo_once_setting(int on);
 /* What the renderer thread is doing right now. */
 extern const char *volatile gPlatGfxStage;
 
