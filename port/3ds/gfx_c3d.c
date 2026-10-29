@@ -45,9 +45,9 @@ _Static_assert(offsetof(C3DContextStart, flags) == 32, "citro3d's context change
 /* Bytes of vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most
  * about 3000 triangles, 9000 vertices, a frame, which is 48K of the largest vertices. */
 #define VBO_BYTES (48 * 1024 * 48)
-/* Bytes of vertex indices per frame (gfxb_draw_indexed): three 16-bit indices a triangle, more for triangles the guard
- * band cuts up. */
-#define IBO_BYTES (64 * 1024)
+/* Bytes of vertex indices per frame (gfxb_draw_indexed, and the meshes' copied by gfxb_draw_meshes): three 16-bit
+ * indices a triangle, more for triangles the guard band cuts up. */
+#define IBO_BYTES (192 * 1024)
 
 /*
  * What the vertex shader receives (roadmap item P5): the position already in the 3DS screen's clip space, the first
@@ -86,7 +86,7 @@ static int sVfmtAttrSet;   // The format of citro3d's attribute setting
 static int sVfmtBound = -1; // The format the vertex buffer setting reads, -1 for none yet this frame
 static int sVfmtBase;      // Where in sVbo (bytes) the vertex buffer setting starts
 static int sVfmtSwitches;   // Format changes in the frame
-static const void *sBufMesh; // The mesh the vertex buffer setting points at (gfxb_draw_mesh), NULL for the frame's
+static const void *sBufMesh; // The mesh arena when the vertex buffer setting points at it (gfxb_draw_meshes), NULL for the frame's
 
 typedef struct C3DTexture {
     C3D_Tex tex;
@@ -2126,7 +2126,7 @@ static void wait_for_gpu(int measure) {
 /*
  * GPU vertex maths (roadmap item P30, DKR_GPU_TRANSFORM=1): every draw goes through transform.v.pica instead of the
  * pass-through shader. The frontend hands most 3D triangles over as the game's own vertices with their matrix
- * (gfxb_draw_model, gfxb_draw_mesh), and the GPU transforms them; the rest still arrive transformed by the CPU
+ * (gfxb_draw_model, gfxb_draw_meshes), and the GPU transforms them; the rest still arrive transformed by the CPU
  * (gfxb_draw_indexed), drawn by the same shader with an identity matrix (set_cpu_uniforms).
  *
  * The first shader that transformed on the GPU hung a real New 3DS on its first triangle (2026-10-16), while
@@ -4380,25 +4380,105 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
     }
 }
 
-/* A mesh (P31, P34): model vertices and their indices in linear memory, which the GPU reads every frame it is drawn. */
+/*
+ * Meshes (P31, P34). Their vertices live in one arena of linear memory, MESH_ARENA_VERTS model vertices, so that the
+ * GPU reads any mesh from the same vertex buffer setting with 16-bit indices: gfxb_draw_meshes then draws parts of
+ * many meshes as one draw, copying their indices (made relative to the arena when the mesh is created) into the
+ * frame's index buffer. The arena is handed out in runs of vertices, first fit, from a list of free runs.
+ */
+#define MESH_ARENA_VERTS 65536
+#define MESH_FREE_RUNS 2048
+
 typedef struct C3DMesh {
-    GfxModelVertex *verts;
-    u16 *indices;
+    u32 base, numVerts;
+    u16 *indices; // Arena indices
 } C3DMesh;
+
+static GfxModelVertex *sMeshArena;
+static struct {
+    u32 start, count;
+} sArenaFree[MESH_FREE_RUNS];
+static int sArenaFreeRuns;
+
+static int arena_alloc(u32 count, u32 *start) {
+    int i;
+    if (sMeshArena == NULL) {
+        sMeshArena = linearAlloc(MESH_ARENA_VERTS * sizeof(GfxModelVertex));
+        if (sMeshArena == NULL) {
+            return 0;
+        }
+        sArenaFree[0].start = 0;
+        sArenaFree[0].count = MESH_ARENA_VERTS;
+        sArenaFreeRuns = 1;
+        plat_log("meshes: %d KB arena", (int) (MESH_ARENA_VERTS * sizeof(GfxModelVertex) / 1024));
+    }
+    for (i = 0; i < sArenaFreeRuns; i++) {
+        if (sArenaFree[i].count >= count) {
+            *start = sArenaFree[i].start;
+            sArenaFree[i].start += count;
+            sArenaFree[i].count -= count;
+            if (sArenaFree[i].count == 0) {
+                memmove(&sArenaFree[i], &sArenaFree[i + 1], (sArenaFreeRuns - i - 1) * sizeof(sArenaFree[0]));
+                sArenaFreeRuns--;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Gives a run back, joined to its free neighbours. With no room left in the list it is lost (logged once). */
+static void arena_free(u32 start, u32 count) {
+    int i = 0;
+    while (i < sArenaFreeRuns && sArenaFree[i].start < start) {
+        i++;
+    }
+    if (i > 0 && sArenaFree[i - 1].start + sArenaFree[i - 1].count == start) {
+        sArenaFree[i - 1].count += count;
+        if (i < sArenaFreeRuns && start + count == sArenaFree[i].start) {
+            sArenaFree[i - 1].count += sArenaFree[i].count;
+            memmove(&sArenaFree[i], &sArenaFree[i + 1], (sArenaFreeRuns - i - 1) * sizeof(sArenaFree[0]));
+            sArenaFreeRuns--;
+        }
+        return;
+    }
+    if (i < sArenaFreeRuns && start + count == sArenaFree[i].start) {
+        sArenaFree[i].start = start;
+        sArenaFree[i].count += count;
+        return;
+    }
+    if (sArenaFreeRuns == MESH_FREE_RUNS) {
+        static int sWarned;
+        if (!sWarned) {
+            sWarned = 1;
+            plat_log("meshes: arena free list full, a run is lost");
+        }
+        return;
+    }
+    memmove(&sArenaFree[i + 1], &sArenaFree[i], (sArenaFreeRuns - i) * sizeof(sArenaFree[0]));
+    sArenaFree[i].start = start;
+    sArenaFree[i].count = count;
+    sArenaFreeRuns++;
+}
 
 void *gfxb_mesh_create(const GfxModelVertex *verts, int numVerts, const unsigned short *indices, int numIndices) {
     C3DMesh *m = malloc(sizeof(C3DMesh));
-    u32 vertBytes = (numVerts * sizeof(GfxModelVertex) + 15) & ~15u, bytes = vertBytes + numIndices * sizeof(u16);
-    u8 *data;
-    if (m == NULL || (data = linearAlloc(bytes)) == NULL) {
+    int i;
+    if (m == NULL || (m->indices = malloc(numIndices * sizeof(u16))) == NULL) {
         free(m);
         return NULL;
     }
-    m->verts = (GfxModelVertex *) data;
-    m->indices = (u16 *) (data + vertBytes);
-    memcpy(m->verts, verts, numVerts * sizeof(GfxModelVertex));
-    memcpy(m->indices, indices, numIndices * sizeof(u16));
-    gpu_flush(data, bytes);
+    if (!arena_alloc(numVerts, &m->base)) {
+        free(m->indices);
+        free(m);
+        return NULL;
+    }
+    m->numVerts = numVerts;
+    memcpy(&sMeshArena[m->base], verts, numVerts * sizeof(GfxModelVertex));
+    for (i = 0; i < numIndices; i++) {
+        m->indices[i] = (u16) (m->base + indices[i]);
+    }
+    gpu_flush(&sMeshArena[m->base], numVerts * sizeof(GfxModelVertex));
     return m;
 }
 
@@ -4407,10 +4487,6 @@ void gfxb_mesh_free(void *mesh) {
     FrameSlot *slot = &sSlots[sRec];
     if (mesh == NULL) {
         return;
-    }
-    if (mesh == sBufMesh) {
-        sBufMesh = NULL;
-        sVfmtBound = -1;
     }
     if (slot->numMeshFrees == slot->meshFreesCapacity) {
         int capacity = slot->meshFreesCapacity ? slot->meshFreesCapacity * 2 : 64;
@@ -4426,36 +4502,48 @@ void gfxb_mesh_free(void *mesh) {
 
 static void delete_mesh(void *mesh) {
     C3DMesh *m = mesh;
-    linearFree(m->verts);
+    arena_free(m->base, m->numVerts);
+    free(m->indices);
     free(m);
 }
 
-void gfxb_draw_mesh(const GfxDrawState *state, const GfxModelParams *params, void *mesh, int firstIndex,
-                    int numTriangles) {
-    C3DMesh *m = mesh;
+void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
+                      int numParts) {
     HangDraw *hangDraw;
     unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
+    int i, count = 0;
+    u16 *ibo;
 
-    if (!model_draw_begin(state, params, 0, 0, numTriangles, &hangDraw)) {
+    for (i = 0; i < numParts; i++) {
+        count += parts[i].numTriangles * 3;
+    }
+    if (count == 0 || !model_draw_begin(state, params, 0, count, count / 3, &hangDraw)) {
         return;
     }
-    if (sBufMesh != m) {
-        // The vertex buffer setting points at the mesh until a draw from the frame's buffer points it back.
+    if (sBufMesh != sMeshArena) {
+        // The vertex buffer setting points at the arena until a draw from the frame's buffer points it back.
         C3D_BufInfo *buf = C3D_GetBufInfo();
         if (sVfmtAttrSet != VFMT_MODEL) {
             C3D_SetAttrInfo(&sVfmtAttr[VFMT_MODEL]);
             sVfmtAttrSet = VFMT_MODEL;
         }
         BufInfo_Init(buf);
-        BufInfo_Add(buf, m->verts, sizeof(GfxModelVertex), 3, 0x210);
-        sBufMesh = m;
+        BufInfo_Add(buf, sMeshArena, sizeof(GfxModelVertex), 3, 0x210);
+        sBufMesh = sMeshArena;
         sVfmtBound = -1;
     }
-    draw_prims(0, numTriangles * 3, m->indices + firstIndex);
+    ibo = sIbo + sIboUsed;
+    for (i = 0, count = 0; i < numParts; i++) {
+        const C3DMesh *m = parts[i].mesh;
+        memcpy(ibo + count, m->indices + parts[i].firstIndex, parts[i].numTriangles * 3 * sizeof(u16));
+        count += parts[i].numTriangles * 3;
+    }
+    sIboUsed += count;
+    draw_prims(0, count, ibo);
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
     }
-    sFrameTriangles += numTriangles;
+    sFrameTriangles += count / 3;
     if (t0 != 0) {
         draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 2);
         sDrawPartReads += 2;

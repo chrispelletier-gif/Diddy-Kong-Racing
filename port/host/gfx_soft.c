@@ -926,8 +926,11 @@ void gfxb_mesh_free(void *mesh) {
     }
 }
 
-void gfxb_draw_mesh(const GfxDrawState *state, const GfxModelParams *params, void *mesh, int firstIndex,
-                    int numTriangles) {
-    const SoftMesh *m = mesh;
-    gfxb_draw_model(state, params, m->verts, m->numVerts, m->indices + firstIndex, numTriangles);
+void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
+                      int numParts) {
+    int i;
+    for (i = 0; i < numParts; i++) {
+        const SoftMesh *m = parts[i].mesh;
+        gfxb_draw_model(state, params, m->verts, m->numVerts, m->indices + parts[i].firstIndex, parts[i].numTriangles);
+    }
 }

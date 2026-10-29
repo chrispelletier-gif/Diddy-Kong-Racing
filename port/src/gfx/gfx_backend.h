@@ -194,14 +194,20 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles);
 /*
- * Meshes (roadmap items P31 and P34): model vertices and indices copied once to memory the GPU reads, and drawn from
- * there frame after frame. gfxb_mesh_create returns NULL when out of room; a freed mesh goes once the GPU has drawn
- * the frames that use it.
+ * Meshes (roadmap items P31 and P34): model vertices copied once to memory the GPU reads, and drawn from there frame
+ * after frame. gfxb_mesh_create returns NULL when out of room; a freed mesh goes once the GPU has drawn the frames
+ * that use it. gfxb_draw_meshes draws parts of several meshes that share a state and parameters as one draw (a draw
+ * costs the CPU about as much as a hundred triangles, so one per game command would undo the saving).
  */
+typedef struct GfxMeshPart {
+    void *mesh;
+    int firstIndex, numTriangles;
+} GfxMeshPart;
+#define GFX_MAX_MESH_PARTS 64
 void *gfxb_mesh_create(const GfxModelVertex *verts, int numVerts, const unsigned short *indices, int numIndices);
 void gfxb_mesh_free(void *mesh);
-void gfxb_draw_mesh(const GfxDrawState *state, const GfxModelParams *params, void *mesh, int firstIndex,
-                    int numTriangles);
+void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
+                      int numParts);
 
 /* A model vertex the way the CPU path makes it, for backends without GPU vertex maths and for comparisons. */
 static inline void gfx_model_to_vertex(GfxVertex *out, const GfxModelVertex *in, const GfxModelParams *p) {
