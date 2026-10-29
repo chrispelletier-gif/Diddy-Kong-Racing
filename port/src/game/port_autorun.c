@@ -1550,6 +1550,7 @@ void port_autorun_frame(s32 updateRate) {
             note.shield = racer->shieldTimer;
             note.magnet = racer->magnetTimer;
             note.hit = racer->attackType;
+            note.paused = is_game_paused() != 0;
         }
         plat_set_game_note(&note);
     }

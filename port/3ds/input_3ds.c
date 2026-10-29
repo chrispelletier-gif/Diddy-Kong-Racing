@@ -6,6 +6,7 @@
  * (plat/controls.c). START, the D-Pad and the C-Stick stay fixed so the menus can always be reached.
  */
 #include <3ds.h>
+#include <math.h>
 #include <string.h>
 
 #include "plat/controls.h"
@@ -35,6 +36,56 @@ static const struct {
 
 /* How far the circle pad reaches from its centre. */
 #define CIRCLE_PAD_RANGE 155
+
+/*
+ * Tilt steering (roadmap O4b, controls.c): the accelerometer's pull of gravity gives how far the console is turned
+ * like a steering wheel (roll about the axis through the screens), whichever way it is pitched; there is no drift to
+ * correct as there would be adding up the gyroscope's turn rates. It is smoothed against the sensor's jitter, centred
+ * on how the console was held when the race started, and only steers while racing, so the menus never move by
+ * themselves. The accelerometer is only on while the setting is.
+ */
+static float tilt_roll(void) {
+    static int sOn, sZeroPolls, sWasRacing, sCentreNow;
+    static float sSmooth, sCentre;
+    PlatGameNote note = { 0 };
+    accelVector a;
+    float roll;
+    int racing;
+
+    if (!controls_tilt_enabled()) {
+        if (sOn) {
+            HIDUSER_DisableAccelerometer();
+            sOn = 0;
+        }
+        sCentreNow = 1; // Turned on again (mid-race too), it centres on how the console is held then.
+        return 0.0f;
+    }
+    if (!sOn || sZeroPolls > 30) {
+        // On; again if it stopped answering (after the console slept).
+        HIDUSER_EnableAccelerometer();
+        sOn = 1;
+        sZeroPolls = 0;
+    }
+    hidAccelRead(&a);
+    if (a.x == 0 && a.y == 0 && a.z == 0) {
+        sZeroPolls++;
+        return 0.0f;
+    }
+    sZeroPolls = 0;
+    // The accelerometer's x is positive with the console turned to the left (checked on a New 3DS).
+    roll = -atan2f((float) a.x, sqrtf((float) a.y * a.y + (float) a.z * a.z)) * (180.0f / 3.14159265f);
+    racing = plat_get_game_note(&note) ? note.racing != 0 : sWasRacing;
+    if (sCentreNow || (racing && !sWasRacing)) {
+        // Centred on this reading itself, not on the smoothing still catching up with it.
+        sSmooth = roll;
+        sCentre = roll;
+        sCentreNow = 0;
+    }
+    sSmooth += (roll - sSmooth) * 0.35f;
+    sWasRacing = racing;
+    // Not while paused: the pause menu and its options take the stick too.
+    return racing && !note.paused ? sSmooth - sCentre : 0.0f;
+}
 
 void port_input_poll(PortControllerState *state, s32 maxControllers) {
     circlePosition pad;
@@ -74,6 +125,7 @@ void port_input_poll(PortControllerState *state, s32 maxControllers) {
         }
     }
     controls_map_stick(pad.dx, pad.dy, CIRCLE_PAD_RANGE, &state[0].stickX, &state[0].stickY);
+    controls_apply_tilt(tilt_roll(), &state[0].stickX); // Nothing with tilt steering off.
 
     // A test script (DKR_INPUT in env.txt) replaces the real controls.
     {
