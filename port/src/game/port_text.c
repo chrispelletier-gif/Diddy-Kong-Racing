@@ -35,6 +35,17 @@ static const PortText sFrench[] = {
     { "Show", "Affiches" },
     { "Skip", "Passes" },
 
+    // SCREEN OPTIONS stereo 3D tuning and CONTROL OPTIONS tilt steering (PR #224); their hints are still English.
+    { "3D depth", "Profondeur 3D" },
+    { "3D convergence", "Convergence 3D" },
+    { "3D HUD depth", "Profondeur 3D du HUD" },
+    { "Auto convergence", "Convergence auto" },
+    { "Comfort target", "Cible de confort" },
+    { "On screen", "Sur l'ecran" },
+    { "Tilt steering", "Direction par inclinaison" },
+    { "Tilt for full lock", "Inclinaison max" },
+    { "Reversed", "Inversee" },
+
     // VIDEO OPTIONS (port/3ds/menu_3ds.c Picture page, port/host/host_main.c).
     { "Anti-aliasing", "Anticrenelage" },
     { "Frame rate", "Images par seconde" },
@@ -51,7 +62,7 @@ static const PortText sFrench[] = {
     { "Smoother edges; the GPU draws 2x", "Bords plus lisses; le GPU dessine 2x" },
     { "Smoother edges; the GPU draws 4x", "Bords plus lisses; le GPU dessine 4x" },
     { "60 when a frame fits (try AA off)", "60 si possible (essayez sans AA)" },
-    { "Less GPU memory work, like the N64", "Moins de travail memoire, comme la N64" },
+    { "Steady 20 (Old 3DS)", "20 stables (Old 3DS)" },
     { "Tints each level a colour", "Colore chaque niveau" },
     { "No shimmer on distant textures", "Textures lointaines sans scintillement" },
     { "Richer colours on the 3DS screen", "Couleurs plus riches sur l'ecran 3DS" },
