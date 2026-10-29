@@ -71,7 +71,8 @@ static float tilt_roll(void) {
         return 0.0f;
     }
     sZeroPolls = 0;
-    roll = atan2f((float) a.x, sqrtf((float) a.y * a.y + (float) a.z * a.z)) * (180.0f / 3.14159265f);
+    // The accelerometer's x is positive with the console turned to the left (checked on a New 3DS).
+    roll = -atan2f((float) a.x, sqrtf((float) a.y * a.y + (float) a.z * a.z)) * (180.0f / 3.14159265f);
     sSmooth += (roll - sSmooth) * 0.35f;
     racing = plat_get_game_note(&note) ? note.racing != 0 : sWasRacing;
     if (racing && !sWasRacing) {
