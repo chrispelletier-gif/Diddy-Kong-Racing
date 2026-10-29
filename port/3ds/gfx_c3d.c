@@ -1018,7 +1018,7 @@ static float near_depth_take(void) {
     if (n < 3) {
         return -1.0f;
     }
-    t = nears[n >= 4 ? 1 : 0];
+    t = nears[1];
     return t;
 }
 
@@ -4054,6 +4054,10 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     if (timed) {
         t0 = plat_ticks();
     }
+    if (sStereo && !flat && sTuning[STEREO_AUTO]) {
+        // The draw's own vertices: the clip below adds corners on the near plane, nearer than anything really is.
+        near_depth_note(verts, numVerts);
+    }
     clip_to_guard_band(&verts, &numVerts, &indices, &numTriangles);
     if (timed) {
         t1 = plat_ticks();
@@ -4143,9 +4147,6 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         vertex = use_vertex_format(fmt);
     }
     write_vertices(fmt, sVbo + sVboUsed, verts, written, indexed ? NULL : indices, flat, su0, sv0, su1, sv1);
-    if (sStereo && !flat && sTuning[STEREO_AUTO]) {
-        near_depth_note(verts, numVerts);
-    }
     if (indexed) {
         int i;
         ibo = sIbo + sIboUsed;

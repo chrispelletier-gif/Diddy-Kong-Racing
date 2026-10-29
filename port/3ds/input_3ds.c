@@ -45,9 +45,9 @@ static const struct {
  * themselves. The accelerometer is only on while the setting is.
  */
 static float tilt_roll(void) {
-    static int sOn, sZeroPolls, sWasRacing;
+    static int sOn, sZeroPolls, sWasRacing, sCentreNow;
     static float sSmooth, sCentre;
-    PlatGameNote note;
+    PlatGameNote note = { 0 };
     accelVector a;
     float roll;
     int racing;
@@ -57,6 +57,7 @@ static float tilt_roll(void) {
             HIDUSER_DisableAccelerometer();
             sOn = 0;
         }
+        sCentreNow = 1; // Turned on again (mid-race too), it centres on how the console is held then.
         return 0.0f;
     }
     if (!sOn || sZeroPolls > 30) {
@@ -73,13 +74,17 @@ static float tilt_roll(void) {
     sZeroPolls = 0;
     // The accelerometer's x is positive with the console turned to the left (checked on a New 3DS).
     roll = -atan2f((float) a.x, sqrtf((float) a.y * a.y + (float) a.z * a.z)) * (180.0f / 3.14159265f);
-    sSmooth += (roll - sSmooth) * 0.35f;
     racing = plat_get_game_note(&note) ? note.racing != 0 : sWasRacing;
-    if (racing && !sWasRacing) {
-        sCentre = sSmooth;
+    if (sCentreNow || (racing && !sWasRacing)) {
+        // Centred on this reading itself, not on the smoothing still catching up with it.
+        sSmooth = roll;
+        sCentre = roll;
+        sCentreNow = 0;
     }
+    sSmooth += (roll - sSmooth) * 0.35f;
     sWasRacing = racing;
-    return racing ? sSmooth - sCentre : 0.0f;
+    // Not while paused: the pause menu and its options take the stick too.
+    return racing && !note.paused ? sSmooth - sCentre : 0.0f;
 }
 
 void port_input_poll(PortControllerState *state, s32 maxControllers) {

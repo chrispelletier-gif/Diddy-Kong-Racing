@@ -341,14 +341,27 @@ void controls_keys_for(unsigned short actions, char *out, int size) {
     }
 }
 
+/* Tilt steering needs the 3DS's accelerometer: elsewhere its two rows are left out of the list. */
+#ifdef __3DS__
+#define TILT_ROWS 0
+#else
+#define TILT_ROWS 2
+#endif
+
+/* The option (OPT_*) the list's row index stands for. */
+static int option_at(int index) {
+    return index >= OPT_TILT ? index + TILT_ROWS : index;
+}
+
 int controls_option_count(void) {
-    return OPT_COUNT;
+    return OPT_COUNT - TILT_ROWS;
 }
 
 const char *controls_option_label(int index) {
     static const char *const sKeyLabels[CTRL_KEY_COUNT] = { "A button",  "B button",  "X button",
                                                             "Y button",  "L button",  "R button",
                                                             "ZL button", "ZR button", "SELECT button" };
+    index = option_at(index);
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
         return sKeyLabels[index - OPT_KEY_FIRST];
     }
@@ -375,6 +388,7 @@ const char *controls_option_label(int index) {
 void controls_option_value(int index, char *out, int size) {
     int layout;
     controls_init();
+    index = option_at(index);
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
         plat_snprintf(out, size, "%s", sActions[action_index(sSettings.map[index - OPT_KEY_FIRST])].label);
         return;
@@ -436,6 +450,7 @@ void controls_option_change(int index, int step) {
         plat_sleep_ns(1000 * 1000);
     }
     step = step < 0 ? -1 : 1;
+    index = option_at(index);
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
         unsigned short *slot = &sSettings.map[index - OPT_KEY_FIRST];
         *slot = sActions[wrap_step(action_index(*slot), step, 0, ACTION_COUNT - 1, 1)].n64;
