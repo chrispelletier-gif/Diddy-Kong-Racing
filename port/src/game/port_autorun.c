@@ -180,8 +180,24 @@ static void apply_config(s32 config) {
         return;
     }
     if (config_count() == SWITCH_CONFIGS) {
-        // Every variable at its usual setting first, then the race's switch: a variable shared by several switches
-        // keeps the race's test setting.
+        // The same render settings for every race, whatever the player's are: anti-aliasing off, 32-bit buffers,
+        // 60 fps, Balanced widescreen, 400 pixels, mipmaps on, no colour boost, edge trimming on, render ahead 1,
+        // GPU vertex maths off (the menu's settings would otherwise change what the bench measures). Then every
+        // variable at its usual setting, then the race's switch: a variable shared by several switches keeps the
+        // race's test setting.
+        static const struct {
+            const char *name;
+            s8 value;
+        } sBenchRender[] = {
+            { "BENCH_WIDESCREEN", 2 }, { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },
+            { "BENCH_COLOUR", 0 },     { "BENCH_GUARD_BAND", 1 },  { "BENCH_RENDER_AHEAD", 1 },
+            { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 },   { "DKR_MODEL_MESH", 0 },
+        };
+        plat_set_gpu_config(PLAT_AA_OFF, 0);
+        plat_set_60fps(1);
+        for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
+            plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
+        }
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
                 plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
@@ -1165,17 +1181,15 @@ static void bench_summary(char *out, s32 size) {
                                    (int) sRun, (int) previousRun);
         }
     } else if (sMode == MODE_SWITCH) {
-        static const char *const sAaNames[3] = { "off", "4x", "2x" };
-        s32 aa = plat_antialias();
         length = plat_snprintf(out, size,
                                "\n### Switches (averages of the finished races)\n\n"
                                "Each switch is flipped by itself; saved is against the usual settings' races. "
-                               "Render settings: %d fps cap, anti-aliasing %s, %d-bit buffers.\n\n"
+                               "Render settings, the bench's own in every race (see apply_config): 60 fps cap, "
+                               "anti-aliasing off, 32-bit buffers, Balanced widescreen, 400 pixels, 3D only in the "
+                               "3D races.\n\n"
                                "| track | switch | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | rdp ms | rdp saved "
                                "| worst GPU | worst frame | limit |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n",
-                               60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
-                               plat_fb16() ? 16 : 32);
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n");
     } else {
         length = plat_snprintf(out, size,
                                "\n### Render settings (averages of the finished races)\n\n"

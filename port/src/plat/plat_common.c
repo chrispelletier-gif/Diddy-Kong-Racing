@@ -360,7 +360,7 @@ int plat_render_ahead(void) {
         sRenderAhead = frames == 2 ? 2 : 1;
         plat_log("render ahead: %d frame%s", sRenderAhead, sRenderAhead == 1 ? "" : "s");
     }
-    return sRenderAhead;
+    return plat_switch("BENCH_RENDER_AHEAD", sRenderAhead); // The switch bench may set its own
 }
 
 void plat_set_render_ahead(int frames) {

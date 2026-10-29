@@ -895,14 +895,19 @@ int plat_3ds_wide800_supported(void) {
     return !sWideUnsupported;
 }
 
+/* The widescreen setting, unless the switch bench sets its own (BENCH_WIDESCREEN). */
+static int wide_setting(void) {
+    return plat_switch("BENCH_WIDESCREEN", sWideSetting);
+}
+
 float plat_aspect_scale(void) {
-    return sWideSetting ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
+    return wide_setting() ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
 }
 
 float plat_fov_tan_scale(void) {
     // Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
     static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
-    int style = sWideSetting;
+    int style = wide_setting();
     return style >= 0 && style <= 3 ? sTanScale[style] : 1.0f;
 }
 
@@ -945,17 +950,17 @@ static void apply_screen_mode(void) {
     // The switch bench sets DKR_STEREO3D for each race, so the player's 3D setting doesn't change what it measures.
     int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
                  __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
-    int wide800 = s800Setting && !stereo && !sWideUnsupported;
+    int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
     int aa = stereo ? PLAT_AA_OFF : sWantedAa, fb16 = sWantedFb16;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;
 
-    if ((sWideSetting != 0) != sWide && sTarget != NULL) {
+    if ((wide_setting() != 0) != sWide && sTarget != NULL) {
         // The game only clears its 4:3 part of the screen: clear the sides of the last wide picture.
         sFrameStarted = 0;
     }
-    sWide = sWideSetting != 0;
+    sWide = wide_setting() != 0;
     sScale3D = sWide ? 1.0f : NARROW;
     sEyeSep = stereo ? slider * stereo_max_sep() : 0.0f;
     if (sTarget == NULL ||
@@ -2462,9 +2467,10 @@ void gfxb_start_frame(void) {
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
     promote_textures();
     forget_gpu_state();
-    sMipmapsUsed = sMipmapSetting != 0;
-    sMipmapsShown = sMipmapSetting == 2;
-    sColourBoost = sColourSetting;
+    // The switch bench sets these itself (BENCH_*), so the player's settings don't change what it measures.
+    sMipmapsUsed = plat_switch("BENCH_MIPMAPS", sMipmapSetting) != 0;
+    sMipmapsShown = plat_switch("BENCH_MIPMAPS", sMipmapSetting) == 2;
+    sColourBoost = plat_switch("BENCH_COLOUR", sColourSetting);
     sFrameFirstDraw = 1;
     sDepthFillPending = 0;
     if (sFrameStarted < 0) {
@@ -3976,7 +3982,7 @@ int plat_3ds_guard_band_setting(void) {
         const char *env = plat_getenv("DKR_GUARD_BAND");
         sGuardBand = settings_get("guardband", env == NULL || atoi(env) != 0) != 0;
     }
-    return sGuardBand;
+    return plat_switch("BENCH_GUARD_BAND", sGuardBand);
 }
 
 /*
