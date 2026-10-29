@@ -10,9 +10,20 @@
  * sections' rows in the order they were added. A section's functions are those of a bottom screen page
  * (menu_3ds_add_page): count, label, value, change (step -1 or +1), and optionally a hint for a row, and whether a
  * row may be changed from the pause menu (NULL: every row can).
+ *
+ * OPTIONS_GENERAL's rows have no page of their own: the Options menu shows each as a row of its own next to the game's
+ * SUBTITLES ON, with its label and value ("INTRO LOGOS SHOW"), changed with left and right.
  */
 
-enum { OPTIONS_VIDEO, OPTIONS_CAMERA, OPTIONS_AUDIO, OPTIONS_CONTROLS, OPTIONS_CATEGORY_COUNT };
+enum {
+    OPTIONS_VIDEO,
+    OPTIONS_SCREEN,
+    OPTIONS_CAMERA,
+    OPTIONS_AUDIO,
+    OPTIONS_CONTROLS,
+    OPTIONS_GENERAL,
+    OPTIONS_CATEGORY_COUNT
+};
 
 typedef struct OptionsSection {
     int (*count)(void);

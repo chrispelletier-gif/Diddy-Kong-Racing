@@ -84,11 +84,11 @@ static void open_page(const MenuPage *page) {
 }
 
 /*
- * The settings of the first and last tabs, numbered as the old main page had them (the game's Video Options follow
- * the same numbers): anti-aliasing, frame rate, 16-bit buffers, mipmaps, colour boost, the Screen page (a tab now),
- * render ahead, the profiler, updates and the bug report. The Picture and Tools pages each show some of them, less
- * the ones a player's build (plat.h PLAT_DEBUG_TOOLS) hides (main_hidden): the pages' own functions number the rows
- * shown and the row_* ones these.
+ * The settings of the first and last tabs, numbered as the old main page had them: anti-aliasing, frame rate, 16-bit
+ * buffers, mipmaps, colour boost, the Screen page (a tab now), render ahead, the profiler, updates and the bug report.
+ * The Picture page (also the game's VIDEO OPTIONS) and the Tools page each show some of them, less the ones a player's
+ * build (plat.h PLAT_DEBUG_TOOLS) hides (main_hidden): the pages' own functions number the rows shown and the row_*
+ * ones these.
  */
 enum {
     MAIN_AA,
@@ -468,56 +468,17 @@ static const MenuPage sTestRunPage = {
 };
 
 /*
- * The game's VIDEO OPTIONS (plat/options.h): the main page's anti-aliasing to colour boost rows, then the Screen
- * page's, then Render ahead, less the ones a player's build hides. Every one can change mid-race, as here.
+ * The game's VIDEO OPTIONS and SCREEN OPTIONS (plat/options.h): the Picture and Screen pages' rows, less the ones a
+ * player's build hides, as here. Every one can change mid-race.
  */
-enum { VIDEO_ROWS = MAIN_SCREEN + SCREEN_ROWS + 1 };
-
-/* The main page row a Video Options row (of all of them) stands for, or -1 for a Screen page row. */
-static int video_main_row(int row) {
-    return row < MAIN_SCREEN ? row : row == MAIN_SCREEN + SCREEN_ROWS ? MAIN_AHEAD : -1;
-}
-
-static int video_hidden(int row) {
-    int main = video_main_row(row);
-    return main >= 0 ? main_hidden(main) : screen_hidden(row - MAIN_SCREEN);
-}
-
-static int video_count(void) {
-    return options_visible_count(VIDEO_ROWS, video_hidden);
-}
-
-static const char *video_label(int i) {
-    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
-    return main >= 0 ? row_label(main) : screen_row_label(row - MAIN_SCREEN);
-}
-
-static void video_value(int i, char *out, int size) {
-    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
-    if (main >= 0) {
-        row_value(main, out, size);
-    } else {
-        screen_row_value(row - MAIN_SCREEN, out, size);
-    }
-}
-
-static void video_change(int i, int step) {
-    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
-    if (main >= 0) {
-        row_change(main, step);
-    } else {
-        screen_row_change(row - MAIN_SCREEN, step);
-    }
-}
-
-static const char *video_hint(int i) {
-    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
-    return main >= 0 ? row_hint(main) : screen_row_hint(row - MAIN_SCREEN);
-}
-
 void menu_3ds_add_options(void) {
-    static const OptionsSection sVideo = { video_count, video_label, video_value, video_change, video_hint, NULL };
+    static const OptionsSection sVideo = { picture_count,  picture_label, picture_value,
+                                           picture_change, picture_hint,  NULL };
+    static const OptionsSection sScreen = {
+        screen_count, screen_label, screen_value, screen_change, screen_hint, NULL
+    };
     options_add(OPTIONS_VIDEO, &sVideo);
+    options_add(OPTIONS_SCREEN, &sScreen);
 }
 
 void menu_3ds_add_page(const char *title, int (*count)(void), const char *(*label)(int i),

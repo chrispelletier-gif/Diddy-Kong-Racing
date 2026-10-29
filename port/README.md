@@ -89,9 +89,12 @@ back. Test runs and CI never play multiplayer.
 
 Settings are saved in `sdmc:/3ds/dkr/settings.txt` (`src/plat/settings.c`). The player settings (picture, screen,
 race HUD, camera, controls, sound, start-up) are listed in the [main README](../README.md#playing). They are in the
-bottom screen's Settings menu and in the game's own menus: VIDEO, CAMERA and CONTROL OPTIONS in Options, MORE AUDIO
-OPTIONS in Audio Options, and an OPTIONS row in the pause menu without the settings that only apply after a restart
-(`src/menu.c`, categories registered in `src/plat/options.c`). Both change the same saved values.
+bottom screen's Settings menu and in the game's own menus: an INTRO LOGOS row and VIDEO, SCREEN, CAMERA and CONTROL
+OPTIONS in Options, MORE AUDIO OPTIONS in Audio Options, and an OPTIONS row in the pause menu without the settings
+that only apply after a restart (`src/menu.c`, categories registered in `src/plat/options.c`). Both change the same
+saved values. The game's menus show the port's text in French when the game is set to FRANCAIS
+(`src/game/port_text.c`): a new row's label, values and hint each need a line there, or they show in English. The
+bottom screen stays English.
 
 The bottom screen is drawn in the game's own style (`src/plat/bottom_screen.c`, menu in `3ds/menu_3ds.c`), with its
 fonts, logo, arrows and menu sounds read from the ROM; until the ROM is loaded it uses a plain 8x8 font. Other parts

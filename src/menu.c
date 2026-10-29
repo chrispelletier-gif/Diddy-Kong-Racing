@@ -770,9 +770,11 @@ u8 gTitleCinematicTextColours[] = {
 UNUSED u8 unused_800DFA0C[] = { 0, 0, 15, 120 };
 
 #ifdef TARGET_PORT
-// Room for a row per port settings category (port_options_menu_strings): the game's first three rows, the
-// categories, SAVE OPTIONS, MAGIC CODES, RETURN and the closing NULL.
-char *gOptionMenuStrings[3 + OPTIONS_CATEGORY_COUNT + 3 + 1] = { NULL };
+// The port's OPTIONS_GENERAL rows the Options menu has room for.
+#define PORT_OPT_GENERAL_ROWS 3
+// Room for a row per port setting the Options menu shows (port_options_menu_strings): ENGLISH and SUBTITLES, the
+// general rows, AUDIO OPTIONS, the categories, SAVE OPTIONS, MAGIC CODES, RETURN and the closing NULL.
+char *gOptionMenuStrings[2 + PORT_OPT_GENERAL_ROWS + 1 + OPTIONS_CATEGORY_COUNT + 3 + 1] = { NULL };
 #else
 char *gOptionMenuStrings[] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL };
 #endif
@@ -3807,11 +3809,13 @@ void titlescreen_free(void) {
 
 #ifdef TARGET_PORT
 /*
- * The port's settings in the game's own menus (plat/options.h): the Options menu gets VIDEO, CAMERA and CONTROL
- * OPTIONS rows next to the game's, the Audio Options screen a MORE AUDIO OPTIONS row, and the pause menu an OPTIONS
- * row that lists the categories (with only the settings that can change mid-race). A category's page is drawn in
- * dialogue box 7 like the pause menu: up and down pick a row, left and right (or A) change it, B goes back. The 3DS
- * bottom screen's Settings menu changes the same values, saved in the same files.
+ * The port's settings in the game's own menus (plat/options.h): the Options menu gets the general rows (INTRO LOGOS
+ * SHOW) after SUBTITLES ON, changed with left and right like it, and VIDEO, SCREEN, CAMERA and CONTROL OPTIONS rows
+ * after AUDIO OPTIONS; the Audio Options screen gets a MORE AUDIO OPTIONS row, and the pause menu an OPTIONS row that
+ * lists the categories (with only the settings that can change mid-race). A category's page is drawn in dialogue box
+ * 7 like the pause menu: up and down pick a row, left and right (or A) change it, B goes back. The 3DS bottom
+ * screen's Settings menu changes the same values, saved in the same files. Their text is in the game's language
+ * (port_text: English or French).
  */
 #define PORT_OPT_ROWS 8     // Rows shown at once.
 #define PORT_OPT_TEXT 40    // Room for a row's label or value.
@@ -3819,13 +3823,17 @@ void titlescreen_free(void) {
 
 enum { PORT_OPT_CLOSED, PORT_OPT_LIST, PORT_OPT_PAGE };
 
-static const char *const sPortOptTitles[OPTIONS_CATEGORY_COUNT] = { "VIDEO OPTIONS", "CAMERA OPTIONS",
-                                                                     "AUDIO OPTIONS", "CONTROL OPTIONS" };
-static char sPortOptMoreAudio[] = "MORE AUDIO OPTIONS";
+// The titles by category; AUDIO OPTIONS is the game's own (gMenuText).
+static const char *const sPortOptTitles[OPTIONS_CATEGORY_COUNT] = { "VIDEO OPTIONS",   "SCREEN OPTIONS",
+                                                                    "CAMERA OPTIONS",  NULL,
+                                                                    "CONTROL OPTIONS", "GAME OPTIONS" };
+static const char sPortOptMoreAudio[] = "MORE AUDIO OPTIONS";
 static s8 sPortAudioMore = -1; // The Audio Options screen's row for it, or -1.
 static s16 sPortAudioMoreY;
-// The categories of the Options menu's rows from 3 on (-1 for the game's own rows after them).
+// What each of the Options menu's rows is: a category (OPTIONS_*), a general row (PORT_OPT_MAIN_GENERAL - its index),
+// or -1 for one of the game's.
 static s8 sPortOptMainRows[ARRAY_COUNT(gOptionMenuStrings)];
+#define PORT_OPT_MAIN_GENERAL -2
 
 static s8 sPortOptMode;       // PORT_OPT_*
 static s8 sPortOptInRace;     // Opened from the pause menu: only the rows that can change mid-race.
@@ -3841,6 +3849,15 @@ static char sPortOptLabels[PORT_OPT_ROWS][PORT_OPT_TEXT];
 static char sPortOptValues[PORT_OPT_ROWS][PORT_OPT_TEXT];
 static char sPortOptHint[PORT_OPT_HINT];
 static char sPortOptPageNumber[8];
+static char sPortOptGeneralText[PORT_OPT_GENERAL_ROWS][PORT_OPT_TEXT]; // The general rows' "LABEL VALUE".
+
+/* A category's title in the game's language. */
+static char *port_opt_title(s32 category) {
+    if (category == OPTIONS_AUDIO) {
+        return gMenuText[ASSET_MENU_TEXT_AUDIOOPTIONS];
+    }
+    return (char *) port_text(sPortOptTitles[category]);
+}
 
 /*
  * Copies text in capitals, as the game's menus write everything, in what the menu font has: it has no % / ( or ),
@@ -3861,7 +3878,7 @@ static void port_opt_upper(char *out, const char *text, s32 size) {
                 break;
             }
         } else if (c == '%') {
-            const char *word = " PERCENT";
+            const char *word = port_text(" PERCENT");
             while (*word != '\0' && n < size - 1) {
                 out[n++] = *word++;
             }
@@ -3890,18 +3907,41 @@ static s32 port_opt_needs_restart(const char *label) {
     return TRUE;
 }
 
-/* The Options menu's rows: the game's first three, the port's categories, then SAVE OPTIONS, MAGIC CODES, RETURN. */
+/* A general row's text as the Options menu shows it: its label and value in capitals ("INTRO LOGOS SHOW"). */
+static void port_options_general_string(s32 index) {
+    char value[PORT_OPT_TEXT];
+    char text[PORT_OPT_TEXT];
+    options_value(OPTIONS_GENERAL, FALSE, index, value, sizeof(value));
+    sprintf(text, "%.20s %.18s", port_text(options_label(OPTIONS_GENERAL, FALSE, index)), port_text(value));
+    port_opt_upper(sPortOptGeneralText[index], text, PORT_OPT_TEXT);
+}
+
+/*
+ * The Options menu's rows: the game's ENGLISH and SUBTITLES, the port's general rows, AUDIO OPTIONS, the port's
+ * categories, then SAVE OPTIONS, MAGIC CODES and RETURN.
+ */
 void port_options_menu_strings(void) {
-    s32 i, row = 3;
+    s32 i, count, row = 2;
+    char *audio = gMenuText[ASSET_MENU_TEXT_AUDIOOPTIONS];
     char *save = gMenuText[ASSET_MENU_TEXT_SAVEOPTIONS];
     char *magic = gMenuText[ASSET_MENU_TEXT_MAGICCODES];
     char *ret = gMenuText[ASSET_MENU_TEXT_RETURN];
 
+    sPortOptMainRows[0] = -1;
+    sPortOptMainRows[1] = -1;
+    count = options_count(OPTIONS_GENERAL, FALSE);
+    for (i = 0; i < count && i < PORT_OPT_GENERAL_ROWS; i++) {
+        port_options_general_string(i);
+        sPortOptMainRows[row] = PORT_OPT_MAIN_GENERAL - i;
+        gOptionMenuStrings[row++] = sPortOptGeneralText[i];
+    }
+    sPortOptMainRows[row] = -1;
+    gOptionMenuStrings[row++] = audio;
     for (i = 0; i < OPTIONS_CATEGORY_COUNT; i++) {
         // Audio's go on the game's own Audio Options screen.
-        if (i != OPTIONS_AUDIO && options_count(i, FALSE) > 0) {
+        if (i != OPTIONS_AUDIO && i != OPTIONS_GENERAL && options_count(i, FALSE) > 0) {
             sPortOptMainRows[row] = i;
-            gOptionMenuStrings[row++] = (char *) sPortOptTitles[i];
+            gOptionMenuStrings[row++] = port_opt_title(i);
         }
     }
     sPortOptMainRows[row] = -1;
@@ -3922,9 +3962,26 @@ static s32 port_options_main_count(void) {
     return count;
 }
 
-/* The category of the Options menu's row, or -1 for one of the game's. */
+/* The category of the Options menu's row, or -1 for another. */
 static s32 port_options_main_category(s32 row) {
-    return row >= 3 && row < (s32) ARRAY_COUNT(sPortOptMainRows) ? sPortOptMainRows[row] : -1;
+    return row >= 0 && row < (s32) ARRAY_COUNT(sPortOptMainRows) && sPortOptMainRows[row] >= 0 ? sPortOptMainRows[row]
+                                                                                               : -1;
+}
+
+/* Which general row the Options menu's row is, or -1 for another. */
+static s32 port_options_main_general(s32 row) {
+    return row >= 0 && row < (s32) ARRAY_COUNT(sPortOptMainRows) && sPortOptMainRows[row] <= PORT_OPT_MAIN_GENERAL
+               ? PORT_OPT_MAIN_GENERAL - sPortOptMainRows[row]
+               : -1;
+}
+
+/* Where the Options menu's first row is and how far apart they are: closer together when the port's rows make more. */
+static s32 port_options_main_top(void) {
+    return port_options_main_count() > 9 ? 60 : port_options_main_count() > 6 ? 64 : 76;
+}
+
+static s32 port_options_main_step(void) {
+    return port_options_main_count() > 9 ? 16 : port_options_main_count() > 6 ? 20 : 28;
 }
 
 s32 port_options_menu_open(void) {
@@ -4011,14 +4068,13 @@ static void port_options_render(s32 player) {
         render_dialogue_text(7, POS_CENTRED, 12, gMenuText[ASSET_MENU_TEXT_OPTIONS], 1, ALIGN_MIDDLE_CENTER);
         for (i = 0, y = 32; i < count; i++, y += 16) {
             set_current_text_colour(7, 255, 255, 255, i == sPortOptListRow ? alpha : 0, 255);
-            render_dialogue_text(7, POS_CENTRED, y, (char *) sPortOptTitles[(s32) sPortOptList[i]], 1,
-                                 ALIGN_MIDDLE_CENTER);
+            render_dialogue_text(7, POS_CENTRED, y, port_opt_title(sPortOptList[i]), 1, ALIGN_MIDDLE_CENTER);
         }
         open_dialogue_box(7);
         return;
     }
 
-    render_dialogue_text(7, POS_CENTRED, 12, (char *) sPortOptTitles[(s32) sPortOptCategory], 1, ALIGN_MIDDLE_CENTER);
+    render_dialogue_text(7, POS_CENTRED, 12, port_opt_title(sPortOptCategory), 1, ALIGN_MIDDLE_CENTER);
     set_dialogue_font(7, ASSET_FONTS_SMALLFONT);
     if (count > PORT_OPT_ROWS) {
         sprintf(sPortOptPageNumber, "%d/%d", sPortOptFirst / PORT_OPT_ROWS + 1,
@@ -4030,16 +4086,17 @@ static void port_options_render(s32 player) {
         char value[PORT_OPT_TEXT];
         set_dialogue_font(7, ASSET_FONTS_FUNFONT);
         set_current_text_colour(7, 255, 255, 255, row == sPortOptRow ? alpha : 0, 255);
-        port_opt_upper(sPortOptLabels[i], options_label(sPortOptCategory, sPortOptInRace, row), PORT_OPT_TEXT);
+        port_opt_upper(sPortOptLabels[i], port_text(options_label(sPortOptCategory, sPortOptInRace, row)),
+                       PORT_OPT_TEXT);
         render_dialogue_text(7, 10, y, sPortOptLabels[i], 1, ALIGN_MIDDLE_LEFT);
         options_value(sPortOptCategory, sPortOptInRace, row, value, sizeof(value));
         if (row == sPortOptRow && value[0] != '\0') {
             // The row being changed shows its value between arrows.
             char arrows[PORT_OPT_TEXT];
-            sprintf(arrows, "< %.30s >", value);
+            sprintf(arrows, "< %.30s >", port_text(value));
             port_opt_upper(sPortOptValues[i], arrows, PORT_OPT_TEXT);
         } else {
-            port_opt_upper(sPortOptValues[i], value, PORT_OPT_TEXT);
+            port_opt_upper(sPortOptValues[i], port_text(value), PORT_OPT_TEXT);
         }
         render_dialogue_text(7, width - 10, y, sPortOptValues[i], 1, ALIGN_MIDDLE_RIGHT);
     }
@@ -4049,7 +4106,7 @@ static void port_options_render(s32 player) {
         hint = "Used from the next time the game starts";
     }
     if (hint != NULL && hint[0] != '\0') {
-        sprintf(sPortOptHint, "%.63s", hint);
+        sprintf(sPortOptHint, "%.63s", port_text(hint));
         set_dialogue_font(7, ASSET_FONTS_SMALLFONT);
         set_current_text_colour(7, 255, 255, 255, 0, 255);
         render_dialogue_text(7, POS_CENTRED, y + 4, sPortOptHint, 1, ALIGN_MIDDLE_CENTER);
@@ -4166,9 +4223,7 @@ void optionscreen_render(UNUSED s32 updateRate) {
         // A category's page is open over the menu.
         return;
     }
-    if (port_options_main_count() > 6) {
-        yPos = 64;
-    }
+    yPos = port_options_main_top();
 #endif
 
     set_text_font(ASSET_FONTS_FUNFONT);
@@ -4188,8 +4243,7 @@ void optionscreen_render(UNUSED s32 updateRate) {
 
         optionMenuTextIndex++;
 #ifdef TARGET_PORT
-        // The port's rows make nine: closer together to fit.
-        yPos += port_options_main_count() > 6 ? 20 : 28;
+        yPos += port_options_main_step();
 #else
         yPos += 28;
 #endif
@@ -4239,10 +4293,19 @@ s32 menu_options_loop(s32 updateRate) {
         return MENU_RESULT_CONTINUE;
     }
     if ((buttonsPressed & (A_BUTTON | START_BUTTON)) && port_options_main_category(gMenuCurIndex) >= 0) {
-        // VIDEO, CAMERA or CONTROL OPTIONS: their page opens over this menu.
+        // VIDEO, SCREEN, CAMERA or CONTROL OPTIONS: their page opens over this menu.
         sound_play(SOUND_SELECT2, NULL);
         port_options_open_page(port_options_main_category(gMenuCurIndex), FALSE, FALSE);
         port_options_render(PLAYER_ONE);
+        gIgnorePlayerInputTime = 0;
+        return MENU_RESULT_CONTINUE;
+    }
+    if (port_options_main_general(gMenuCurIndex) >= 0 && !(buttonsPressed & B_BUTTON) &&
+        ((buttonsPressed & (A_BUTTON | START_BUTTON)) || analogueX != 0)) {
+        // A general row: left and right (or A) change it in place, like SUBTITLES ON.
+        sound_play(SOUND_MENU_PICK2, NULL);
+        options_change(OPTIONS_GENERAL, FALSE, port_options_main_general(gMenuCurIndex), analogueX < 0 ? -1 : 1);
+        port_options_general_string(port_options_main_general(gMenuCurIndex));
         gIgnorePlayerInputTime = 0;
         return MENU_RESULT_CONTINUE;
     }
@@ -4338,7 +4401,11 @@ s32 menu_options_loop(s32 updateRate) {
     }
     if (gMenuDelay > 30) {
         // Change screen to a sub-menu
+#ifdef TARGET_PORT
+        if (gOptionMenuStrings[gMenuCurIndex] == gMenuText[ASSET_MENU_TEXT_AUDIOOPTIONS]) {
+#else
         if (gMenuCurIndex == 2) {
+#endif
             optionscreen_free();
             menu_init(MENU_AUDIO_OPTIONS);
             return MENU_RESULT_CONTINUE;
@@ -4518,7 +4585,8 @@ void func_80084854(UNUSED s32 updateRate) {
     if (sPortAudioMore >= 0) {
         set_text_font(ASSET_FONTS_FUNFONT);
         set_text_colour(255, 255, 255, i < 0 ? temp : 0, 255);
-        draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF, sPortAudioMoreY, sPortOptMoreAudio, ALIGN_MIDDLE_CENTER);
+        draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF, sPortAudioMoreY, (char *) port_text(sPortOptMoreAudio),
+                  ALIGN_MIDDLE_CENTER);
     }
 #endif
 }
@@ -4867,19 +4935,21 @@ static s32 port_savemenu_dim(s32 colour) {
 /* The name of a row's file, as its list row and card show it. buffer has 24 bytes. */
 static char *port_savemenu_file_name(SaveFileData *file, char *buffer) {
     s32 i, j;
+    const char *prefix;
     switch (file->saveFileType) {
         case SAVE_FILE_TYPE_CART_SAVE:
-            return (char *) sPortSaveSlotNames[file->controllerIndex];
+            return (char *) port_text(sPortSaveSlotNames[file->controllerIndex]);
         case SAVE_FILE_TYPE_CART_TIMES:
         case SAVE_FILE_TYPE_CPAK_TIMES:
-            return "TIME RECORDS";
+            return (char *) port_text("TIME RECORDS");
         case SAVE_FILE_TYPE_CART_BONUSES:
-            return "BONUSES";
+            return (char *) port_text("BONUSES");
         case SAVE_FILE_TYPE_CPAK_GHOST:
             return gMenuText[ASSET_MENU_TEXT_GHOSTS];
         case SAVE_FILE_TYPE_CPAK_SAVE:
-            for (i = 0; "SAVE "[i] != '\0'; i++) {
-                buffer[i] = "SAVE "[i];
+            prefix = port_text("SAVE ");
+            for (i = 0; prefix[i] != '\0' && i < 20; i++) {
+                buffer[i] = prefix[i];
             }
             buffer[i++] = file->saveFileExt[0];
             buffer[i] = '\0';
@@ -4896,18 +4966,20 @@ static char *port_savemenu_file_name(SaveFileData *file, char *buffer) {
 /* What a destination does, as the card's list of choices says it. */
 static char *port_savemenu_action_name(SaveFileData *dest, char *buffer) {
     s32 i;
+    const char *prefix;
     switch (dest->saveFileType) {
         case SAVE_FILE_TYPE_CART_SAVE:
-            for (i = 0; "COPY TO "[i] != '\0'; i++) {
-                buffer[i] = "COPY TO "[i];
+            prefix = port_text("COPY TO ");
+            for (i = 0; prefix[i] != '\0' && i < 20; i++) {
+                buffer[i] = prefix[i];
             }
             buffer[i++] = 'A' + dest->controllerIndex;
             buffer[i] = '\0';
             return buffer;
         case SAVE_FILE_TYPE_CART_TIMES:
-            return "COPY TO GAME PAK";
+            return (char *) port_text("COPY TO GAME PAK");
         case SAVE_FILE_TYPE_CPAK_EMPTY:
-            return "COPY TO PAK";
+            return (char *) port_text("COPY TO PAK");
         case SAVE_FILE_TYPE_UNK9:
             return gMenuText[ASSET_MENU_TEXT_VIEWGHOSTS];
         default:
@@ -4946,13 +5018,13 @@ static void port_savemenu_render_tabs(s32 highlight) {
     s32 widths[PORT_SAVE_TABS], total, x, i;
     total = 0;
     for (i = 0; i < PORT_SAVE_TABS; i++) {
-        widths[i] = get_text_width((char *) sPortSaveTabNames[i], 0, ASSET_FONTS_FUNFONT);
+        widths[i] = get_text_width((char *) port_text(sPortSaveTabNames[i]), 0, ASSET_FONTS_FUNFONT);
         total += widths[i];
     }
     total += (PORT_SAVE_TABS - 1) * 18;
     x = SCREEN_WIDTH_HALF - (total >> 1);
     for (i = 0; i < PORT_SAVE_TABS; i++) {
-        port_savemenu_text(ASSET_FONTS_FUNFONT, x + (widths[i] >> 1), 58, (char *) sPortSaveTabNames[i],
+        port_savemenu_text(ASSET_FONTS_FUNFONT, x + (widths[i] >> 1), 58, (char *) port_text(sPortSaveTabNames[i]),
                            i == sPortSaveTab ? highlight : 0, i == sPortSaveTab ? 255 : 96, ALIGN_MIDDLE_CENTER);
         x += widths[i] + 18;
     }
@@ -4982,7 +5054,8 @@ static void port_savemenu_render_list(s32 highlight, s32 active) {
         func_80080580(&sMenuCurrDisplayList, PORT_SAVE_LIST_X - 160, 120 - PORT_SAVE_TOP, PORT_SAVE_LIST_W,
                       PORT_SAVE_ROW_H, 4, 4, port_savemenu_dim(colour), texture);
         port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_LIST_X + (PORT_SAVE_LIST_W >> 1),
-                           PORT_SAVE_TOP + (PORT_SAVE_ROW_H >> 1), "NO SAVES", 0, 160, ALIGN_MIDDLE_CENTER);
+                           PORT_SAVE_TOP + (PORT_SAVE_ROW_H >> 1), (char *) port_text("NO SAVES"), 0, 160,
+                           ALIGN_MIDDLE_CENTER);
         return;
     }
     for (i = first; i < count && i < first + PORT_SAVE_VISIBLE_ROWS; i++) {
@@ -4997,11 +5070,11 @@ static void port_savemenu_render_list(s32 highlight, s32 active) {
                 label = port_savemenu_file_name(file, buffer);
                 break;
             case PORT_SAVE_ROW_EMPTY_SLOT:
-                label = (char *) sPortSaveSlotNames[row->index];
-                detail = "EMPTY";
+                label = (char *) port_text(sPortSaveSlotNames[row->index]);
+                detail = (char *) port_text("EMPTY");
                 break;
             case PORT_SAVE_ROW_BACK_UP:
-                label = "BACK UP NOW";
+                label = (char *) port_text("BACK UP NOW");
                 break;
             default:
                 save_backups_name(&sPortSaveBackups, row->index, buffer, sizeof(buffer));
@@ -5048,22 +5121,23 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
     adventureTwo = FALSE;
     if (row == NULL) {
         icon = gDrawTexContPakIcon;
-        title = "CONTROLLER PAK";
-        line1 = "HAS NO SAVES";
+        title = (char *) port_text("CONTROLLER PAK");
+        line1 = (char *) port_text("HAS NO SAVES");
     } else if (row->kind == PORT_SAVE_ROW_EMPTY_SLOT) {
         icon = gDrawTexN64Icon;
-        title = (char *) sPortSaveSlotNames[row->index];
-        line1 = "EMPTY";
+        title = (char *) port_text(sPortSaveSlotNames[row->index]);
+        line1 = (char *) port_text("EMPTY");
     } else if (row->kind == PORT_SAVE_ROW_BACK_UP) {
         icon = gDrawTexFileIcon;
-        title = "BACK UP NOW";
-        line1 = "COPIES EVERY SAVE";
-        line2 = "TO THE SD CARD";
+        title = (char *) port_text("BACK UP NOW");
+        line1 = (char *) port_text("COPIES EVERY SAVE");
+        line2 = (char *) port_text("TO THE SD CARD");
     } else if (row->kind == PORT_SAVE_ROW_BACKUP) {
         icon = gDrawTexFileIcon;
-        title = save_backups_is_undo(&sPortSaveBackups, row->index) ? "BEFORE A RESTORE" : "BACKUP";
-        line1 = "GAME PAK";
-        line2 = "AND CONTROLLER PAK";
+        title = save_backups_is_undo(&sPortSaveBackups, row->index) ? (char *) port_text("BEFORE A RESTORE")
+                                                                    : (char *) port_text("BACKUP");
+        line1 = (char *) port_text("GAME PAK");
+        line2 = (char *) port_text("AND CONTROLLER PAK");
     } else {
         file = &gSaveMenuFilesSource[row->index];
         title = port_savemenu_file_name(file, buffer);
@@ -5073,7 +5147,7 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
                 save = gSavefileData[file->controllerIndex];
                 balloons = *save->balloonsPtr;
                 adventureTwo = (save->cutsceneFlags & 4) != 0;
-                line1 = adventureTwo ? "ADVENTURE TWO" : "ADVENTURE";
+                line1 = adventureTwo ? (char *) port_text("ADVENTURE TWO") : (char *) port_text("ADVENTURE");
                 filename_decompress(save->filename, name, MAX_INITIALS_LENGTH);
                 filename_trim(name, name);
                 line2 = name;
@@ -5082,7 +5156,7 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
                 icon = gDrawTexN64Icon;
                 balloons = file->balloonCount;
                 adventureTwo = file->adventureTwo;
-                line1 = adventureTwo ? "ADVENTURE TWO" : "ADVENTURE";
+                line1 = adventureTwo ? (char *) port_text("ADVENTURE TWO") : (char *) port_text("ADVENTURE");
                 filename_decompress(file->compressedFilename, name, MAX_INITIALS_LENGTH);
                 filename_trim(name, name);
                 line2 = name;
@@ -5090,21 +5164,21 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
             case SAVE_FILE_TYPE_CART_TIMES:
             case SAVE_FILE_TYPE_CPAK_TIMES:
                 icon = gDrawTexTTIcon;
-                line1 = "BEST LAPS AND";
-                line2 = "COURSE TIMES";
+                line1 = (char *) port_text("BEST LAPS AND");
+                line2 = (char *) port_text("COURSE TIMES");
                 break;
             case SAVE_FILE_TYPE_CPAK_GHOST:
                 icon = gDrawTexGhostIcon;
-                line1 = "TIME TRIAL GHOSTS";
+                line1 = (char *) port_text("TIME TRIAL GHOSTS");
                 break;
             case SAVE_FILE_TYPE_CART_BONUSES:
                 icon = gDrawTexN64Icon;
-                line1 = "ADVENTURE TWO,";
-                line2 = "DRUMSTICK AND CODES";
+                line1 = (char *) port_text("ADVENTURE TWO,");
+                line2 = (char *) port_text("DRUMSTICK AND CODES");
                 break;
             default:
                 icon = gDrawTexFileIcon;
-                line1 = "ANOTHER GAME'S SAVE";
+                line1 = (char *) port_text("ANOTHER GAME'S SAVE");
                 break;
         }
     }
@@ -5150,18 +5224,18 @@ static void port_savemenu_render_card(s32 highlight) {
     stage = gMenuStage & 7;
     if (sPortSaveQuitTimer > 0 || sPortSaveMessage != NULL) {
         port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y + 4,
-                           sPortSaveQuitTimer > 0 ? "RESTORED" : (char *) sPortSaveMessage, highlight, 255,
-                           ALIGN_MIDDLE_CENTER);
+                           sPortSaveQuitTimer > 0 ? (char *) port_text("RESTORED") : (char *) sPortSaveMessage,
+                           highlight, 255, ALIGN_MIDDLE_CENTER);
         if (sPortSaveQuitTimer > 0) {
-            port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y + 16, "THE GAME CLOSES TO LOAD IT", 0, 255,
-                               ALIGN_MIDDLE_CENTER);
+            port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y + 16,
+                               (char *) port_text("THE GAME CLOSES TO LOAD IT"), 0, 255, ALIGN_MIDDLE_CENTER);
         }
         return;
     }
     if (stage == SAVEMENU_CHOOSE_DEST) {
         if (row != NULL && row->kind == PORT_SAVE_ROW_BACKUP) {
-            port_savemenu_text(ASSET_FONTS_FUNFONT, PORT_SAVE_CARD_MID, y + 2, "RESTORE", highlight, 255,
-                               ALIGN_MIDDLE_CENTER);
+            port_savemenu_text(ASSET_FONTS_FUNFONT, PORT_SAVE_CARD_MID, y + 2, (char *) port_text("RESTORE"), highlight,
+                               255, ALIGN_MIDDLE_CENTER);
             return;
         }
         // As many choices as fit below the card head show (two today), with the one above the highlighted choice
@@ -5185,7 +5259,7 @@ static void port_savemenu_render_card(s32 highlight) {
         }
     } else if (stage == SAVEMENU_CONFIRM) {
         if (row != NULL && row->kind == PORT_SAVE_ROW_BACKUP) {
-            text = "REPLACE YOUR SAVES?";
+            text = (char *) port_text("REPLACE YOUR SAVES?");
         } else {
             text = port_savemenu_action_name(&gSaveMenuFilesDest[sPortSaveAction], buffer);
             for (i = 0; text[i] != '\0' && i < (s32) sizeof(question) - 2; i++) {
@@ -5196,16 +5270,17 @@ static void port_savemenu_render_card(s32 highlight) {
             text = question;
         }
         port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y, text, 0, 255, ALIGN_MIDDLE_CENTER);
-        port_savemenu_text(ASSET_FONTS_FUNFONT, PORT_SAVE_CARD_MID, y + 16, "A YES   B NO", highlight, 255,
-                           ALIGN_MIDDLE_CENTER);
+        port_savemenu_text(ASSET_FONTS_FUNFONT, PORT_SAVE_CARD_MID, y + 16, (char *) port_text("A YES   B NO"),
+                           highlight, 255, ALIGN_MIDDLE_CENTER);
     } else if (stage == SAVEMENU_WRITE || stage == SAVEMENU_WAIT || stage == SAVEMENU_INIT_SOURCE ||
                stage == SAVEMENU_INIT_DEST) {
         port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y + 4, gMenuText[ASSET_MENU_TEXT_PLEASEWAIT], 0,
                            255, ALIGN_MIDDLE_CENTER);
     } else if (row != NULL && row->kind != PORT_SAVE_ROW_EMPTY_SLOT) {
         port_savemenu_text(ASSET_FONTS_SMALLFONT, PORT_SAVE_CARD_MID, y + 4,
-                           row->kind == PORT_SAVE_ROW_BACK_UP ? "PRESS A TO BACK UP" : "PRESS A FOR OPTIONS", 0, 176,
-                           ALIGN_MIDDLE_CENTER);
+                           row->kind == PORT_SAVE_ROW_BACK_UP ? (char *) port_text("PRESS A TO BACK UP")
+                                                              : (char *) port_text("PRESS A FOR OPTIONS"),
+                           0, 176, ALIGN_MIDDLE_CENTER);
     }
 }
 
@@ -5267,9 +5342,9 @@ s32 port_savemenu_input_source(s32 buttonsPressed, s32 xAxis, s32 yAxis) {
         } else if (row->kind == PORT_SAVE_ROW_BACK_UP) {
             result = save_backups_back_up(TRUE);
             sound_play(result == SAVE_BACKUP_DONE ? SOUND_SELECT2 : SOUND_MENU_BACK3, NULL);
-            sPortSaveMessage = result == SAVE_BACKUP_DONE       ? "BACKED UP"
-                               : result == SAVE_BACKUP_TEST_RUN ? "NOT DURING A TEST RUN"
-                                                                : "COULD NOT WRITE TO SD";
+            sPortSaveMessage = result == SAVE_BACKUP_DONE       ? port_text("BACKED UP")
+                               : result == SAVE_BACKUP_TEST_RUN ? port_text("NOT DURING A TEST RUN")
+                                                                : port_text("COULD NOT WRITE TO SD");
             port_savemenu_build_rows();
         } else if (row->kind == PORT_SAVE_ROW_BACKUP) {
             sound_play(SOUND_SELECT2, NULL);
@@ -5347,10 +5422,10 @@ s32 port_savemenu_input_confirm(s32 buttonsPressed) {
                 sPortSaveQuitTimer = PORT_SAVE_QUIT_DELAY;
             } else {
                 sound_play(SOUND_MENU_BACK3, NULL);
-                sPortSaveMessage = result == SAVE_BACKUP_TEST_RUN    ? "NOT DURING A TEST RUN"
-                                   : result == SAVE_BACKUP_TOO_SHORT ? "THAT BACKUP IS DAMAGED"
-                                   : result == SAVE_BACKUP_NOT_FOUND ? "THAT BACKUP IS GONE"
-                                                                     : "COULD NOT WRITE TO SD";
+                sPortSaveMessage = result == SAVE_BACKUP_TEST_RUN    ? port_text("NOT DURING A TEST RUN")
+                                   : result == SAVE_BACKUP_TOO_SHORT ? port_text("THAT BACKUP IS DAMAGED")
+                                   : result == SAVE_BACKUP_NOT_FOUND ? port_text("THAT BACKUP IS GONE")
+                                                                     : port_text("COULD NOT WRITE TO SD");
                 if (result == SAVE_BACKUP_NOT_FOUND) {
                     port_savemenu_build_rows();
                 }
@@ -5360,7 +5435,9 @@ s32 port_savemenu_input_confirm(s32 buttonsPressed) {
         }
         sound_play(SOUND_SELECT2, NULL);
         type = gSaveMenuFilesDest[sPortSaveAction].saveFileType;
-        sPortSaveDoneMessage = type == SAVE_FILE_TYPE_ERASE ? "ERASED" : type == SAVE_FILE_TYPE_UNK9 ? NULL : "COPIED";
+        sPortSaveDoneMessage = type == SAVE_FILE_TYPE_ERASE  ? port_text("ERASED")
+                               : type == SAVE_FILE_TYPE_UNK9 ? NULL
+                                                             : port_text("COPIED");
         gSaveMenuOptionDest = sPortSaveAction;
         gMenuStage = SAVEMENU_WRITE;
         gOpacityDecayTimer = 0;
