@@ -137,22 +137,31 @@ static const BenchConfig sBenchConfigs[] = {
 
 /*
  * The switch bench's experimental switches (plat_switch names, read by the renderer at the start of a frame). Each
- * is raced at its usual setting and, by itself, at its test setting; a switch can set two variables together.
+ * is raced at its usual setting and, by itself, at its test setting; a switch can set up to three variables together,
+ * and several switches can share a variable (one that the others need).
  */
+#define BENCH_SWITCH_VARS 3
 typedef struct BenchSwitch {
     const char *name; // For the results: what the test setting does.
-    const char *env[2];
+    const char *env[BENCH_SWITCH_VARS];
     s8 usual, test;
 } BenchSwitch;
 
-/* Nothing to compare right now. Command list splits (P19) are off by default (#153), early depth (P20) was dropped
- * (#155), the white-line diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches: the
- * depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
- * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
- * transforms (P27) gained nothing and stay off. The bench says so instead of racing. The list ends with an empty
- * entry, so it may be otherwise empty. */
+/* The ideas from other 3DS ports (2026-10-29): GPU vertex maths (P30) by itself, then with the track's geometry kept
+ * on the GPU (P31), with models recorded the first time they are drawn (P34), and all three, and stereo frames made
+ * once (P33, which only differs with the 3D slider up). Settled before: command list splits (P19) are off by default
+ * (#153), early depth (P20) was dropped (#155), the white-line diagnostics (P28) are off for good, and switch bench #176
+ * settled the Phase 7b switches: the depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge
+ * trimming dropping what lies wholly outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a
+ * system call (P24) and VFP vector transforms (P27) gained nothing and stay off. The list ends with an empty entry, so
+ * it may be otherwise empty (the bench then says so instead of racing). */
 static const BenchSwitch sSwitches[] = {
-    { NULL, { NULL, NULL }, 0, 0 },
+    { "GPU vertex maths (P30)", { "DKR_GPU_TRANSFORM", NULL, NULL }, 0, 1 },
+    { "P30 + track on the GPU (P31)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", NULL }, 0, 1 },
+    { "P30 + models recorded (P34)", { "DKR_GPU_TRANSFORM", "DKR_MODEL_MESH", NULL }, 0, 1 },
+    { "P30 + P31 + P34", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", "DKR_MODEL_MESH" }, 0, 1 },
+    { "Stereo made once (P33, 3D on)", { "DKR_STEREO_ONCE", NULL, NULL }, 0, 1 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
 #define MAX_CONFIGS 16
@@ -172,9 +181,16 @@ static void apply_config(s32 config) {
         return;
     }
     if (config_count() == SWITCH_CONFIGS) {
+        // Every variable at its usual setting first, then the race's switch: a variable shared by several switches
+        // keeps the race's test setting.
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
-            for (k = 0; k < 2 && sSwitches[i].env[k] != NULL; k++) {
-                plat_override_switch(sSwitches[i].env[k], config == i + 1 ? sSwitches[i].test : sSwitches[i].usual);
+            for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
+                plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
+            }
+        }
+        if (config > 0) {
+            for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[config - 1].env[k] != NULL; k++) {
+                plat_override_switch(sSwitches[config - 1].env[k], sSwitches[config - 1].test);
             }
         }
         return;

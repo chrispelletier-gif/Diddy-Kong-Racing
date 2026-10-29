@@ -166,6 +166,71 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
                        int numTriangles);
 #define GFX_MAX_BATCH_TRIANGLES 256
 #define GFX_MAX_BATCH_VERTICES (GFX_MAX_BATCH_TRIANGLES * 3)
+/*
+ * GPU vertex maths (roadmap item P30). While the backend says so (gfxb_gpu_transform, at the start of each frame), the
+ * frontend hands triangles over in the game's own model space where it can, with the draw's matrix, and the GPU
+ * transforms them; everything else (billboards, flat draws, triangles whose box may cross the guard band) still comes
+ * as GfxVertex. A model vertex is one of the game's vertices with one triangle corner's texture coordinates.
+ */
+/* The usual setting of the switches from the other ports survey (DKR_GPU_TRANSFORM, DKR_TRACK_MESH, DKR_MODEL_MESH,
+ * DKR_STEREO_ONCE): off, until hardware says otherwise; a test build can be made with them all on. */
+#ifndef GFX_SURVEY_DEFAULT
+#define GFX_SURVEY_DEFAULT 0
+#endif
+
+typedef struct GfxModelVertex {
+    short x, y, z, one; // Model space; one is 1
+    short u, v;         // The corner's texture coordinates, in the game's units (s10.5 texels, before the tile shift)
+    unsigned char r, g, b, a;
+} GfxModelVertex;
+
+typedef struct GfxModelParams {
+    float mtx[4][4];        // Model to clip space as gfx_backend.h has it: clip[c] = x m[0][c] + y m[1][c] + z m[2][c] + m[3][c]
+    float texScale[4];      // Normalised texture coordinates (u0, v0, u1, v1) = (u, v, u, v) * texScale + texOffset
+    float texOffset[4];
+    short fogMul, fogOffset; // With fog, the alpha is the fog factor clamp(z / w * fogMul + fogOffset, 0, 255)
+    unsigned char fog;
+    unsigned char pad[3];
+} GfxModelParams;
+
+/* What gfxb_model_check says about a model draw whose model space box is boxMin..boxMax. */
+enum { GFX_MODEL_CPU, GFX_MODEL_GPU, GFX_MODEL_HIDDEN };
+int gfxb_gpu_transform(void);
+int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]);
+void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
+                     const unsigned short *indices, int numTriangles);
+/*
+ * Meshes (roadmap items P31 and P34): model vertices and indices copied once to memory the GPU reads, and drawn from
+ * there frame after frame. gfxb_mesh_create returns NULL when out of room; a freed mesh goes once the GPU has drawn
+ * the frames that use it.
+ */
+void *gfxb_mesh_create(const GfxModelVertex *verts, int numVerts, const unsigned short *indices, int numIndices);
+void gfxb_mesh_free(void *mesh);
+void gfxb_draw_mesh(const GfxDrawState *state, const GfxModelParams *params, void *mesh, int firstIndex,
+                    int numTriangles);
+
+/* A model vertex the way the CPU path makes it, for backends without GPU vertex maths and for comparisons. */
+static inline void gfx_model_to_vertex(GfxVertex *out, const GfxModelVertex *in, const GfxModelParams *p) {
+    float x = in->x, y = in->y, z = in->z;
+    out->x = x * p->mtx[0][0] + y * p->mtx[1][0] + z * p->mtx[2][0] + p->mtx[3][0];
+    out->y = x * p->mtx[0][1] + y * p->mtx[1][1] + z * p->mtx[2][1] + p->mtx[3][1];
+    out->z = x * p->mtx[0][2] + y * p->mtx[1][2] + z * p->mtx[2][2] + p->mtx[3][2];
+    out->w = x * p->mtx[0][3] + y * p->mtx[1][3] + z * p->mtx[2][3] + p->mtx[3][3];
+    out->u0 = in->u * p->texScale[0] + p->texOffset[0];
+    out->v0 = in->v * p->texScale[1] + p->texOffset[1];
+    out->u1 = in->u * p->texScale[2] + p->texOffset[2];
+    out->v1 = in->v * p->texScale[3] + p->texOffset[3];
+    out->r = in->r;
+    out->g = in->g;
+    out->b = in->b;
+    out->a = in->a;
+    if (p->fog) {
+        float w = (out->w != 0.0f) ? out->w : 0.0001f;
+        float fog = (out->z / w) * p->fogMul + p->fogOffset;
+        out->a = (fog < 0.0f) ? 0 : (fog > 255.0f) ? 255 : (unsigned char) fog;
+    }
+}
+
 void gfxb_texture_upload(GfxTexture *tex);
 void gfxb_texture_free(GfxTexture *tex);
 /* Makes dst (a copy of src with another filter) draw from src's GPU copy instead of uploading its own. Both are freed

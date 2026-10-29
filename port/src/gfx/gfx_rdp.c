@@ -115,6 +115,11 @@ static s32 sRefInitialised;
 #else
 #define REF_CALL(call)
 #endif
+#ifdef PORT_GFX_REFERENCE
+#define REF_ACTIVE() sRefActive
+#else
+#define REF_ACTIVE() 0
+#endif
 #define TRACE(...)                        \
     if (sFrameCount == sTraceFrame) {     \
         plat_log(__VA_ARGS__);            \
@@ -130,6 +135,9 @@ static u16 sBatchIndices[MAX_BATCH_TRIANGLES * 3];
 static s32 sBatchCount;    // Triangles
 static s32 sBatchVertices; // Vertices used
 static GfxDrawState sBatchState;
+/* The batch of model triangles (GPU vertex maths, P30), see sModelVerts. */
+static s32 sModelCount;
+static GfxDrawState sModelState;
 /* Changes whenever the batch's vertices become invalid (a flush, or a new triangle command): entries of the
  * triangle command's shared vertex table are only valid for the generation they were made in. */
 static u32 sBatchGeneration;
@@ -404,6 +412,10 @@ static u8 wrap_mode(u8 cm, u8 mask) {
 static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
     const GfxTexture *other = e->hasOtherFilter ? &e->otherFilter : &e->tex;
     if (&e->tex == pinned || other == pinned) {
+        return TRUE;
+    }
+    if (sModelCount > 0 && (&e->tex == sModelState.textures[0] || &e->tex == sModelState.textures[1] ||
+                            other == sModelState.textures[0] || other == sModelState.textures[1])) {
         return TRUE;
     }
     return sBatchCount > 0 && (&e->tex == sBatchState.textures[0] || &e->tex == sBatchState.textures[1] ||
@@ -886,7 +898,10 @@ static void trace_state(const GfxDrawState *st, s32 count) {
           st->alphaRef, st->depthTest, st->depthWrite, st->fogEnabled, st->cullMode);
 }
 
-static void flush_batch(void) {
+static void flush_model_batch(void);
+
+/* Draws the batch of transformed triangles. */
+static void flush_cpu_batch(void) {
     if (sBatchCount > 0) {
         if (sFrameCount == sTraceFrame) {
             const GfxVertex *v = &sBatchVerts[0];
@@ -918,6 +933,12 @@ static void flush_batch(void) {
     }
 }
 
+/* Draws whichever batch holds triangles. */
+static void flush_batch(void) {
+    flush_model_batch();
+    flush_cpu_batch();
+}
+
 /* Whether the batch has room for one more triangle with up to three new vertices. */
 static inline s32 batch_has_room(void) {
     return sBatchCount < MAX_BATCH_TRIANGLES && sBatchVertices + 3 <= MAX_BATCH_VERTICES;
@@ -926,6 +947,9 @@ static inline s32 batch_has_room(void) {
 /* Makes the batch one of this state with room for the triangles and vertices, flushing it first if it is full or of
  * another state. */
 static void batch_reserve(const GfxDrawState *state, s32 triangles, s32 vertices) {
+    if (sModelCount > 0) {
+        flush_model_batch();
+    }
     if (sBatchCount > 0 && (sBatchCount + triangles > MAX_BATCH_TRIANGLES ||
                             sBatchVertices + vertices > MAX_BATCH_VERTICES || !draw_states_equal(state, &sBatchState))) {
         flush_batch();
@@ -1020,6 +1044,7 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 #endif
 
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
+static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
 static s32 sSwitchEpoch = -1;
 
 /* Reads the renderer's experimental switches when they change (see plat_switch). */
@@ -1029,6 +1054,8 @@ static void read_switches(void) {
     }
     sSwitchEpoch = gPlatSwitchEpoch;
     sVfpVectors = plat_switch("DKR_VFP_VECTORS", 0) != 0;
+    sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", GFX_SURVEY_DEFAULT) != 0;
+    sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", GFX_SURVEY_DEFAULT) != 0;
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -1047,9 +1074,9 @@ static void billboard_scales(u8 *flatOut, float *scaleX, float *scaleY, float *s
     }
 }
 
-static void load_vertices(const Vertex *src, s32 count, s32 dest) {
-    float(*m)[4] = g.matrices[g.curMatrix];
-    s32 i, fog = (g.geometryMode & G_FOG) != 0;
+/* Transforms the vertices into g.verts, with the matrix m and the fog and billboard settings they were loaded with. */
+static void load_vertices_now(const Vertex *src, s32 count, s32 dest, float (*m)[4], s32 fog, s32 billboard) {
+    s32 i;
     s32 vectors = FALSE;
     // An orthographic matrix (the HUD's, menus', fades') gives every vertex the same w.
     u8 flat = m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f;
@@ -1065,14 +1092,6 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float bbScaleY, bbScaleX, bbScaleZ;
     u8 bbFlat;
     billboard_scales(&bbFlat, &bbScaleX, &bbScaleY, &bbScaleZ);
-
-    if (gGfxSweep) {
-        int level = port_sweep_level_vertex(src) != 0;
-        if (level != gGfxSweepLevel) {
-            flush_batch();
-            gGfxSweepLevel = level;
-        }
-    }
 
 #ifdef HAVE_VFP_VECTORS
     if (sVfpVectors) {
@@ -1093,10 +1112,10 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
             v->w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
         }
         v->flat = flat;
-        if (g.billboard && dest + i == 0) {
+        if (billboard && dest + i == 0) {
             // A new anchor: the vertices after it are placed and sized by this one.
             billboard_scales(&bbFlat, &bbScaleX, &bbScaleY, &bbScaleZ);
-        } else if (g.billboard) {
+        } else if (billboard) {
             // Billboard vertices are offsets from the anchor vertex, in clip space.
             v->x = v->x * bbScaleX + g.verts[0].x;
             v->y = v->y * bbScaleY + g.verts[0].y;
@@ -1117,6 +1136,133 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
             g.vertsWithoutFog = TRUE;
         }
     }
+}
+
+/*
+ * GPU vertex maths (roadmap item P30, DKR_GPU_TRANSFORM, when the backend says it can: gfxb_gpu_transform). A vertex
+ * load is only noted (a PendingLoad) instead of transformed. If the triangles that follow use only the vertices of one
+ * such load, they go to the backend as the game's own vertices with the load's matrix (model_triangles), and the GPU
+ * transforms them. Anything else first transforms the vertices it needs here, from the load they came from
+ * (resolve_slots), so that path draws exactly what it did. Each of the RSP's vertex slots remembers which load it
+ * still waits for (sSlotLoad); a load whose slots have all been overwritten is never transformed at all. Billboards
+ * and flat (orthographic) loads are never deferred.
+ */
+static s32 sGpuTransform; // This frame's gfxb_gpu_transform
+
+#define PENDING_LOADS 8
+#define NO_LOAD 0xFF
+
+typedef struct PendingLoad {
+    const Vertex *src;
+    s32 dest, count;
+    float m[4][4];
+    s16 fogMul, fogOffset;
+    u8 fog;    // G_FOG was set
+    u8 slots;  // Slots still waiting for it
+    u8 boxed;  // box holds the vertices' box
+    s16 boxMin[3], boxMax[3];
+} PendingLoad;
+static PendingLoad sLoads[PENDING_LOADS];
+static u32 sNextLoad;
+static u8 sSlotLoad[MAX_VERTICES]; // The load each slot waits for, or NO_LOAD
+static s32 sAnyPending;
+
+/* Transforms the slots still waiting for load l (as load_vertices did when it came), in runs of neighbours. */
+static void resolve_load(u32 l) {
+    PendingLoad *pl = &sLoads[l];
+    s16 fogMul = g.fogMul, fogOffset = g.fogOffset;
+    s32 i = pl->dest, end = pl->dest + pl->count;
+    g.fogMul = pl->fogMul;
+    g.fogOffset = pl->fogOffset;
+    while (i < end) {
+        s32 run;
+        if (sSlotLoad[i] != l) {
+            i++;
+            continue;
+        }
+        for (run = i; run < end && sSlotLoad[run] == l; run++) {
+            sSlotLoad[run] = NO_LOAD;
+        }
+        load_vertices_now(pl->src + (i - pl->dest), run - i, i, pl->m, pl->fog, FALSE);
+        i = run;
+    }
+    pl->slots = 0;
+    g.fogMul = fogMul;
+    g.fogOffset = fogOffset;
+}
+
+/* Makes sure slots first to end - 1 hold transformed vertices. */
+static void resolve_slots(s32 first, s32 end) {
+    s32 i;
+    for (i = first; i < end; i++) {
+        if (sSlotLoad[i] != NO_LOAD) {
+            resolve_load(sSlotLoad[i]);
+        }
+    }
+}
+
+/* The slots first to end - 1 are being loaded again: they no longer wait for their old loads. */
+static void forget_slots(s32 first, s32 end) {
+    s32 i;
+    for (i = first; i < end; i++) {
+        if (sSlotLoad[i] != NO_LOAD) {
+            sLoads[sSlotLoad[i]].slots--;
+            sSlotLoad[i] = NO_LOAD;
+        }
+    }
+}
+
+static void forget_all_loads(void) {
+    s32 i;
+    for (i = 0; i < MAX_VERTICES; i++) {
+        sSlotLoad[i] = NO_LOAD;
+    }
+    for (i = 0; i < PENDING_LOADS; i++) {
+        sLoads[i].slots = 0;
+    }
+    sAnyPending = FALSE;
+}
+
+static void load_vertices(const Vertex *src, s32 count, s32 dest) {
+    float(*m)[4] = g.matrices[g.curMatrix];
+    s32 fog = (g.geometryMode & G_FOG) != 0, end = MIN(dest + count, MAX_VERTICES);
+
+    if (gGfxSweep) {
+        int level = port_sweep_level_vertex(src) != 0;
+        if (level != gGfxSweepLevel) {
+            flush_batch();
+            gGfxSweepLevel = level;
+        }
+    }
+    if (sAnyPending) {
+        if (g.billboard && dest > 0) {
+            resolve_slots(0, 1); // The billboard's anchor
+        }
+        forget_slots(dest, end);
+    }
+    if (sGpuTransform && !g.billboard && !gGfxSweep && count > 0 && dest + count <= MAX_VERTICES &&
+        !(m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f)) {
+        u32 l = sNextLoad++ % PENDING_LOADS, i;
+        PendingLoad *pl = &sLoads[l];
+        if (pl->slots > 0) {
+            resolve_load(l); // An old load still waited for: transformed now, as the record is needed
+        }
+        pl->src = src;
+        pl->dest = dest;
+        pl->count = count;
+        __builtin_memcpy(pl->m, m, sizeof(pl->m));
+        pl->fogMul = g.fogMul;
+        pl->fogOffset = g.fogOffset;
+        pl->fog = fog;
+        pl->boxed = FALSE;
+        pl->slots = count;
+        for (i = dest; i < (u32) end; i++) {
+            sSlotLoad[i] = l;
+        }
+        sAnyPending = TRUE;
+        return;
+    }
+    load_vertices_now(src, count, dest, m, fog, g.billboard);
 }
 
 /* Folds the N64 viewport into clip space coordinates (see gfx_backend.h), with the factors worked out once per draw. */
@@ -1170,6 +1316,472 @@ static s32 flat_triangle_spans_screen(const u8 idx[3], const Viewport *vp) {
     return left && right;
 }
 
+/******************************** GPU vertex maths (P30) and meshes (P31, P34) ********************************/
+
+/*
+ * The batch of model triangles waiting to be drawn (gfxb_draw_model): like sBatchVerts, but the game's own vertices,
+ * one per vertex and texture coordinates used, with the matrix and texture factors they share (sModelParams). Only
+ * one of the two batches holds triangles at a time, so the draws keep their order.
+ */
+static GfxModelVertex sModelVerts[MAX_BATCH_VERTICES];
+static u16 sModelIndices[MAX_BATCH_TRIANGLES * 3];
+static s32 sModelVertices;
+static GfxModelParams sModelParams;
+
+#ifdef PORT_GFX_REFERENCE
+void refb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
+                     const unsigned short *indices, int numTriangles);
+#endif
+
+static void flush_model_batch(void) {
+    u32 part;
+    if (sModelCount == 0) {
+        return;
+    }
+    part = walk_switch(WALK_DRAWS);
+    gfxb_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount);
+    prof_count(PROF_TRIANGLES, sModelCount);
+    prof_count(PROF_DRAWS, 1);
+    REF_CALL(refb_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount));
+    walk_switch(part);
+    sModelCount = 0;
+    sModelVertices = 0;
+    sBatchGeneration++;
+}
+
+/* Starts a triangle in the model batch of this state and these parameters (flushing whatever batch is in the way) and
+ * returns where its indices go. */
+static u16 *model_triangle(const GfxDrawState *state, const GfxModelParams *params) {
+    if (sBatchCount > 0) {
+        flush_batch();
+    }
+    if (sModelCount > 0 && (sModelCount >= MAX_BATCH_TRIANGLES || sModelVertices + 3 > MAX_BATCH_VERTICES ||
+                            !draw_states_equal(state, &sModelState) ||
+                            __builtin_memcmp(params, &sModelParams, sizeof(*params)) != 0)) {
+        flush_model_batch();
+    }
+    if (sModelCount == 0) {
+        sModelState = *state;
+        sModelParams = *params;
+    }
+    return &sModelIndices[sModelCount++ * 3];
+}
+
+/* A pending load's box in model space. */
+static void pending_box(PendingLoad *pl) {
+    const Vertex *v = pl->src;
+    s32 i, k;
+    if (pl->boxed) {
+        return;
+    }
+    pl->boxMin[0] = pl->boxMax[0] = v[0].x;
+    pl->boxMin[1] = pl->boxMax[1] = v[0].y;
+    pl->boxMin[2] = pl->boxMax[2] = v[0].z;
+    for (i = 1; i < pl->count; i++) {
+        s16 c[3] = { v[i].x, v[i].y, v[i].z };
+        for (k = 0; k < 3; k++) {
+            if (c[k] < pl->boxMin[k]) {
+                pl->boxMin[k] = c[k];
+            }
+            if (c[k] > pl->boxMax[k]) {
+                pl->boxMax[k] = c[k];
+            }
+        }
+    }
+    pl->boxed = TRUE;
+}
+
+/* The texture factors of the model parameters for one texture axis (see tex_axis_coord). */
+static void tex_axis_factors(const TexAxis *a, float *scale, float *offset) {
+    float inv = a->divide ? 1.0f / a->size : a->invSize;
+    *scale = a->scale * inv;
+    *offset = -a->offset * inv;
+}
+
+/*
+ * Meshes (roadmap items P31, DKR_TRACK_MESH, and P34, DKR_MODEL_MESH). A triangle command drawn by the GPU path builds
+ * the same model vertices and indices from the same game data every frame: the track's segments never change, and
+ * neither do most objects' models. So the first time a command is seen its vertices and indices are copied once to
+ * memory the GPU reads (gfxb_mesh_create), and from then on it is drawn from there with the frame's matrix and
+ * textures, with no work per vertex. An entry is keyed by the command's triangle and vertex data, and checked each
+ * frame against a hash of that data, so a level loaded at the same address, or an animated model that rewrites its
+ * vertices, is noticed; a command whose data keeps changing (MESH_DYNAMIC_AFTER times) is no longer recorded.
+ * Track geometry is told from the rest by its vertices lying in the level model's segments.
+ */
+#define MESH_TABLE_SIZE 4096
+#define MESH_PROBES 8
+#define MESH_MAX_RUNS 8
+#define MESH_DYNAMIC_AFTER 3
+#define MESH_UNUSED_FRAMES 600
+#define MESH_MAX_BYTES (6 * 1024 * 1024)
+
+typedef struct MeshRun {
+    u16 firstIndex, numTriangles;
+    u8 doubleSided;
+} MeshRun;
+
+typedef struct MeshEntry {
+    const Triangle *tris;
+    const Vertex *src;
+    u16 numTris;
+    u8 dest, numVerts;
+    u32 hash;
+    u32 lastFrame;
+    void *mesh; // NULL while not recorded
+    u32 bytes;
+    u8 used, level, changes, dynamic;
+    u8 numRuns;
+    MeshRun runs[MESH_MAX_RUNS];
+} MeshEntry;
+
+static MeshEntry sMeshes[MESH_TABLE_SIZE];
+static u32 sMeshBytes;
+static s32 sTrackMesh, sModelMesh; // This frame's DKR_TRACK_MESH and DKR_MODEL_MESH
+static u32 sMeshStats[4];          // Draws from meshes, meshes made, commands not recorded, data changes
+
+extern LevelModel *gCurrentLevelModel;
+
+static s32 is_level_vertex(const Vertex *v) {
+    s32 i;
+    if (gCurrentLevelModel == NULL) {
+        return FALSE;
+    }
+    for (i = 0; i < gCurrentLevelModel->numberOfSegments; i++) {
+        const LevelModelSegment *segment = &gCurrentLevelModel->segments[i];
+        if (v >= segment->vertices && v < segment->vertices + segment->numberOfVertices) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static u32 mesh_hash(const Triangle *tris, s32 numTris, const Vertex *src, s32 numVerts) {
+    const u32 *t = (const u32 *) tris;
+    const u16 *v = (const u16 *) src;
+    u32 h = 2166136261u ^ (u32) numTris, i, n;
+    for (i = 0, n = numTris * (sizeof(Triangle) / 4); i < n; i++) {
+        h = (h ^ t[i]) * 16777619u;
+    }
+    for (i = 0, n = numVerts * (sizeof(Vertex) / 2); i < n; i++) {
+        h = (h ^ v[i]) * 16777619u;
+    }
+    return h;
+}
+
+static void mesh_drop(MeshEntry *e) {
+    if (e->mesh != NULL) {
+        gfxb_mesh_free(e->mesh);
+        sMeshBytes -= e->bytes;
+    }
+    __builtin_memset(e, 0, sizeof(*e));
+}
+
+/* Frees the meshes of commands not drawn for a while (a level left, an object gone), a part of the table a frame. */
+static void mesh_age(void) {
+    static u32 sNext;
+    u32 i;
+    for (i = 0; i < MESH_TABLE_SIZE / 64; i++, sNext++) {
+        MeshEntry *e = &sMeshes[sNext % MESH_TABLE_SIZE];
+        if (e->used && (u32) sFrameCount - e->lastFrame > MESH_UNUSED_FRAMES) {
+            mesh_drop(e);
+        }
+    }
+}
+
+/* Builds a command's model vertices and indices into sModelVerts/sModelIndices (as the model batch would, sharing
+ * corners with the same texture coordinates), with runs of triangles of the same culling. Returns FALSE if it has
+ * more runs than an entry holds. */
+static s32 mesh_build(const Triangle *tris, s32 count, const PendingLoad *pl, MeshEntry *e, s32 *numVerts) {
+    s32 i, k, verts = 0, indices = 0;
+    u32 generation = ++sBatchGeneration;
+    e->numRuns = 0;
+    for (i = 0; i < count; i++) {
+        const Triangle *t = &tris[i];
+        const TexCoords *uv[3] = { &t->uv0, &t->uv1, &t->uv2 };
+        u8 idx[3] = { t->vi0, t->vi1, t->vi2 };
+        u8 doubleSided = (t->flags & BACKFACE_DRAW) != 0;
+        if (e->numRuns == 0 || e->runs[e->numRuns - 1].doubleSided != doubleSided) {
+            if (e->numRuns == MESH_MAX_RUNS) {
+                return FALSE;
+            }
+            e->runs[e->numRuns].firstIndex = indices;
+            e->runs[e->numRuns].numTriangles = 0;
+            e->runs[e->numRuns].doubleSided = doubleSided;
+            e->numRuns++;
+        }
+        e->runs[e->numRuns - 1].numTriangles++;
+        for (k = 0; k < 3; k++) {
+            SharedVertex *shared = &sShared[idx[k]];
+            u32 key = ((u32) (u16) uv[k]->u << 16) | (u16) uv[k]->v;
+            const Vertex *s = &pl->src[idx[k] - pl->dest];
+            GfxModelVertex *v;
+            s32 q, n;
+            if (shared->generation != generation) {
+                shared->generation = generation;
+                shared->count = 0;
+            }
+            n = shared->count;
+            for (q = 0; q < n; q++) {
+                if (shared->key[q] == key) {
+                    break;
+                }
+            }
+            if (q < n) {
+                sModelIndices[indices++] = shared->index[q];
+                continue;
+            }
+            if (n < SHARED_PER_VERTEX) {
+                shared->key[n] = key;
+                shared->index[n] = (u16) verts;
+                shared->count = n + 1;
+            }
+            v = &sModelVerts[verts];
+            v->x = s->x;
+            v->y = s->y;
+            v->z = s->z;
+            v->one = 1;
+            v->u = uv[k]->u;
+            v->v = uv[k]->v;
+            v->r = s->r;
+            v->g = s->g;
+            v->b = s->b;
+            v->a = s->a;
+            sModelIndices[indices++] = (u16) verts++;
+        }
+    }
+    *numVerts = verts;
+    return TRUE;
+}
+
+/*
+ * Draws the command from its mesh, recording the mesh first if this is the first time (or its data changed). Returns
+ * FALSE when it isn't to be drawn that way (meshes off for its kind, too big, data that keeps changing, out of room),
+ * for the model batch to draw it.
+ */
+static s32 mesh_triangles(const Triangle *tris, s32 count, const PendingLoad *pl, const GfxDrawState *baseState,
+                          const GfxModelParams *params, u8 frontCull) {
+    MeshEntry *e = NULL, *freeSlot = NULL;
+    u32 slot = ((uintptr_t) tris >> 4) % MESH_TABLE_SIZE, hash, i;
+    GfxDrawState state;
+    s32 level;
+
+    if (count > MAX_BATCH_TRIANGLES || pl->count > MAX_VERTICES) {
+        return FALSE;
+    }
+    for (i = 0; i < MESH_PROBES; i++) {
+        MeshEntry *c = &sMeshes[(slot + i) % MESH_TABLE_SIZE];
+        if (c->used && c->tris == tris && c->src == pl->src && c->numTris == count &&
+            c->dest == pl->dest && c->numVerts == pl->count) {
+            e = c;
+            break;
+        }
+        if (!c->used && freeSlot == NULL) {
+            freeSlot = c;
+        }
+    }
+    if (e == NULL) {
+        if (freeSlot == NULL) {
+            return FALSE;
+        }
+        level = is_level_vertex(pl->src);
+        if (!(level ? sTrackMesh : sModelMesh)) {
+            return FALSE; // Not recorded, and not remembered either: the check is cheap.
+        }
+        e = freeSlot;
+        e->used = TRUE;
+        e->tris = tris;
+        e->src = pl->src;
+        e->numTris = count;
+        e->dest = pl->dest;
+        e->numVerts = pl->count;
+        e->level = level;
+        e->hash = 0;
+    } else if (!(e->level ? sTrackMesh : sModelMesh)) {
+        return FALSE;
+    }
+    e->lastFrame = sFrameCount;
+    if (e->dynamic) {
+        return FALSE;
+    }
+    hash = mesh_hash(tris, count, pl->src, pl->count);
+    if (e->mesh == NULL || hash != e->hash) {
+        s32 numVerts;
+        if (e->mesh != NULL) {
+            sMeshStats[3]++;
+            gfxb_mesh_free(e->mesh);
+            sMeshBytes -= e->bytes;
+            e->mesh = NULL;
+            if (++e->changes >= MESH_DYNAMIC_AFTER) {
+                e->dynamic = TRUE;
+                sMeshStats[2]++;
+                return FALSE;
+            }
+        }
+        if (sModelCount > 0) {
+            flush_model_batch(); // mesh_build works in the batch's arrays
+        }
+        if (!mesh_build(tris, count, pl, e, &numVerts)) {
+            e->dynamic = TRUE;
+            sMeshStats[2]++;
+            return FALSE;
+        }
+        e->bytes = numVerts * sizeof(GfxModelVertex) + count * 3 * sizeof(u16);
+        if (sMeshBytes + e->bytes > MESH_MAX_BYTES ||
+            (e->mesh = gfxb_mesh_create(sModelVerts, numVerts, sModelIndices, count * 3)) == NULL) {
+            return FALSE; // Out of room: tried again next frame, once old ones may have gone.
+        }
+        sMeshBytes += e->bytes;
+        e->hash = hash;
+        sMeshStats[1]++;
+    }
+    flush_batch();
+    state = *baseState;
+    for (i = 0; i < e->numRuns; i++) {
+        u32 part = walk_switch(WALK_DRAWS);
+        state.cullMode = e->runs[i].doubleSided ? 0 : frontCull;
+        gfxb_draw_mesh(&state, params, e->mesh, e->runs[i].firstIndex, e->runs[i].numTriangles);
+        prof_count(PROF_TRIANGLES, e->runs[i].numTriangles);
+        prof_count(PROF_DRAWS, 1);
+        walk_switch(part);
+        sMeshStats[0]++;
+    }
+    return TRUE;
+}
+
+/*
+ * Draws a triangle command with GPU vertex maths, if every corner is one of the pending load's vertices and the
+ * backend takes the load's box (else returns FALSE, for the CPU path). Returns TRUE when it is done: drawn, or wholly
+ * outside the guard band, which the CPU path would have dropped too.
+ */
+static s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
+    GfxDrawState state;
+    GfxModelParams params;
+    Viewport vp;
+    PendingLoad *pl;
+    s32 i, k, first, verdict;
+    u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1, batchedCull = 0xFF, l;
+
+    if (count <= 0 || (l = sSlotLoad[tris[0].vi0]) == NO_LOAD) {
+        return FALSE;
+    }
+    for (i = 0; i < count; i++) {
+        if (tris[i].vi0 >= MAX_VERTICES || tris[i].vi1 >= MAX_VERTICES || tris[i].vi2 >= MAX_VERTICES ||
+            sSlotLoad[tris[i].vi0] != l || sSlotLoad[tris[i].vi1] != l || sSlotLoad[tris[i].vi2] != l) {
+            return FALSE;
+        }
+    }
+    pl = &sLoads[l];
+    first = pl->dest;
+    viewport_init(&vp);
+    for (i = 0; i < 4; i++) {
+        float(*m)[4] = pl->m;
+        params.mtx[i][0] = m[i][0] * vp.scaleX + m[i][3] * vp.transX;
+        params.mtx[i][1] = m[i][1] * vp.scaleY + m[i][3] * vp.transY;
+        params.mtx[i][2] = m[i][2];
+        params.mtx[i][3] = m[i][3];
+    }
+    pending_box(pl);
+    verdict = gfxb_model_check(params.mtx, pl->boxMin, pl->boxMax);
+    if (verdict == GFX_MODEL_HIDDEN) {
+        return TRUE;
+    }
+    if (verdict != GFX_MODEL_GPU) {
+        return FALSE;
+    }
+
+    if (!sTriStateValid) {
+        build_draw_state(&sTriState, FALSE);
+        sTriStateValid = TRUE;
+    }
+    state = sTriState;
+    if (!textured) {
+        state.textures[0] = NULL;
+        state.textures[1] = NULL;
+    }
+    state.flat = 0;
+    for (i = 0; i < 4; i++) {
+        params.texScale[i] = 0.0f;
+        params.texOffset[i] = 0.0f;
+    }
+    for (i = 0; i < 2; i++) {
+        if (state.textures[i] != NULL) {
+            Tile *tile = &g.tiles[i];
+            float shift = texel_centre_shift(state.textures[i]);
+            TexAxis u, v;
+            tex_axis_init(&u, tile->shifts, tile->uls, state.textures[i]->width, shift);
+            tex_axis_init(&v, tile->shiftt, tile->ult, state.textures[i]->height, shift);
+            tex_axis_factors(&u, &params.texScale[i * 2], &params.texOffset[i * 2]);
+            tex_axis_factors(&v, &params.texScale[i * 2 + 1], &params.texOffset[i * 2 + 1]);
+        }
+    }
+    params.fog = (g.geometryMode & G_FOG) != 0;
+    // Fog worked out when the vertices came uses that time's settings, as load_vertices_now does
+    params.fogMul = params.fog ? (pl->fog ? pl->fogMul : g.fogMul) : 0;
+    params.fogOffset = params.fog ? (pl->fog ? pl->fogOffset : g.fogOffset) : 0;
+    params.pad[0] = params.pad[1] = params.pad[2] = 0;
+
+    if ((sTrackMesh || sModelMesh) && !REF_ACTIVE() && mesh_triangles(tris, count, pl, &state, &params, frontCull)) {
+        return TRUE;
+    }
+
+    sBatchGeneration++;
+    for (i = 0; i < count; i++) {
+        const Triangle *t = &tris[i];
+        const TexCoords *uv[3] = { &t->uv0, &t->uv1, &t->uv2 };
+        u8 idx[3] = { t->vi0, t->vi1, t->vi2 };
+        u16 *out;
+
+        state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : frontCull;
+        if (state.cullMode == batchedCull && sModelCount > 0 && sModelCount < MAX_BATCH_TRIANGLES &&
+            sModelVertices + 3 <= MAX_BATCH_VERTICES) {
+            out = &sModelIndices[sModelCount++ * 3];
+        } else {
+            out = model_triangle(&state, &params);
+            batchedCull = state.cullMode;
+        }
+        for (k = 0; k < 3; k++) {
+            SharedVertex *shared = &sShared[idx[k]];
+            u32 key = ((u32) (u16) uv[k]->u << 16) | (u16) uv[k]->v;
+            const Vertex *s = &pl->src[idx[k] - first];
+            GfxModelVertex *v;
+            s32 q, n;
+
+            if (shared->generation != sBatchGeneration) {
+                shared->generation = sBatchGeneration;
+                shared->count = 0;
+            }
+            n = shared->count;
+            for (q = 0; q < n; q++) {
+                if (shared->key[q] == key) {
+                    break;
+                }
+            }
+            if (q < n) {
+                out[k] = shared->index[q];
+                continue;
+            }
+            out[k] = (u16) sModelVertices;
+            if (n < SHARED_PER_VERTEX) {
+                shared->key[n] = key;
+                shared->index[n] = out[k];
+                shared->count = n + 1;
+            }
+            v = &sModelVerts[sModelVertices++];
+            v->x = s->x;
+            v->y = s->y;
+            v->z = s->z;
+            v->one = 1;
+            v->u = uv[k]->u;
+            v->v = uv[k]->v;
+            v->r = s->r;
+            v->g = s->g;
+            v->b = s->b;
+            v->a = s->a;
+        }
+    }
+    return TRUE;
+}
+
 static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
@@ -1181,6 +1793,23 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
     s32 tex0, tex1;
 
+    if (sAnyPending) {
+        if (model_triangles(tris, count, textured)) {
+            return;
+        }
+        for (i = 0; i < count; i++) {
+            const Triangle *t = &tris[i];
+            if (t->vi0 < MAX_VERTICES && sSlotLoad[t->vi0] != NO_LOAD) {
+                resolve_load(sSlotLoad[t->vi0]);
+            }
+            if (t->vi1 < MAX_VERTICES && sSlotLoad[t->vi1] != NO_LOAD) {
+                resolve_load(sSlotLoad[t->vi1]);
+            }
+            if (t->vi2 < MAX_VERTICES && sSlotLoad[t->vi2] != NO_LOAD) {
+                resolve_load(sSlotLoad[t->vi2]);
+            }
+        }
+    }
     if (!sTriStateValid) {
         build_draw_state(&sTriState, FALSE);
         sTriStateValid = TRUE;
@@ -2060,6 +2689,18 @@ void port_gfx_run_task(void *taskPtr) {
     REF_CALL(refb_start_frame());
     read_switches();
     prewarm_textures();
+    forget_all_loads();
+    sGpuTransform = gfxb_gpu_transform();
+    sTrackMesh = sGpuTransform && sTrackMeshSwitch;
+    sModelMesh = sGpuTransform && sModelMeshSwitch;
+    if (sGpuTransform) {
+        mesh_age();
+        if (sFrameCount % 600 == 0) {
+            plat_log("meshes: %u KB, %u draws, %u made, %u not recorded, %u data changes", (unsigned) (sMeshBytes / 1024),
+                     (unsigned) sMeshStats[0], (unsigned) sMeshStats[1], (unsigned) sMeshStats[2],
+                     (unsigned) sMeshStats[3]);
+        }
+    }
     g.vertexIndex = 0;
     g.billboard = 0;
     sTriStateValid = FALSE;

@@ -862,3 +862,72 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
         }
     }
 }
+
+/*
+ * GPU vertex maths (roadmap item P30) has no GPU here: model draws are transformed the way the CPU path does it
+ * (gfx_model_to_vertex) and drawn as usual. DKR_GPU_TRANSFORM=1 still sends the frontend down its model path, so the
+ * PC build checks that path's frames against the plain one (with the meshes, P31 and P34, too).
+ */
+int gfxb_gpu_transform(void) {
+    return plat_switch("DKR_GPU_TRANSFORM", GFX_SURVEY_DEFAULT) != 0;
+}
+
+int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]) {
+    (void) mtx;
+    (void) boxMin;
+    (void) boxMax;
+    return GFX_MODEL_GPU; // No guard band to keep to
+}
+
+void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
+                     const unsigned short *indices, int numTriangles) {
+    static GfxVertex sConverted[GFX_MAX_BATCH_VERTICES];
+    int i;
+    if (numVerts > GFX_MAX_BATCH_VERTICES) {
+        numVerts = GFX_MAX_BATCH_VERTICES;
+    }
+    for (i = 0; i < numVerts; i++) {
+        gfx_model_to_vertex(&sConverted[i], &verts[i], params);
+    }
+    gfxb_draw_indexed(state, sConverted, numVerts, indices, numTriangles);
+}
+
+typedef struct SoftMesh {
+    GfxModelVertex *verts;
+    unsigned short *indices;
+    int numVerts;
+} SoftMesh;
+
+void *gfxb_mesh_create(const GfxModelVertex *verts, int numVerts, const unsigned short *indices, int numIndices) {
+    SoftMesh *m = malloc(sizeof(SoftMesh));
+    if (m == NULL) {
+        return NULL;
+    }
+    m->verts = malloc(numVerts * sizeof(GfxModelVertex));
+    m->indices = malloc(numIndices * sizeof(unsigned short));
+    if (m->verts == NULL || m->indices == NULL) {
+        free(m->verts);
+        free(m->indices);
+        free(m);
+        return NULL;
+    }
+    memcpy(m->verts, verts, numVerts * sizeof(GfxModelVertex));
+    memcpy(m->indices, indices, numIndices * sizeof(unsigned short));
+    m->numVerts = numVerts;
+    return m;
+}
+
+void gfxb_mesh_free(void *mesh) {
+    SoftMesh *m = mesh;
+    if (m != NULL) {
+        free(m->verts);
+        free(m->indices);
+        free(m);
+    }
+}
+
+void gfxb_draw_mesh(const GfxDrawState *state, const GfxModelParams *params, void *mesh, int firstIndex,
+                    int numTriangles) {
+    const SoftMesh *m = mesh;
+    gfxb_draw_model(state, params, m->verts, m->numVerts, m->indices + firstIndex, numTriangles);
+}

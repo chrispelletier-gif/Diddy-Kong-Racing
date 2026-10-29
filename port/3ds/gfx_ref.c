@@ -12,6 +12,12 @@
 #define gfxb_texture_upload refb_texture_upload
 #define gfxb_texture_free refb_texture_free
 #define gfxb_texture_share refb_texture_share
+#define gfxb_gpu_transform refb_gpu_transform
+#define gfxb_model_check refb_model_check
+#define gfxb_draw_model refb_draw_model
+#define gfxb_mesh_create refb_mesh_create
+#define gfxb_mesh_free refb_mesh_free
+#define gfxb_draw_mesh refb_draw_mesh
 #define gfxb_soft_save_png refb_save_png
 #define host_frames_rendered ref_frames_rendered
 #include <stdlib.h>

@@ -74,14 +74,19 @@ typedef struct C3DVertexOld { // VFMT_OLD
     float tc1[2];
     float color[4];
 } C3DVertexOld;
-enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_COUNT };
-static const int sVfmtStride[VFMT_COUNT] = { sizeof(C3DVertex), sizeof(C3DVertex2), sizeof(C3DVertexOld) };
+/* VFMT_MODEL is the game's own vertices for GPU vertex maths (P30, GfxModelVertex): s16 position and texture
+ * coordinates and byte colours, 16 bytes; the second coordinates come from the fixed attribute. */
+enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_MODEL, VFMT_COUNT };
+static const int sVfmtStride[VFMT_COUNT] = { sizeof(C3DVertex), sizeof(C3DVertex2), sizeof(C3DVertexOld),
+                                             sizeof(GfxModelVertex) };
+_Static_assert(sizeof(GfxModelVertex) == 16, "the model vertex format's attributes must add up to its stride");
 static C3D_AttrInfo sVfmtAttr[VFMT_COUNT];
 static int sVfmtOld;       // DKR_VERTEX_FORMAT=48
 static int sVfmtAttrSet;   // The format of citro3d's attribute setting
 static int sVfmtBound = -1; // The format the vertex buffer setting reads, -1 for none yet this frame
 static int sVfmtBase;      // Where in sVbo (bytes) the vertex buffer setting starts
 static int sVfmtSwitches;   // Format changes in the frame
+static const void *sBufMesh; // The mesh the vertex buffer setting points at (gfxb_draw_mesh), NULL for the frame's
 
 typedef struct C3DTexture {
     C3D_Tex tex;
@@ -161,6 +166,16 @@ static int sWideUnsupported;    // An original 2DS, which can't show 800 pixels
  * the two eyes, so what is sEyeConv away from the camera stays at the depth of the screen. */
 static float sEyeSep, sEyeConv = 130.0f;
 static int sEyeUniform = -1; // The shader's eye uniform register, if found
+static int sStereoOnce;      // DKR_STEREO_ONCE (P33): stereo frames made once and drawn twice, see stereo_once_lists
+static int sOnceFrame;       // This frame is
+#define EYE_CMD_WORDS 64
+/* citro3d's flags (internal.h C3DiF_*): the target, and the groups of settings a frame made once writes again at its
+ * start: attributes, buffers, effect, viewport, scissor, program, combiner buffer and fog, texture status, fog table,
+ * textures and combiner stages. */
+#define C3D_FLAG_FRAMEBUF (1u << 5)
+#define C3D_ONCE_FLAGS ((1u << 2) | (1u << 3) | (1u << 4) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | \
+                        (1u << 14) | (1u << 17) | (7u << 23) | (0x3Fu << 26))
+void C3Di_DirtyUniforms(GPU_SHADER_TYPE type);
 
 /*
  * The GPU reads vertices and textures from memory, not from the CPU's cache, so whatever the CPU wrote has to be
@@ -435,6 +450,13 @@ static void init_vertex_formats(void) {
     for (i = 0; i < VFMT_COUNT; i++) {
         attr = &sVfmtAttr[i];
         AttrInfo_Init(attr);
+        if (i == VFMT_MODEL) {
+            AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
+            AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);
+            AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4);
+            AttrInfo_AddFixed(attr, 2);
+            continue;
+        }
         AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
         AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
         if (i == VFMT_OLD) {
@@ -451,9 +473,8 @@ static void init_vertex_formats(void) {
     }
     sVfmtAttrSet = sVfmtOld ? VFMT_OLD : VFMT_SHORT;
     C3D_SetAttrInfo(&sVfmtAttr[sVfmtAttrSet]);
-    if (!sVfmtOld) {
-        C3D_FixedAttribSet(3, 0.0f, 0.0f, 0.0f, 0.0f); // Attribute 3 of the short format: v2
-    }
+    // Attribute 3 of the short and model formats: v2. The old format loads that attribute, so it doesn't mind.
+    C3D_FixedAttribSet(3, 0.0f, 0.0f, 0.0f, 0.0f);
     plat_log("vertex format: %s", sVfmtOld ? "48 bytes (DKR_VERTEX_FORMAT=48)" : "28 bytes, 36 with a second texture");
 }
 
@@ -473,7 +494,9 @@ static int use_vertex_format(int fmt) {
             sVfmtAttrSet = fmt;
         }
         BufInfo_Init(buf);
-        BufInfo_Add(buf, sVbo + sVfmtBase, stride, fmt == VFMT_SHORT ? 3 : 4, fmt == VFMT_SHORT ? 0x210 : 0x3210);
+        BufInfo_Add(buf, sVbo + sVfmtBase, stride, fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 3 : 4,
+                    fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 0x210 : 0x3210);
+        sBufMesh = NULL;
         if (sVfmtBound >= 0) {
             sVfmtSwitches++;
         }
@@ -496,6 +519,8 @@ static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
 static void write_eye(float mul, float add);
 static void hand_over_draw_parts(void);
+static void init_transform(void);
+static void transform_frame_drawn(int frame);
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
 void C3Di_UpdateContext(void);
 
@@ -1073,6 +1098,7 @@ void gfxb_init(void) {
     shaderProgramSetVsh(&sProgram, &sShaderDvlb->DVLE[0]);
     C3D_BindProgram(&sProgram);
     sEyeUniform = shaderInstanceGetUniformLocation(sProgram.vertexShader, "eye");
+    init_transform();
 
     init_vertex_formats();
     alloc_frame_slots();
@@ -1684,6 +1710,9 @@ typedef struct FrameSlot {
     int numDraws;        // Draws in the frame, which can be more than HANG_DRAWS
     int frame;           // sFrameCount when it was built
     u32 words;           // Command list words used
+    u32 *eyeCmd;         // EYE_CMD_WORDS: the two eyes' short command lists of a stereo frame made once
+    void **meshFrees;    // Meshes freed while the frame was built (gfxb_mesh_free)
+    int numMeshFrees, meshFreesCapacity;
 } FrameSlot;
 static FrameSlot sSlots[2];
 static int sNumSlots = 1; // 2 unless the second slot didn't fit
@@ -1708,6 +1737,7 @@ static void alloc_frame_slots(void) {
         sSlots[i].vbo = linearAlloc(VBO_BYTES);
         sSlots[i].ibo = linearAlloc(IBO_BYTES);
         sSlots[i].cmd = linearAlloc(sCmdWords * 4);
+        sSlots[i].eyeCmd = linearAlloc(EYE_CMD_WORDS * 4);
         if (sSlots[i].vbo == NULL || sSlots[i].ibo == NULL || sSlots[i].cmd == NULL) {
             if (sSlots[i].vbo != NULL) {
                 linearFree(sSlots[i].vbo);
@@ -1798,7 +1828,7 @@ static void bind_target(C3D_RenderTarget *target) {
 
 /* Draws count vertices from vertex on, or the count vertices the indices name; once, or in 3D once for each eye. */
 static void draw_prims(int vertex, int count, const u16 *indices) {
-    if (!sStereo) {
+    if (!sStereo || sOnceFrame) {
         if (indices != NULL) {
             C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
         } else {
@@ -1820,6 +1850,37 @@ static void draw_prims(int vertex, int count, const u16 *indices) {
         C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
     } else {
         C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    }
+}
+
+/*
+ * Stereo frames made once (roadmap item P33, DKR_STEREO_ONCE=1): instead of every draw being sent twice, the frame's
+ * commands are made once and the GPU runs them twice, the way the F-Zero X 3DS port does it. Each eye gets a short
+ * command list of its own that sets its target and eye offset, and the GPU queue gets the left eye's, the frame's,
+ * the right eye's and the frame's again. That saves the CPU writing every draw a second time, and the GPU a
+ * framebuffer flush and a change of target between every two draws. The frame's commands make no assumption about
+ * the settings they start with (see gfxb_start_frame), and command list splits (DKR_GPU_SPLIT) leave it off.
+ */
+static void stereo_once_lists(FrameSlot *slot) {
+    u32 *body, bodyWords, *eye[2], eyeWords[2], *saved = gpuCmdBuf, savedSize = gpuCmdBufSize;
+    int i;
+    if (slot->eyeCmd == NULL || slot->numParts + 4 > MAX_LIST_PARTS || !C3Di_SplitFrame(&body, &bodyWords)) {
+        return;
+    }
+    saved = gpuCmdBuf; // After the frame's commands: the frame's end goes on from there.
+    savedSize = gpuCmdBufSize;
+    GPUCMD_SetBuffer(slot->eyeCmd, EYE_CMD_WORDS, 0);
+    for (i = 0; i < 2; i++) {
+        bind_target(i == 0 ? sTarget : sTargetRight);
+        write_eye(i == 0 ? sEyeSep : -sEyeSep, i == 0 ? -sEyeSep * sEyeConv : sEyeSep * sEyeConv);
+        GPUCMD_Split(&eye[i], &eyeWords[i]);
+    }
+    GPUCMD_SetBuffer(saved, savedSize, 0);
+    for (i = 0; i < 2; i++) {
+        slot->partAddr[slot->numParts] = eye[i];
+        slot->partWords[slot->numParts++] = eyeWords[i];
+        slot->partAddr[slot->numParts] = body;
+        slot->partWords[slot->numParts++] = bodyWords;
     }
 }
 
@@ -1972,7 +2033,9 @@ void gfxb_3ds_shutdown(void) {
     C3D_Fini();
 }
 
-/* Deletes the textures freed while the slot's frame was built, once the GPU has drawn it. */
+static void delete_mesh(void *mesh);
+
+/* Deletes the textures (and meshes) freed while the slot's frame was built, once the GPU has drawn it. */
 static void process_pending_frees(FrameSlot *slot) {
     int i;
     for (i = 0; i < slot->numFrees; i++) {
@@ -1983,6 +2046,10 @@ static void process_pending_frees(FrameSlot *slot) {
         free(slot->frees[i]);
     }
     slot->numFrees = 0;
+    for (i = 0; i < slot->numMeshFrees; i++) {
+        delete_mesh(slot->meshFrees[i]);
+    }
+    slot->numMeshFrees = 0;
 }
 
 static int overlap_setting(void) {
@@ -2023,6 +2090,9 @@ static void wait_for_gpu(int measure) {
             plat_sleep_ns(250000);
         }
     }
+    if (sOnGpu >= 0) {
+        transform_frame_drawn(sSlots[sOnGpu].frame);
+    }
     if (measure && prof_enabled()) {
         prof_add(PROF_GPU_WAIT, plat_time_ns() - waitStart);
         if (sOnGpu >= 0) {
@@ -2049,6 +2119,209 @@ static void wait_for_gpu(int measure) {
     if (sOnGpu >= 0) {
         process_pending_frees(&sSlots[sOnGpu]);
     }
+}
+
+/******************************** GPU vertex maths ********************************/
+
+/*
+ * GPU vertex maths (roadmap item P30, DKR_GPU_TRANSFORM=1): every draw goes through transform.v.pica instead of the
+ * pass-through shader. The frontend hands most 3D triangles over as the game's own vertices with their matrix
+ * (gfxb_draw_model, gfxb_draw_mesh), and the GPU transforms them; the rest still arrive transformed by the CPU
+ * (gfxb_draw_indexed), drawn by the same shader with an identity matrix (set_cpu_uniforms).
+ *
+ * The first shader that transformed on the GPU hung a real New 3DS on its first triangle (2026-10-16), while
+ * emulators ran it. So the first frames drawn with it are watched: gpu_transform.txt says "testing" until 30 frames
+ * have been drawn, then "passed". If the console hangs meanwhile, the next start finds "testing", writes "hung" and
+ * leaves GPU vertex maths off (DKR_GPU_TRANSFORM is ignored) until TRANSFORM_TEST_VERSION changes with a new shader.
+ */
+#define TRANSFORM_TEST_VERSION 1
+#define TRANSFORM_TEST_FRAMES 30
+
+static shaderProgram_s sProgramT;
+static int sProgramTUsable;  // transform.v.pica's uniforms were all found
+static int sTransformHung;   // It hung the GPU in an earlier run (gpu_transform.txt)
+static int sTransformWanted; // DKR_GPU_TRANSFORM
+static int sTransformOn;     // This frame is drawn with transform.v.pica
+static int sTransformTestFrame = -1; // The first frame drawn with it this run, until it is known to work
+static int sEyeUniformP, sEyeUniformT; // The eye uniform of each program
+
+enum { UNIF_MTX, UNIF_CAMOFF = 4, UNIF_TEXA, UNIF_TEXC, UNIF_TEXB, UNIF_FOGP, UNIF_COUNT };
+static int sUnifLoc[UNIF_COUNT];
+static float sUnifVal[UNIF_COUNT][4];
+static int sUnifKnown; // sUnifVal holds what citro3d has
+static int sUnifModel; // The uniforms are a model draw's (else the CPU draws' identity)
+
+static void transform_marker_path(char *out, size_t size) {
+    snprintf(out, size, "%s/gpu_transform.txt", plat_data_dir());
+}
+
+static void transform_marker_write(const char *what) {
+    char path[256], text[32];
+    transform_marker_path(path, sizeof(path));
+    snprintf(text, sizeof(text), "%s %d\n", what, TRANSFORM_TEST_VERSION);
+    plat_save_file(path, text, strlen(text));
+}
+
+/* At start-up: finds the transform program's uniforms and reads what happened in earlier runs. */
+static void init_transform(void) {
+    static const char *const sNames[] = { "mtx", "camoff", "texa", "texc", "texb", "fogp" };
+    char path[256], text[32];
+    int i, got;
+
+    shaderProgramInit(&sProgramT);
+    sProgramTUsable = sShaderDvlb->numDVLE >= 2 && shaderProgramSetVsh(&sProgramT, &sShaderDvlb->DVLE[1]) == 0;
+    sEyeUniformP = sEyeUniform;
+    sEyeUniformT = sProgramTUsable ? shaderInstanceGetUniformLocation(sProgramT.vertexShader, "eye") : -1;
+    for (i = 0; i < UNIF_COUNT; i++) {
+        int name = i < UNIF_CAMOFF ? 0 : i - UNIF_CAMOFF + 1;
+        int loc = sProgramTUsable ? shaderInstanceGetUniformLocation(sProgramT.vertexShader, sNames[name]) : -1;
+        sUnifLoc[i] = loc >= 0 && i < UNIF_CAMOFF ? loc + i : loc;
+        if (sUnifLoc[i] < 0) {
+            sProgramTUsable = 0;
+        }
+    }
+    if (sEyeUniformT < 0) {
+        sProgramTUsable = 0;
+    }
+    plat_log("GPU vertex maths: shader %s, uniforms eye %d mtx %d camoff %d texa %d texc %d texb %d fogp %d",
+             sProgramTUsable ? "found" : "NOT usable", sEyeUniformT, sUnifLoc[UNIF_MTX], sUnifLoc[UNIF_CAMOFF],
+             sUnifLoc[UNIF_TEXA], sUnifLoc[UNIF_TEXC], sUnifLoc[UNIF_TEXB], sUnifLoc[UNIF_FOGP]);
+
+    transform_marker_path(path, sizeof(path));
+    got = plat_load_file_start(path, text, sizeof(text) - 1);
+    if (got > 0) {
+        text[got] = '\0';
+        if ((strncmp(text, "testing ", 8) == 0 && atoi(text + 8) == TRANSFORM_TEST_VERSION) ||
+            (strncmp(text, "hung ", 5) == 0 && atoi(text + 5) == TRANSFORM_TEST_VERSION)) {
+            sTransformHung = 1;
+            transform_marker_write("hung");
+            plat_log("GPU vertex maths: left off, the GPU hung with it in an earlier run (gpu_transform.txt)");
+        }
+    }
+}
+
+/* Writes the uniform if it changed (through citro3d, which writes it again after the HOME menu). */
+static void set_unif(int u, float x, float y, float z, float w) {
+    float *c = sUnifVal[u];
+    if (sUnifKnown && c[0] == x && c[1] == y && c[2] == z && c[3] == w) {
+        return;
+    }
+    c[0] = x;
+    c[1] = y;
+    c[2] = z;
+    c[3] = w;
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUnifLoc[u], x, y, z, w);
+}
+
+/* The uniforms for a draw the CPU transformed: the shader passes it through, as shader.v.pica does. */
+static void set_cpu_uniforms(void) {
+    if (!sTransformOn || (sUnifKnown && !sUnifModel)) {
+        return;
+    }
+    set_unif(UNIF_MTX + 0, 1.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_MTX + 1, 0.0f, 1.0f, 0.0f, 0.0f);
+    set_unif(UNIF_MTX + 2, 0.0f, 0.0f, 1.0f, 0.0f);
+    set_unif(UNIF_MTX + 3, 0.0f, 0.0f, 0.0f, 1.0f);
+    set_unif(UNIF_CAMOFF, 0.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_TEXA, 1.0f, 1.0f, 0.0f, 0.0f);
+    set_unif(UNIF_TEXC, 0.0f, 0.0f, 1.0f, 1.0f);
+    set_unif(UNIF_TEXB, 0.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
+    sUnifKnown = 1;
+    sUnifModel = 0;
+}
+
+/*
+ * The uniforms for a model draw: its matrix with what to_screen does folded in (the quarter turn, the 3D width, the
+ * depth remap; the clamp is the shader's), and its texture factors with the padded size and flipped t of
+ * write_vertices.
+ *
+ * The GPU works in 24-bit floats, with 16 bits after the point. A track's matrix takes the camera's position off
+ * coordinates in the thousands, and doing that inside the matrix loses the low bits: the nearby world would shake by
+ * pixels. So, as the F-Zero X 3DS port does, the whole-number part of the camera position (the model space point the
+ * matrix takes to x = y = w = 0) is taken off each vertex first, which is exact for whole numbers this size, and the
+ * matrix only keeps what is left of its offset.
+ */
+static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, float su1, float sv1) {
+    double rows[4][4], cam[3] = { 0.0, 0.0, 0.0 }, a[3][3], b[3], det;
+    static const int sCols[3] = { 0, 1, 3 };
+    int r, k;
+
+    for (r = 0; r < 4; r++) {
+        rows[0][r] = p->mtx[r][1];
+        rows[1][r] = -(double) p->mtx[r][0] * sScale3D;
+        rows[2][r] = 0.5 * ((double) p->mtx[r][2] - p->mtx[r][3]);
+        rows[3][r] = p->mtx[r][3];
+    }
+    for (k = 0; k < 3; k++) {
+        for (r = 0; r < 3; r++) {
+            a[k][r] = p->mtx[r][sCols[k]];
+        }
+        b[k] = -(double) p->mtx[3][sCols[k]];
+    }
+    det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+          a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    if (det > 1e-30 || det < -1e-30) {
+        for (k = 0; k < 3; k++) {
+            double m[3][3];
+            int i, j;
+            for (i = 0; i < 3; i++) {
+                for (j = 0; j < 3; j++) {
+                    m[i][j] = j == k ? b[i] : a[i][j];
+                }
+            }
+            cam[k] = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                      m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])) / det;
+            cam[k] = cam[k] < -60000.0 ? -60000.0 : cam[k] > 60000.0 ? 60000.0 : floor(cam[k] + 0.5);
+        }
+    }
+    for (k = 0; k < 4; k++) {
+        double t = rows[k][3] + cam[0] * rows[k][0] + cam[1] * rows[k][1] + cam[2] * rows[k][2];
+        set_unif(UNIF_MTX + k, (float) rows[k][0], (float) rows[k][1], (float) rows[k][2], (float) t);
+    }
+    set_unif(UNIF_CAMOFF, (float) cam[0], (float) cam[1], (float) cam[2], 0.0f);
+    set_unif(UNIF_TEXA, p->texScale[0] * su0, -p->texScale[1] * sv0, p->texScale[2] * su1, -p->texScale[3] * sv1);
+    set_unif(UNIF_TEXC, 0.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_TEXB, p->texOffset[0] * su0, 1.0f - p->texOffset[1] * sv0, p->texOffset[2] * su1,
+             1.0f - p->texOffset[3] * sv1);
+    if (p->fog) {
+        // The shader has z' = (z - w) / 2, so z / w = 2 z' / w + 1.
+        set_unif(UNIF_FOGP, 2.0f * p->fogMul / 255.0f, (p->fogMul + p->fogOffset) / 255.0f, 1.0f, 0.0f);
+    } else {
+        set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    sUnifKnown = 1;
+    sUnifModel = 1;
+}
+
+/* At the start of a frame: binds the program the frame is drawn with, and watches the first frames drawn with the
+ * transform one (see above). */
+static void transform_frame_start(void) {
+    int on = sTransformWanted && sProgramTUsable && !sTransformHung;
+    if (on != sTransformOn) {
+        sTransformOn = on;
+        C3D_BindProgram(on ? &sProgramT : &sProgram);
+        sEyeUniform = on ? sEyeUniformT : sEyeUniformP;
+        sUnifKnown = 0;
+        plat_log("GPU vertex maths %s (frame %d)", on ? "on" : "off", sFrameCount);
+        if (on && sTransformTestFrame == -1) {
+            transform_marker_write("testing");
+            sTransformTestFrame = sFrameCount;
+        }
+    }
+}
+
+/* Once the GPU has drawn a frame: marks the transform program as working after its first frames. */
+static void transform_frame_drawn(int frame) {
+    if (sTransformTestFrame >= 0 && frame >= sTransformTestFrame + TRANSFORM_TEST_FRAMES) {
+        sTransformTestFrame = -2;
+        transform_marker_write("passed");
+        plat_log("GPU vertex maths: %d frames drawn, the shader works on this console", TRANSFORM_TEST_FRAMES);
+    }
+}
+
+int gfxb_gpu_transform(void) {
+    return sTransformOn;
 }
 
 /*
@@ -2078,6 +2351,8 @@ static void read_switches(void) {
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
+    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", GFX_SURVEY_DEFAULT) != 0;
+    sStereoOnce = plat_switch("DKR_STEREO_ONCE", GFX_SURVEY_DEFAULT) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -2095,6 +2370,9 @@ static void read_switches(void) {
     plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s",
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
              plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all");
+    plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
+             sTransformHung ? " (but it hung before: left off)" : !sProgramTUsable ? " (shader not usable)" : "",
+             sStereoOnce ? "made once, drawn twice" : "made for each eye");
 }
 
 void gfxb_start_frame(void) {
@@ -2124,9 +2402,13 @@ void gfxb_start_frame(void) {
     sIboFlushed = 0;
     sVfmtBound = -1; // The first draw points the GPU at this slot's buffer.
     sVfmtSwitches = 0;
+    sBufMesh = NULL;
     GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
+    read_switches();
+    transform_frame_start();
+    sOnceFrame = sStereo && sStereoOnce && sSplitMode == 0;
     if (!sStereo) {
-        write_eye(0.0f, 0.0f); // In 3D, each draw sets it (draw_arrays).
+        write_eye(0.0f, 0.0f); // In 3D, each draw sets it (draw_arrays), or each eye's pass (stereo_once_lists).
     }
     // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
     // draws nothing (while a level loads) must not show up as a black flash. So only the first frame uses a memory
@@ -2140,9 +2422,16 @@ void gfxb_start_frame(void) {
     }
     // What C3D_FrameDrawOn does, which needs a citro3d frame begun; the target is marked used when handed over.
     C3D_SetFrameBuf(&sTarget->frameBuf);
-    bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
+    if (sOnceFrame) {
+        // The frame's commands are run once for each eye, the target and eye offset set before each run
+        // (stereo_once_lists). So they must not set the target themselves, and the first draw writes every setting
+        // the draws rely on, which the second run would otherwise find as the first left them.
+        __C3D_Context.flags = (__C3D_Context.flags & ~C3D_FLAG_FRAMEBUF) | C3D_ONCE_FLAGS;
+        C3Di_DirtyUniforms(GPU_VERTEX_SHADER);
+    } else {
+        bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
+    }
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
-    read_switches();
     promote_textures();
     forget_gpu_state();
     sMipmapsUsed = sMipmapSetting != 0;
@@ -2249,6 +2538,9 @@ void gfxb_end_frame(void) {
         save_command_list();
     }
     hand_over_draw_parts();
+    if (sOnceFrame) {
+        stereo_once_lists(&sSlots[sRec]);
+    }
     {
         static float sMaxUsage;
         FrameSlot *slot = &sSlots[sRec];
@@ -3947,6 +4239,7 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         }
     }
 
+    set_cpu_uniforms();
     if (timed) {
         t2 = plat_ticks();
         draw_part(DRAW_PART_STATE, t2 - t1, 1 + twiceReads);
@@ -3995,6 +4288,178 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         }
     }
     gfxb_draw_indexed(state, verts, numTriangles * 3, sIdentity, numTriangles);
+}
+
+/*
+ * GPU vertex maths (P30): whether a model draw can go to the GPU. The CPU path trims triangles to the guard band
+ * (clip_to_guard_band), which needs their positions; here only the corners of the vertices' box are transformed. A box
+ * wholly beyond one side of the band is drawn by neither path; one reaching past the band, or behind the camera, is
+ * left to the CPU path.
+ */
+int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]) {
+    int all = ~0, any = 0, i;
+    if (!sTransformOn) {
+        return GFX_MODEL_CPU;
+    }
+    if (!plat_3ds_guard_band_setting()) {
+        return GFX_MODEL_GPU;
+    }
+    sBandX = band_for(sTarget->frameBuf.height);
+    sBandY = band_for(sTarget->frameBuf.width);
+    for (i = 0; i < 8; i++) {
+        float x = (i & 1) ? boxMax[0] : boxMin[0], y = (i & 2) ? boxMax[1] : boxMin[1], z = (i & 4) ? boxMax[2] : boxMin[2];
+        GfxVertex c;
+        int out;
+        c.x = x * mtx[0][0] + y * mtx[1][0] + z * mtx[2][0] + mtx[3][0];
+        c.y = x * mtx[0][1] + y * mtx[1][1] + z * mtx[2][1] + mtx[3][1];
+        c.w = x * mtx[0][3] + y * mtx[1][3] + z * mtx[2][3] + mtx[3][3];
+        out = outside_band(&c);
+        all &= out;
+        any |= out;
+    }
+    return (all & OUTSIDE_PLANES) ? GFX_MODEL_HIDDEN : any ? GFX_MODEL_CPU : GFX_MODEL_GPU;
+}
+
+/* What a model or mesh draw does before its vertices: room, hang report, settings, uniforms. Returns FALSE if the draw
+ * is to be left out (no room left in the frame). */
+static int model_draw_begin(const GfxDrawState *state, const GfxModelParams *params, int vertBytes, int numIndices,
+                            int numTriangles, HangDraw **hangDraw) {
+    float su0, sv0, su1, sv1;
+    int first;
+    if (sVboUsed + 15 + vertBytes > VBO_BYTES || sIboUsed + numIndices > IBO_BYTES / (int) sizeof(u16) ||
+        gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+        if (sDrawsLeftOut++ < 5) {
+            plat_log("frame %d: buffers full (%d bytes of vertices, %d indices, %lu command words), model triangles "
+                     "left out", sFrameCount, sVboUsed, sIboUsed, (unsigned long) cmd_position());
+        }
+        return 0;
+    }
+    *hangDraw = hang_draw_start(state, numTriangles);
+    first = drain_before_draw(state, numTriangles);
+    if (first) {
+        forget_gpu_state();
+    }
+    set_all_state(state, &su0, &sv0, &su1, &sv1);
+    if (first) {
+        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+    }
+    set_model_uniforms(params, su0, sv0, su1, sv1);
+    return 1;
+}
+
+void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
+                     const unsigned short *indices, int numTriangles) {
+    HangDraw *hangDraw;
+    int vertex, i, count = numTriangles * 3, vertBytes = numVerts * (int) sizeof(GfxModelVertex);
+    unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
+    u16 *ibo;
+
+    if (!model_draw_begin(state, params, vertBytes, count, numTriangles, &hangDraw)) {
+        return;
+    }
+    vertex = use_vertex_format(VFMT_MODEL);
+    if (vertex + numVerts > 0xFFFF) {
+        sVfmtBound = -1;
+        vertex = use_vertex_format(VFMT_MODEL);
+    }
+    memcpy(sVbo + sVboUsed, verts, vertBytes);
+    ibo = sIbo + sIboUsed;
+    for (i = 0; i < count; i++) {
+        ibo[i] = (u16) (vertex + indices[i]);
+    }
+    sIboUsed += count;
+    draw_prims(vertex, count, ibo);
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
+    sVboUsed += vertBytes;
+    sFrameTriangles += numTriangles;
+    if (t0 != 0) {
+        draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 2);
+        sDrawPartReads += 2;
+    }
+}
+
+/* A mesh (P31, P34): model vertices and their indices in linear memory, which the GPU reads every frame it is drawn. */
+typedef struct C3DMesh {
+    GfxModelVertex *verts;
+    u16 *indices;
+} C3DMesh;
+
+void *gfxb_mesh_create(const GfxModelVertex *verts, int numVerts, const unsigned short *indices, int numIndices) {
+    C3DMesh *m = malloc(sizeof(C3DMesh));
+    u32 vertBytes = (numVerts * sizeof(GfxModelVertex) + 15) & ~15u, bytes = vertBytes + numIndices * sizeof(u16);
+    u8 *data;
+    if (m == NULL || (data = linearAlloc(bytes)) == NULL) {
+        free(m);
+        return NULL;
+    }
+    m->verts = (GfxModelVertex *) data;
+    m->indices = (u16 *) (data + vertBytes);
+    memcpy(m->verts, verts, numVerts * sizeof(GfxModelVertex));
+    memcpy(m->indices, indices, numIndices * sizeof(u16));
+    gpu_flush(data, bytes);
+    return m;
+}
+
+/* The GPU may still draw the mesh in the frames it was handed: deleted once it has (process_pending_frees). */
+void gfxb_mesh_free(void *mesh) {
+    FrameSlot *slot = &sSlots[sRec];
+    if (mesh == NULL) {
+        return;
+    }
+    if (mesh == sBufMesh) {
+        sBufMesh = NULL;
+        sVfmtBound = -1;
+    }
+    if (slot->numMeshFrees == slot->meshFreesCapacity) {
+        int capacity = slot->meshFreesCapacity ? slot->meshFreesCapacity * 2 : 64;
+        void **list = realloc(slot->meshFrees, capacity * sizeof(void *));
+        if (list == NULL) {
+            return; // Out of memory: the mesh is kept (a leak, but nothing the GPU reads is freed).
+        }
+        slot->meshFrees = list;
+        slot->meshFreesCapacity = capacity;
+    }
+    slot->meshFrees[slot->numMeshFrees++] = mesh;
+}
+
+static void delete_mesh(void *mesh) {
+    C3DMesh *m = mesh;
+    linearFree(m->verts);
+    free(m);
+}
+
+void gfxb_draw_mesh(const GfxDrawState *state, const GfxModelParams *params, void *mesh, int firstIndex,
+                    int numTriangles) {
+    C3DMesh *m = mesh;
+    HangDraw *hangDraw;
+    unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
+
+    if (!model_draw_begin(state, params, 0, 0, numTriangles, &hangDraw)) {
+        return;
+    }
+    if (sBufMesh != m) {
+        // The vertex buffer setting points at the mesh until a draw from the frame's buffer points it back.
+        C3D_BufInfo *buf = C3D_GetBufInfo();
+        if (sVfmtAttrSet != VFMT_MODEL) {
+            C3D_SetAttrInfo(&sVfmtAttr[VFMT_MODEL]);
+            sVfmtAttrSet = VFMT_MODEL;
+        }
+        BufInfo_Init(buf);
+        BufInfo_Add(buf, m->verts, sizeof(GfxModelVertex), 3, 0x210);
+        sBufMesh = m;
+        sVfmtBound = -1;
+    }
+    draw_prims(0, numTriangles * 3, m->indices + firstIndex);
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
+    sFrameTriangles += numTriangles;
+    if (t0 != 0) {
+        draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 2);
+        sDrawPartReads += 2;
+    }
 }
 
 /* Draws a screen rectangle with a flat colour, optionally only writing depth. */
