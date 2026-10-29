@@ -18,12 +18,11 @@
 #include "plat/settings.h"
 #include "shader_shbin.h"
 
-/* The display transfer converts to the screen's format and, with anti-aliasing, averages each 2x2 (or 2x1) block of
- * pixels. It can't widen pixels: an RGB565 target hangs a real 3DS's transfer to an RGB8 screen (emulators do it), so
- * with 16-bit buffers the top screen is RGB565 too (see link_target). */
-#define DISPLAY_TRANSFER_FLAGS(format, scaling)                                                                        \
-    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | GX_TRANSFER_IN_FORMAT(format) |  \
-     GX_TRANSFER_OUT_FORMAT((format) == GX_TRANSFER_FMT_RGB565 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGB8) |     \
+/* The display transfer converts the RGBA8 target to the screen's RGB8 and, with anti-aliasing, averages each 2x2 (or
+ * 2x1) block of pixels. */
+#define DISPLAY_TRANSFER_FLAGS(scaling)                                                                                \
+    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |                                 \
+     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |                    \
      GX_TRANSFER_SCALING(scaling))
 
 #define TOP_WIDTH 400
@@ -109,13 +108,9 @@ static C3D_RenderTarget *sTargetRight; // The right eye's, while the screen is i
 static int sRenderScale = 1, sScaleX = 1;
 static int sDefaultAa = PLAT_AA_4X;              // The setting (settings.txt, else DKR_AA).
 static volatile int sWantedAa = PLAT_AA_4X;      // plat_set_gpu_config, applied by the renderer between frames.
-/* 16-bit buffers (RGB565 colour, 16-bit depth) halve the memory the GPU reads and writes per pixel; the N64 game drew
- * to a 16-bit framebuffer itself. The setting (settings.txt, else DKR_FB16), the wanted one and the targets' own. */
-static int sDefaultFb16;
-static volatile int sWantedFb16;
-static int sTargetFb16;
-/* A memory fill of the colour buffer takes a pixel in the buffer's format: black either way. */
-#define CLEAR_BLACK (sTargetFb16 ? 0 : 0x000000FF)
+/* A memory fill of the colour buffer takes a pixel in the buffer's format (RGBA8): black. The 16-bit buffers setting
+ * (RGB565 colour, 16-bit depth) was removed on 2026-10-29 because it changed the picture (fog went missing). */
+#define CLEAR_BLACK 0x000000FF
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
 static u8 *sVbo; // The vertex buffer of the frame being built
@@ -769,7 +764,7 @@ static const char *aa_name(int aa) {
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
 }
 
-/* A render target in the current buffer formats (sTargetFb16). */
+/* A render target: RGBA8 colour, 24-bit depth and stencil. */
 static C3D_RenderTarget *new_target(int width, int height) {
     C3D_RenderTarget *target = NULL;
     int tries;
@@ -778,19 +773,16 @@ static C3D_RenderTarget *new_target(int width, int height) {
         if (tries == 1 && evict_vram_textures() == 0) {
             break;
         }
-        target = C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
-                                        sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+        target = C3D_RenderTargetCreate(width, height, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     }
     return target;
 }
 
 /*
  * The render target for the top screen: twice the screen's resolution down for anti-aliasing (scale), and across for
- * 4x anti-aliasing or the 800 pixel mode (across), with 16-bit buffers or not. The doubled one needs 3MB of VRAM
- * (half that with 16-bit buffers), so fall back if it does not fit.
+ * 4x anti-aliasing or the 800 pixel mode (across). The doubled one needs 3MB of VRAM, so fall back if it does not fit.
  */
-static void create_target(int scale, int across, int fb16) {
-    sTargetFb16 = fb16;
+static void create_target(int scale, int across) {
     sTarget = NULL;
     if (scale == 2 || across == 2) {
         sTarget = new_target(TOP_HEIGHT * scale, TOP_WIDTH * across);
@@ -816,11 +808,7 @@ static void link_target(void) {
     if (sRenderScale == 2) {
         scaling = sScaleX == 2 && !s800 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_X;
     }
-    sTransferFlags = DISPLAY_TRANSFER_FLAGS(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8, scaling);
-    // Called with the GPU idle, so no transfer is still writing the old framebuffers (which this may reallocate).
-    if (gfxGetScreenFormat(GFX_TOP) != (sTargetFb16 ? GSP_RGB565_OES : GSP_BGR8_OES)) {
-        gfxSetScreenFormat(GFX_TOP, sTargetFb16 ? GSP_RGB565_OES : GSP_BGR8_OES);
-    }
+    sTransferFlags = DISPLAY_TRANSFER_FLAGS(scaling);
     C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sTransferFlags);
     sLinked = sTarget;
     if (sStereo && sTargetRight != NULL) {
@@ -869,11 +857,10 @@ static void adaptive_delete_low(void) {
     sLowFailed = 0;
 }
 
-/* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) and 16-bit buffers for the frames from the next
- * one; -1 for either is the player's setting. */
-void plat_set_gpu_config(int aa, int fb16) {
+/* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) for the frames from the next one; -1 is the player's
+ * setting. */
+void plat_set_gpu_config(int aa) {
     sWantedAa = aa < 0 ? sDefaultAa : aa;
-    sWantedFb16 = fb16 < 0 ? sDefaultFb16 : fb16 != 0;
 }
 
 /* The Settings menu: the player's anti-aliasing choice (PLAT_AA_*), saved, and used from the next frame. */
@@ -885,17 +872,6 @@ void plat_3ds_set_antialias_setting(int aa) {
 
 int plat_3ds_antialias_setting(void) {
     return sDefaultAa;
-}
-
-/* The Settings menu: 16-bit colour and depth buffers on or off, saved, and used from the next frame. */
-void plat_3ds_set_fb16_setting(int on) {
-    sDefaultFb16 = on != 0;
-    sWantedFb16 = sDefaultFb16;
-    settings_set("fb16", sDefaultFb16);
-}
-
-int plat_3ds_fb16_setting(void) {
-    return sDefaultFb16;
 }
 
 /* The Settings menu: the colour boost level (0 off, 1 to 3 stronger; see add_colour_boost), from the next frame. */
@@ -911,10 +887,6 @@ int plat_3ds_colour_setting(void) {
 /* The anti-aliasing (PLAT_AA_*) of the frames being drawn now. With 800 pixels across, either is 2x. */
 int plat_antialias(void) {
     return sRenderScale != 2 ? PLAT_AA_OFF : sScaleX == 2 && !s800 ? PLAT_AA_4X : PLAT_AA_2X;
-}
-
-int plat_fb16(void) {
-    return sTargetFb16;
 }
 
 /* The Settings menu's screen page (phase 6, see sWideSetting): each is saved and used from the next frame. */
@@ -1188,7 +1160,7 @@ static void apply_screen_mode(void) {
     int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
                  __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
     int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
-    int aa = stereo ? PLAT_AA_OFF : sWantedAa, fb16 = sWantedFb16;
+    int aa = stereo ? PLAT_AA_OFF : sWantedAa;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;
@@ -1201,7 +1173,7 @@ static void apply_screen_mode(void) {
     sScale3D = sWide ? 1.0f : NARROW;
     apply_stereo_tuning(stereo, slider);
     if (sTarget == NULL ||
-        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX && fb16 == sTargetFb16)) {
+        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX)) {
         return;
     }
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
@@ -1210,14 +1182,14 @@ static void apply_screen_mode(void) {
     }
     C3D_FrameEnd(0);
     adaptive_delete_low();
-    newTarget = scale != sRenderScale || across != sScaleX || fb16 != sTargetFb16;
+    newTarget = scale != sRenderScale || across != sScaleX;
     if (newTarget) {
         C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
         if (sTargetRight != NULL) {
             C3D_RenderTargetDelete(sTargetRight); // Made again below, in the new formats.
             sTargetRight = NULL;
         }
-        create_target(scale, across, fb16);
+        create_target(scale, across);
         sFrameStarted = 0;
         if (wide800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target: don't try again every frame.
@@ -1249,9 +1221,8 @@ static void apply_screen_mode(void) {
     sStereo = stereo;
     s800 = wide800;
     link_target();
-    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s, %s buffers)",
-             sStereo ? "3D" : s800 ? "800 pixels" : "400 pixels", sScaleX, sRenderScale,
-             aa_name(plat_antialias()), sTargetFb16 ? "16-bit" : "32-bit");
+    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s)", sStereo ? "3D" : s800 ? "800 pixels" : "400 pixels",
+             sScaleX, sRenderScale, aa_name(plat_antialias()));
     if (newTarget && scale == 2 && sRenderScale != 2) {
         sWantedAa = PLAT_AA_OFF; // Didn't fit: don't try again every frame.
     }
@@ -1302,19 +1273,16 @@ void gfxb_init(void) {
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
     {
         // Anti-aliasing is the Settings menu's choice; until one is made, 4x unless DKR_AA says otherwise (0 off, 1 4x,
-        // 2 2x, as settings.txt has it). The same for 16-bit buffers: off unless DKR_FB16=1.
+        // 2 2x, as settings.txt has it). An fb16 line left in settings.txt by an older build is ignored.
         const char *aa = plat_getenv("DKR_AA");
-        const char *fb16 = plat_getenv("DKR_FB16");
         sDefaultAa = settings_get("aa", aa != NULL ? atoi(aa) : is_old_3ds() ? PLAT_AA_OFF : PLAT_AA_4X);
         if (sDefaultAa < PLAT_AA_OFF || sDefaultAa > PLAT_AA_2X) {
             sDefaultAa = PLAT_AA_4X;
         }
-        sDefaultFb16 = settings_get("fb16", fb16 != NULL && atoi(fb16) != 0) != 0;
         sWantedAa = sDefaultAa;
-        sWantedFb16 = sDefaultFb16;
         read_screen_settings();
         s800 = s800Setting && !sWideUnsupported;
-        create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1, sDefaultFb16);
+        create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1);
         if (s800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target.
             s800 = 0;
@@ -1323,8 +1291,7 @@ void gfxb_init(void) {
             gfxSetWide(true);
         }
         link_target();
-        plat_status("Graphics started (anti-aliasing %s, %s buffers%s)", aa_name(plat_antialias()),
-                    sTargetFb16 ? "16-bit" : "32-bit", s800 ? ", 800 pixels" : "");
+        plat_status("Graphics started (anti-aliasing %s%s)", aa_name(plat_antialias()), s800 ? ", 800 pixels" : "");
     }
     sMipmapSetting = settings_get("mipmaps", 1);
     // 2, "Show" (each level tinted), is a debug build's view.
@@ -1855,19 +1822,10 @@ static void capture_pending_frame(void) {
                                 GX_BUFFER_DIM(TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX), pixels,
                                 GX_BUFFER_DIM(w, h),
                                 GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                                    GX_TRANSFER_IN_FORMAT(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8) |
-                                    GX_TRANSFER_OUT_FORMAT(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                     GX_TRANSFER_SCALING(halve ? GX_TRANSFER_SCALE_X : GX_TRANSFER_SCALE_NO));
         GSPGPU_InvalidateDataCache(pixels, w * h * 4);
-        if (sTargetFb16) {
-            // The transfer can't widen pixels (see DISPLAY_TRANSFER_FLAGS): RGB565 to RGBA8 here, from the end back.
-            const u16 *in = (const u16 *) pixels;
-            u32 i;
-            for (i = w * h; i-- > 0;) {
-                u32 p = in[i], r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
-                pixels[i] = ((r << 3 | r >> 2) << 24) | ((g << 2 | g >> 4) << 16) | ((b << 3 | b >> 2) << 8) | 0xFF;
-            }
-        }
         file = fopen(sCapturePath, "wb");
         if (file != NULL) {
             fwrite(&w, 4, 1, file);

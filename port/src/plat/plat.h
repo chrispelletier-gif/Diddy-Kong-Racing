@@ -203,13 +203,13 @@ void plat_overlay_show(const char *text);
 void plat_send_test_results(const char *title, const char *summary);
 /*
  * The 3DS render target: anti-aliasing (the GPU draws more pixels than the screen has and the display transfer averages
- * them; PLAT_AA_4X twice the resolution both ways, PLAT_AA_2X twice the height only) and 16-bit colour and depth
- * buffers, 1 on. -1 for either is the player's setting (the Settings menu, else DKR_AA and DKR_FB16).
- * The renderer switches between two frames. plat_antialias and plat_fb16 say what the frames drawn now use (the host
- * build only remembers the setting).
+ * them; PLAT_AA_4X twice the resolution both ways, PLAT_AA_2X twice the height only). -1 is the player's setting
+ * (the Settings menu, else DKR_AA). Colour and depth are always 32-bit: the 16-bit buffers setting was removed
+ * (2026-10-29) because it changed the picture, fog among it. The renderer switches between two frames.
+ * plat_antialias says what the frames drawn now use (the host build only remembers the setting).
  */
 enum { PLAT_AA_OFF, PLAT_AA_4X, PLAT_AA_2X };
-void plat_set_gpu_config(int aa, int fb16);
+void plat_set_gpu_config(int aa);
 int plat_antialias(void);
 /*
  * Widescreen (roadmap item G3): how much wider than 4:3 the game's camera is to be, 1 for 4:3 or 1.25 to fill the
@@ -227,9 +227,7 @@ float plat_camera_fov(float fovy);
 float plat_fov_tan_scale(void);
 /*
  * The camera's near plane (src/camera.h CAMERA_NEAR): the N64's 10, or 2.5 in widescreen, whose wider picture shows
- * rock faces right beside the camera that 4:3 never reached. With 16-bit buffers widescreen keeps 10: a 16-bit depth
- * buffer has 4 times too little precision at a distance with 2.5, and distant doors and signs flickered against the
- * walls behind them (Dragon Forest hub). Decal pulls and billboards' depth offsets scale with it.
+ * rock faces right beside the camera that 4:3 never reached. Decal pulls and billboards' depth offsets scale with it.
  */
 float plat_camera_near(void);
 /*
@@ -239,7 +237,6 @@ float plat_camera_near(void);
  */
 int plat_hud_edges(void);
 void plat_set_hud_edges(int on);
-int plat_fb16(void);
 /*
  * The frame rate cap (roadmap G6): the scheduler hands the game each finished frame after 2 retraces (30 fps, the
  * N64 game's own) or, at 60 fps, after 1. The game's logic already steps by however many retraces a frame took, and

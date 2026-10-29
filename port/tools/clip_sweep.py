@@ -11,7 +11,7 @@ them), yellow where an object (another kart) is that close, green where the came
 level (inside a wall, a rock or the ground, so the view goes through it), cyan where the 3DS depth test (24 or 16 bit,
 DKR_DEPTH_BITS) left another triangle showing than float depth.
 
-Usage: clip_sweep.py <host dkr> <baserom.z64> <out dir> [--tracks 3,4,...] [--modes 43,balanced16,wide]
+Usage: clip_sweep.py <host dkr> <baserom.z64> <out dir> [--tracks 3,4,...] [--modes 43,balanced,wide]
                      [--jobs 4] [--character 1] [--walls]
        clip_sweep.py --report <out dir>
 
@@ -50,15 +50,12 @@ WARPS = {
 NAMES = {**TRACKS, **BOSSES, **WARPS}
 WARP_SECONDS = 90
 
-# Screen modes: the host's DKR_WIDESCREEN (0 4:3, 1 Wide, 2 Balanced, 3 Zoomed) and the depth buffer's bits (16 also
-# DKR_FB16, the 3DS's 16-bit buffers setting, which keeps the N64's near plane in widescreen).
+# Screen modes: the host's DKR_WIDESCREEN (0 4:3, 1 Wide, 2 Balanced, 3 Zoomed) and the depth buffer's bits (24, the
+# 3DS's; its 16-bit buffers setting is gone).
 MODES = {
     "43": {"DKR_WIDESCREEN": "0", "DKR_DEPTH_BITS": "24"},
-    "43_16": {"DKR_WIDESCREEN": "0", "DKR_DEPTH_BITS": "16", "DKR_FB16": "1"},
     "balanced": {"DKR_WIDESCREEN": "2", "DKR_DEPTH_BITS": "24"},
-    "balanced16": {"DKR_WIDESCREEN": "2", "DKR_DEPTH_BITS": "16", "DKR_FB16": "1"},
     "wide": {"DKR_WIDESCREEN": "1", "DKR_DEPTH_BITS": "24"},
-    "wide16": {"DKR_WIDESCREEN": "1", "DKR_DEPTH_BITS": "16", "DKR_FB16": "1"},
     "balanced60": {"DKR_WIDESCREEN": "2", "DKR_DEPTH_BITS": "24", "DKR_60FPS": "1"},
 }
 
@@ -181,7 +178,7 @@ def main():
     parser.add_argument("--tracks", default=",".join(str(t) for t in TRACKS),
                         help="Level ids: race tracks, boss fights (%s) and hubs or arenas (%s); 'extras' for those"
                         % (",".join(str(t) for t in BOSSES), ",".join(str(t) for t in WARPS)))
-    parser.add_argument("--modes", default="43,balanced16,wide")
+    parser.add_argument("--modes", default="43,balanced,wide")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     parser.add_argument("--character", type=int, default=1)
     parser.add_argument("--max-frames", type=int, default=7000)

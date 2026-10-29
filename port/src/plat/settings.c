@@ -80,8 +80,8 @@ static Setting *find(const char *key) {
  * their defaults, even if settings.txt was written by a debug build.
  */
 static int is_debug_switch(const char *key) {
-    static const char *const sKeys[] = { "fb16",      "renderahead", "guardband",   "sound_dsp",
-                                         "sound_core", "sound_rate", "sound_buffer", "o3ds_render" };
+    static const char *const sKeys[] = { "renderahead", "guardband",  "sound_dsp",   "sound_core",
+                                         "sound_rate",  "sound_buffer", "o3ds_render" };
     size_t i;
     for (i = 0; i < sizeof(sKeys) / sizeof(sKeys[0]); i++) {
         if (strcmp(key, sKeys[i]) == 0) {

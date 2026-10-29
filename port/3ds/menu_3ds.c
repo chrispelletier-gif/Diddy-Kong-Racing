@@ -25,8 +25,6 @@
 void plat_3ds_menu_draw(const BsMenu *menu);
 void plat_3ds_set_antialias_setting(int aa);
 int plat_3ds_antialias_setting(void);
-void plat_3ds_set_fb16_setting(int on);
-int plat_3ds_fb16_setting(void);
 void plat_3ds_set_mipmap_setting(int mode);
 int plat_3ds_mipmap_setting(void);
 void plat_3ds_set_colour_setting(int level);
@@ -84,8 +82,7 @@ static void open_page(const MenuPage *page) {
 }
 
 /*
- * The settings of the first and last tabs, numbered as the old main page had them: anti-aliasing, frame rate, 16-bit
- * buffers, mipmaps, colour boost, the Screen page (a tab now), render ahead, the profiler, updates and the bug report.
+ * The settings of the first and last tabs, numbered as the old main page had them: anti-aliasing, frame rate, mipmaps, colour boost, the Screen page (a tab now), render ahead, the profiler, updates and the bug report.
  * The Picture page (also the game's VIDEO OPTIONS) and the Tools page each show some of them, less the ones a player's
  * build (plat.h PLAT_DEBUG_TOOLS) hides (main_hidden): the pages' own functions number the rows shown and the row_*
  * ones these.
@@ -93,7 +90,6 @@ static void open_page(const MenuPage *page) {
 enum {
     MAIN_AA,
     MAIN_FPS,
-    MAIN_FB16,
     MAIN_MIPMAPS,
     MAIN_COLOUR,
     MAIN_SCREEN,
@@ -125,7 +121,7 @@ static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
 /* The performance switches and the debug tools: the profiler, updates (which install test builds) and bug reports
  * (which need a GitHub token). */
 static int main_hidden(int row) {
-    return !PLAT_DEBUG_TOOLS && (row == MAIN_FB16 || row == MAIN_AHEAD || row >= MAIN_GPU_MATHS);
+    return !PLAT_DEBUG_TOOLS && (row == MAIN_AHEAD || row >= MAIN_GPU_MATHS);
 }
 
 static const char *row_label(int i) {
@@ -133,8 +129,6 @@ static const char *row_label(int i) {
         return "Anti-aliasing";
     } else if (i == MAIN_FPS) {
         return "Frame rate";
-    } else if (i == MAIN_FB16) {
-        return "16-bit buffers";
     } else if (i == MAIN_MIPMAPS) {
         return "Mipmaps";
     } else if (i == MAIN_COLOUR) {
@@ -162,8 +156,6 @@ static void row_value(int i, char *out, int size) {
         snprintf(out, size, "%s", sAaNames[plat_3ds_antialias_setting()]);
     } else if (i == MAIN_FPS) {
         snprintf(out, size, "%d fps", plat_frame_rate_setting());
-    } else if (i == MAIN_FB16) {
-        snprintf(out, size, "%s", plat_3ds_fb16_setting() ? "On" : "Off");
     } else if (i == MAIN_MIPMAPS) {
         snprintf(out, size, "%s", sMipmapModes[plat_3ds_mipmap_setting()]);
     } else if (i == MAIN_COLOUR) {
@@ -190,8 +182,6 @@ static const char *row_hint(int i) {
                                                            : "Smoother edges; the GPU draws 4x";
     } else if (i == MAIN_FPS) {
         return plat_frame_rate_setting() == 20 ? "Steady 20 (Old 3DS)" : "60 when a frame fits (try AA off)";
-    } else if (i == MAIN_FB16) {
-        return "Less GPU memory work, like the N64";
     } else if (i == MAIN_MIPMAPS) {
         return plat_3ds_mipmap_setting() == 2 ? "Tints each level a colour" : "No shimmer on distant textures";
     } else if (i == MAIN_COLOUR) {
@@ -225,8 +215,6 @@ static void row_change(int i, int step) {
         int at;
         for (at = 0; at < 2 && sRates[at] != plat_frame_rate_setting(); at++) {}
         plat_set_frame_rate_setting(sRates[(at + step + 3) % 3]);
-    } else if (i == MAIN_FB16) {
-        plat_3ds_set_fb16_setting(!plat_3ds_fb16_setting());
     } else if (i == MAIN_MIPMAPS) {
         int modes = PLAT_DEBUG_TOOLS ? 3 : 2; // Show is for debugging.
         plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + modes) % modes);
@@ -252,19 +240,19 @@ static void row_change(int i, int step) {
 }
 
 /* The Picture page: the players' settings first, then the performance switches. */
-static const int sPictureRows[8] = { MAIN_AA,   MAIN_FPS,   MAIN_MIPMAPS,   MAIN_COLOUR,
-                                     MAIN_FB16, MAIN_AHEAD, MAIN_GPU_MATHS, MAIN_STEREO_ONCE };
+static const int sPictureRows[7] = { MAIN_AA,    MAIN_FPS,       MAIN_MIPMAPS,    MAIN_COLOUR,
+                                     MAIN_AHEAD, MAIN_GPU_MATHS, MAIN_STEREO_ONCE };
 
 static int picture_hidden(int row) {
     return main_hidden(sPictureRows[row]);
 }
 
 static int picture_row(int i) {
-    return sPictureRows[options_visible_row(8, picture_hidden, i)];
+    return sPictureRows[options_visible_row(7, picture_hidden, i)];
 }
 
 static int picture_count(void) {
-    return options_visible_count(8, picture_hidden);
+    return options_visible_count(7, picture_hidden);
 }
 
 static const char *picture_label(int i) {
@@ -430,7 +418,7 @@ static void test_value(int i, char *out, int size) {
 
 static const char *test_hint(int i) {
     static const char *const sStart[5] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
-                                           "All 10 boss races once, ~30 minutes", "3 heavy tracks x 8 GPU settings, ~50 min",
+                                           "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
                                            NULL };
     static char sSwitchHint[48];
     if (port_autorun_enabled()) {

@@ -98,11 +98,10 @@ void plat_send_test_results(const char *title, const char *summary) {
     fprintf(stderr, "test results: %s\n%s\n", title, summary);
 }
 
-static int sAntialias = PLAT_AA_4X, sFb16;
+static int sAntialias = PLAT_AA_4X;
 
-void plat_set_gpu_config(int aa, int fb16) {
+void plat_set_gpu_config(int aa) {
     sAntialias = aa < 0 ? PLAT_AA_4X : aa;
-    sFb16 = fb16 > 0;
 }
 
 float plat_aspect_scale(void) {
@@ -137,15 +136,6 @@ float plat_camera_fov(float fovy) {
 
 int plat_antialias(void) {
     return sAntialias;
-}
-
-int plat_fb16(void) {
-    // DKR_FB16=1 previews the 3DS's 16-bit buffers where the game cares (the near plane, plat_camera_near).
-    static int sEnv = -1;
-    if (sEnv < 0) {
-        sEnv = getenv("DKR_FB16") != NULL && atoi(getenv("DKR_FB16")) != 0;
-    }
-    return sFb16 || sEnv;
 }
 
 static void *thread_entry(void *arg) {

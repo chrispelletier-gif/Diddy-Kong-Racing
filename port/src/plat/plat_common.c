@@ -460,5 +460,5 @@ void plat_set_60fps_setting(int on) {
 }
 
 float plat_camera_near(void) {
-    return (plat_aspect_scale() > 1.0f && !plat_fb16()) ? 2.5f : 10.0f;
+    return plat_aspect_scale() > 1.0f ? 2.5f : 10.0f;
 }

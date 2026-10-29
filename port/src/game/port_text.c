@@ -40,7 +40,6 @@ static const PortText sFrench[] = {
     { "Frame rate", "Images par seconde" },
     { "30 fps", "30 IPS" },
     { "60 fps", "60 IPS" },
-    { "16-bit buffers", "Tampons 16 bits" },
     { "Mipmaps", "Mipmaps" },
     { "Colour boost", "Couleurs vives" },
     { "Low", "Faibles" },

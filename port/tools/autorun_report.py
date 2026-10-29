@@ -112,8 +112,7 @@ def main():
         lines += group_table(finished, "track", "track") + [""]
         if any(r.get("config") not in (None, "") for r in finished):
             # port_autorun.c's sBenchConfigs, in order, or for the switch bench the usual settings then sSwitches.
-            configs = ["AA 4x", "AA 4x, 16-bit", "AA 2x", "AA 2x, 16-bit", "AA off", "AA off, 16-bit",
-                       "60 fps, AA off, 16-bit", "60 fps, AA 2x, 16-bit"]
+            configs = ["AA 4x", "AA 2x", "AA off", "60 fps, AA off", "60 fps, AA 2x"]
             if any("switch_bench" in path for path in args.csv):
                 configs = ["usual settings", "command list splits off (P19)"]
             for row in finished:

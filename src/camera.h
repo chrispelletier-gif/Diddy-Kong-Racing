@@ -23,7 +23,7 @@ float plat_aspect_scale(void);
 float plat_camera_fov(float fovy);
 #define CAMERA_ASPECT (SCREEN_WIDTH_FLOAT / SCREEN_HEIGHT_FLOAT * plat_aspect_scale())
 #define CAMERA_FOV(fovy) plat_camera_fov(fovy)
-// The near plane: closer in widescreen, except with 16-bit buffers (port/src/plat/plat.h).
+// The near plane: closer in widescreen (port/src/plat/plat.h).
 float plat_camera_near(void);
 #define CAMERA_NEAR plat_camera_near()
 #else
