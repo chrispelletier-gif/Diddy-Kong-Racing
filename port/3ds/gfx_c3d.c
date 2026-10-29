@@ -989,13 +989,23 @@ static void apply_screen_mode(void) {
 
 static void alloc_frame_slots(void);
 
+/* An Old 3DS (roadmap O8): its one core already runs the renderer at under 20 fps, so the defaults it starts with
+ * (until the player picks in Settings) leave out what costs CPU or GPU time: anti-aliasing, 800 pixels and stereo 3D
+ * (which draws everything twice). The player's choice always wins. */
+static int is_old_3ds(void) {
+    bool isNew3DS = false;
+    APT_CheckNew3DS(&isNew3DS);
+    return !isNew3DS;
+}
+
 /* The screen settings (see sWideSetting), and whether the console can show 800 pixels across. */
 static void read_screen_settings(void) {
     u8 model = 0;
+    int old3ds = is_old_3ds();
     sWideSetting = settings_get("widescreen", 2);
     sWideSetting = sWideSetting < 0 || sWideSetting > 3 ? 2 : sWideSetting;
-    s800Setting = settings_get("wide800", 1) != 0;
-    sStereoSetting = settings_get("stereo3d", 1) != 0;
+    s800Setting = settings_get("wide800", !old3ds) != 0;
+    sStereoSetting = settings_get("stereo3d", !old3ds) != 0;
     if (R_SUCCEEDED(cfguInit())) {
         if (R_SUCCEEDED(CFGU_GetSystemModel(&model))) {
             sWideUnsupported = model == CFG_MODEL_2DS;
@@ -1024,7 +1034,7 @@ void gfxb_init(void) {
         // 2 2x, as settings.txt has it). The same for 16-bit buffers: off unless DKR_FB16=1.
         const char *aa = plat_getenv("DKR_AA");
         const char *fb16 = plat_getenv("DKR_FB16");
-        sDefaultAa = settings_get("aa", aa == NULL ? PLAT_AA_4X : atoi(aa));
+        sDefaultAa = settings_get("aa", aa != NULL ? atoi(aa) : is_old_3ds() ? PLAT_AA_OFF : PLAT_AA_4X);
         if (sDefaultAa < PLAT_AA_OFF || sDefaultAa > PLAT_AA_2X) {
             sDefaultAa = PLAT_AA_4X;
         }

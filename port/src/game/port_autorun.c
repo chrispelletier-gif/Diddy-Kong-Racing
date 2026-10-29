@@ -537,7 +537,7 @@ static const char *aa_label(void) {
 static const char *graphics_setup(void) {
     static char text[48];
     s32 share = plat_renderer_syscore_share();
-    plat_snprintf(text, sizeof(text), "aa%s/%dfps/fb%d/ahead%d", aa_label(), plat_frame_retraces() == 1 ? 60 : 30,
+    plat_snprintf(text, sizeof(text), "aa%s/%dfps/fb%d/ahead%d", aa_label(), 60 / plat_frame_retraces(),
                   plat_fb16() ? 16 : 32, plat_render_ahead());
     if (share > 0) {
         s32 len = (s32) strlen(text);
@@ -1159,7 +1159,7 @@ static void bench_summary(char *out, s32 size) {
                                "| track | switch | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | rdp ms | rdp saved "
                                "| worst GPU | worst frame | limit |\n"
                                "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n",
-                               plat_frame_retraces() == 1 ? 60 : 30, aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
+                               60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
                                plat_fb16() ? 16 : 32);
     } else {
         length = plat_snprintf(out, size,
@@ -1322,7 +1322,7 @@ static void send_results(const char *why) {
         length += plat_snprintf(summary + length, sizeof(summary) - length,
                                 "Graphics when sent: anti-aliasing %s, %d fps cap, %d-bit buffers, render ahead %d "
                                 "(each race's are in the results file's graphics column).\n",
-                                aa_label(), plat_frame_retraces() == 1 ? 60 : 30, plat_fb16() ? 16 : 32,
+                                aa_label(), 60 / plat_frame_retraces(), plat_fb16() ? 16 : 32,
                                 plat_render_ahead());
     }
     if (sMode == MODE_BOSS && length > 0 && length < (s32) sizeof(summary)) {

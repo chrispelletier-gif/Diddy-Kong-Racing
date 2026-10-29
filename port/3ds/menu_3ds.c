@@ -153,7 +153,7 @@ static void row_value(int i, char *out, int size) {
     if (i == MAIN_AA) {
         snprintf(out, size, "%s", sAaNames[plat_3ds_antialias_setting()]);
     } else if (i == MAIN_FPS) {
-        snprintf(out, size, "%s", plat_60fps_setting() ? "60 fps" : "30 fps");
+        snprintf(out, size, "%d fps", plat_frame_rate_setting());
     } else if (i == MAIN_FB16) {
         snprintf(out, size, "%s", plat_3ds_fb16_setting() ? "On" : "Off");
     } else if (i == MAIN_MIPMAPS) {
@@ -176,7 +176,7 @@ static const char *row_hint(int i) {
         return plat_3ds_antialias_setting() == PLAT_AA_2X ? "Smoother edges; the GPU draws 2x"
                                                            : "Smoother edges; the GPU draws 4x";
     } else if (i == MAIN_FPS) {
-        return "60 when a frame fits (try AA off)";
+        return plat_frame_rate_setting() == 20 ? "Steady 20 (Old 3DS)" : "60 when a frame fits (try AA off)";
     } else if (i == MAIN_FB16) {
         return "Less GPU memory work, like the N64";
     } else if (i == MAIN_MIPMAPS) {
@@ -203,7 +203,11 @@ static void row_change(int i, int step) {
         for (at = 0; at < 3 && sAaOrder[at] != plat_3ds_antialias_setting(); at++) {}
         plat_3ds_set_antialias_setting(sAaOrder[(at + step + 3) % 3]);
     } else if (i == MAIN_FPS) {
-        plat_set_60fps_setting(!plat_60fps_setting());
+        // 30, 60, then a steady 20 for an Old 3DS.
+        static const int sRates[3] = { 30, 60, 20 };
+        int at;
+        for (at = 0; at < 2 && sRates[at] != plat_frame_rate_setting(); at++) {}
+        plat_set_frame_rate_setting(sRates[(at + step + 3) % 3]);
     } else if (i == MAIN_FB16) {
         plat_3ds_set_fb16_setting(!plat_3ds_fb16_setting());
     } else if (i == MAIN_MIPMAPS) {

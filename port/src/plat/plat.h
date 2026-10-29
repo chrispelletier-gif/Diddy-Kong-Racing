@@ -244,6 +244,9 @@ int plat_frame_retraces(void);
 void plat_set_60fps(int on);
 int plat_60fps_setting(void);
 void plat_set_60fps_setting(int on);
+/* The Frame rate row: 30, 60 or the steady 20 (an Old 3DS's choice; three retraces a frame). */
+int plat_frame_rate_setting(void);
+void plat_set_frame_rate_setting(int fps);
 /* The build's version (git describe), as bug reports show it; "host" for a host build without one. */
 const char *plat_build_version(void);
 /* The version players see, from the newest version tag (port/Makefile): "0.1.0-beta", "0.1.0-beta+3" or "dev". */

@@ -368,21 +368,37 @@ void plat_set_render_ahead(int frames) {
     settings_set("renderahead", sRenderAhead);
 }
 
-/* The 60 fps setting (see plat_frame_retraces): -1 until first read. sFps60 is what frames use now. */
-static volatile int sFps60Setting = -1, sFps60;
+/* The 60 fps setting (see plat_frame_retraces): -1 until first read. sFps60 is what frames use now. sFps20 is the
+ * steady 20 fps cap (settings.txt "fps20", else DKR_20FPS) for an Old 3DS that can't keep 30: every frame then takes
+ * three retraces instead of jumping between two and three; 60 fps wins over it. */
+static volatile int sFps60Setting = -1, sFps60, sFps20;
 
 static void read_60fps_setting(void) {
     if (sFps60Setting < 0) {
         const char *env = plat_getenv("DKR_60FPS");
+        const char *env20 = plat_getenv("DKR_20FPS");
         sFps60Setting = settings_get("fps60", env != NULL && atoi(env) != 0) != 0;
         sFps60 = sFps60Setting;
-        plat_log("frame rate cap: %d fps", sFps60 ? 60 : 30);
+        sFps20 = settings_get("fps20", env20 != NULL && atoi(env20) != 0) != 0;
+        plat_log("frame rate cap: %d fps", sFps60 ? 60 : sFps20 ? 20 : 30);
     }
 }
 
 int plat_frame_retraces(void) {
     read_60fps_setting();
-    return sFps60 ? 1 : 2;
+    return sFps60 ? 1 : sFps20 ? 3 : 2;
+}
+
+int plat_frame_rate_setting(void) {
+    read_60fps_setting();
+    return sFps60Setting ? 60 : sFps20 ? 20 : 30;
+}
+
+void plat_set_frame_rate_setting(int fps) {
+    read_60fps_setting();
+    sFps20 = fps == 20;
+    settings_set("fps20", sFps20);
+    plat_set_60fps_setting(fps == 60);
 }
 
 void plat_set_60fps(int on) {
