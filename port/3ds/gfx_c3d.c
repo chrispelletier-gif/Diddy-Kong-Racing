@@ -942,7 +942,9 @@ static float stereo_max_sep(void) {
  */
 static void apply_screen_mode(void) {
     float slider = osGet3DSliderState();
-    int stereo = sStereoSetting && slider > 0.0f && __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
+    // The switch bench sets DKR_STEREO3D for each race, so the player's 3D setting doesn't change what it measures.
+    int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
+                 __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
     int wide800 = s800Setting && !stereo && !sWideUnsupported;
     int aa = stereo ? PLAT_AA_OFF : sWantedAa, fb16 = sWantedFb16;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;

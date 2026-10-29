@@ -149,7 +149,8 @@ typedef struct BenchSwitch {
 
 /* The ideas from other 3DS ports (2026-10-29): GPU vertex maths (P30) by itself, then with the track's geometry kept
  * on the GPU (P31), with models recorded the first time they are drawn (P34), and all three, and stereo frames made
- * once (P33, which only differs with the 3D slider up). Settled before: command list splits (P19) are off by default
+ * once (P33, against 3D drawn the usual way; both need the 3D slider up). Every race sets 3D itself (DKR_STEREO3D, off
+ * but for those two), so the player's 3D setting, which turns anti-aliasing off, doesn't change the other races. Settled before: command list splits (P19) are off by default
  * (#153), early depth (P20) was dropped (#155), the white-line diagnostics (P28) are off for good, and switch bench #176
  * settled the Phase 7b switches: the depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge
  * trimming dropping what lies wholly outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a
@@ -160,7 +161,8 @@ static const BenchSwitch sSwitches[] = {
     { "P30 + track on the GPU (P31)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", NULL }, 0, 1 },
     { "P30 + models recorded (P34)", { "DKR_GPU_TRANSFORM", "DKR_MODEL_MESH", NULL }, 0, 1 },
     { "P30 + P31 + P34", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", "DKR_MODEL_MESH" }, 0, 1 },
-    { "Stereo made once (P33, 3D on)", { "DKR_STEREO_ONCE", NULL, NULL }, 0, 1 },
+    { "3D on, drawn for each eye (slider up)", { "DKR_STEREO3D", NULL, NULL }, 0, 1 },
+    { "3D made once (P33, slider up)", { "DKR_STEREO3D", "DKR_STEREO_ONCE", NULL }, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
