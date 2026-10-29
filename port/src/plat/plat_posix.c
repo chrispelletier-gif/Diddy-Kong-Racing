@@ -26,6 +26,15 @@ struct PlatSem {
 
 static pthread_mutex_t sKernelLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t sKernelCond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t sKeyedConds[PLAT_KEYED_CONDS];
+static pthread_once_t sKeyedOnce = PTHREAD_ONCE_INIT;
+
+static void keyed_init(void) {
+    int i;
+    for (i = 0; i < PLAT_KEYED_CONDS; i++) {
+        pthread_cond_init(&sKeyedConds[i], NULL);
+    }
+}
 static pthread_mutex_t sIntLock = PTHREAD_MUTEX_INITIALIZER;
 static __thread void *sCurrentOsThread;
 static unsigned long long sNextVblank;
@@ -232,6 +241,23 @@ int plat_kwait_timeout(unsigned long long ns) {
 
 void plat_kbroadcast(void) {
     pthread_cond_broadcast(&sKernelCond);
+}
+
+int plat_kwait_on_timeout(const void *key, unsigned long long ns) {
+    struct timespec ts;
+    unsigned long long deadline;
+
+    pthread_once(&sKeyedOnce, keyed_init);
+    clock_gettime(CLOCK_REALTIME, &ts);
+    deadline = (unsigned long long) ts.tv_sec * 1000000000ULL + ts.tv_nsec + ns;
+    ts.tv_sec = deadline / 1000000000ULL;
+    ts.tv_nsec = deadline % 1000000000ULL;
+    return pthread_cond_timedwait(&sKeyedConds[PLAT_KEY_SLOT(key)], &sKernelLock, &ts) == ETIMEDOUT;
+}
+
+void plat_kbroadcast_on(const void *key) {
+    pthread_once(&sKeyedOnce, keyed_init);
+    pthread_cond_broadcast(&sKeyedConds[PLAT_KEY_SLOT(key)]);
 }
 
 void plat_intlock_lock(void) {

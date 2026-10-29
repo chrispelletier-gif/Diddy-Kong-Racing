@@ -156,8 +156,13 @@ typedef struct BenchSwitch {
  * depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
  * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
  * transforms (P27) gained nothing and stay off. The list ends with an empty entry, so it may be otherwise empty (the
- * bench then says so instead of racing). */
+ * bench then says so instead of racing). The races run with anti-aliasing 2x, which adaptive anti-aliasing needs and
+ * where the heavy tracks drop below 60 fps. */
 static const BenchSwitch sSwitches[] = {
+    { "Adaptive anti-aliasing", { "DKR_ADAPTIVE_AA", NULL, NULL }, 0, 1 },
+    { "Third top screen buffer (P35)", { "DKR_TRIPLE_BUFFER", NULL, NULL }, 0, 1 },
+    { "Kernel waits per queue (P32)", { "DKR_QUEUE_WAKE", NULL, NULL }, 0, 1 },
+    { "All three together", { "DKR_ADAPTIVE_AA", "DKR_TRIPLE_BUFFER", "DKR_QUEUE_WAKE" }, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
@@ -178,7 +183,7 @@ static void apply_config(s32 config) {
         return;
     }
     if (config_count() == SWITCH_CONFIGS) {
-        // The same render settings for every race, whatever the player's are: anti-aliasing off, 32-bit buffers,
+        // The same render settings for every race, whatever the player's are: anti-aliasing 2x, 32-bit buffers,
         // 60 fps, Balanced widescreen, 400 pixels, mipmaps on, no colour boost, edge trimming on, render ahead 1,
         // GPU vertex maths off (the menu's settings would otherwise change what the bench measures). Then every
         // variable at its usual setting, then the race's switch: a variable shared by several switches keeps the
@@ -191,7 +196,7 @@ static void apply_config(s32 config) {
             { "BENCH_COLOUR", 0 },     { "BENCH_GUARD_BAND", 1 },  { "BENCH_RENDER_AHEAD", 1 },
             { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 },   { "DKR_MODEL_MESH", 0 },
         };
-        plat_set_gpu_config(PLAT_AA_OFF, 0);
+        plat_set_gpu_config(PLAT_AA_2X, 0);
         plat_set_60fps(1);
         for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
@@ -1183,8 +1188,7 @@ static void bench_summary(char *out, s32 size) {
                                "\n### Switches (averages of the finished races)\n\n"
                                "Each switch is flipped by itself; saved is against the usual settings' races. "
                                "Render settings, the bench's own in every race (see apply_config): 60 fps cap, "
-                               "anti-aliasing off, 32-bit buffers, Balanced widescreen, 400 pixels, 3D only in the "
-                               "3D races.\n\n"
+                               "anti-aliasing 2x, 32-bit buffers, Balanced widescreen, 400 pixels, 3D off.\n\n"
                                "| track | switch | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | rdp ms | rdp saved "
                                "| worst GPU | worst frame | limit |\n"
                                "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n");

@@ -807,6 +807,7 @@ static void create_target(int scale, int across, int fb16) {
  * unless the screen shows 800 pixels. In 3D, sTarget is the left eye's and sTargetRight the right eye's.
  */
 static u32 sTransferFlags;
+static C3D_RenderTarget *sLinked; // The target the top screen shows (link_target)
 
 static void link_target(void) {
     u32 scaling = GX_TRANSFER_SCALE_NO;
@@ -819,11 +820,51 @@ static void link_target(void) {
         gfxSetScreenFormat(GFX_TOP, sTargetFb16 ? GSP_RGB565_OES : GSP_BGR8_OES);
     }
     C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sTransferFlags);
+    sLinked = sTarget;
     if (sStereo && sTargetRight != NULL) {
         C3D_RenderTargetSetOutput(sTargetRight, GFX_TOP, GFX_RIGHT, sTransferFlags);
     } else {
         C3D_RenderTargetSetOutput(NULL, GFX_TOP, GFX_RIGHT, 0);
     }
+}
+
+/*
+ * Adaptive anti-aliasing (DKR_ADAPTIVE_AA, default off): with anti-aliasing on, a frame the GPU took nearly a whole
+ * frame's time to draw (over 92% of it, see adaptive_observe) sends the next ones to a target at the screen's own
+ * resolution (sLowTarget, made when first needed) for sAdaptHoldLen frames; the first anti-aliased frame after that
+ * is a probe, and if it is slow again the hold doubles (up to ADAPT_HOLD_MAX), so a heavy stretch of track stays at
+ * the low resolution instead of flickering between the two. Never in 3D (which has no anti-aliasing) or while a
+ * snapshot is taken. The main target keeps its sizes in sMainScale and sMainScaleX while the low one is in use.
+ * Switching targets needs no wait for the GPU: the screen is linked to the frame's target just before it is handed
+ * over (adaptive_link, inside citro3d's frame). DKR_ADAPTIVE_AA=2 counts every anti-aliased frame as slow, to see the
+ * switching itself (each hold, then one probe frame).
+ */
+#define ADAPT_HOLD 60
+#define ADAPT_HOLD_MAX 960
+#define ADAPT_PROBE 30
+static int sAdaptive;
+static C3D_RenderTarget *sLowTarget, *sMainTarget;
+static int sMainScale, sMainScaleX, sLowActive, sLowFresh, sLowFailed;
+static int sAdaptHold, sAdaptHoldLen = ADAPT_HOLD, sAdaptProbe, sAdaptLastFrame = -1;
+static int sAdaptSeen, sAdaptLow, sAdaptSlow;
+
+/* Back to the main target (the frame's choice is made again in adaptive_pick). */
+static void adaptive_restore_main(void) {
+    if (sLowActive) {
+        sTarget = sMainTarget;
+        sRenderScale = sMainScale;
+        sScaleX = sMainScaleX;
+        sLowActive = 0;
+    }
+}
+
+/* With the GPU idle and not in a citro3d frame (apply_screen_mode): the low target is made again for the new mode. */
+static void adaptive_delete_low(void) {
+    if (sLowTarget != NULL) {
+        C3D_RenderTargetDelete(sLowTarget);
+        sLowTarget = NULL;
+    }
+    sLowFailed = 0;
 }
 
 /* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) and 16-bit buffers for the frames from the next
@@ -946,7 +987,9 @@ static float stereo_max_sep(void) {
  * first; a new target is cleared like the very first one.
  */
 static void apply_screen_mode(void) {
-    float slider = osGet3DSliderState();
+    float slider;
+    adaptive_restore_main();
+    slider = osGet3DSliderState();
     // The switch bench sets DKR_STEREO3D for each race, so the player's 3D setting doesn't change what it measures.
     int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
                  __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
@@ -972,6 +1015,7 @@ static void apply_screen_mode(void) {
         plat_sleep_ns(250000);
     }
     C3D_FrameEnd(0);
+    adaptive_delete_low();
     newTarget = scale != sRenderScale || across != sScaleX || fb16 != sTargetFb16;
     if (newTarget) {
         C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
@@ -1174,6 +1218,54 @@ static u64 sLastEndTick;
  * thread), so the swap is wrapped (-Wl,--wrap=gfxScreenSwapBuffers) to see when, not when the CPU ended the frame. */
 static volatile unsigned int sSwapCount, sSwapReplaced, sSwapGapUs;
 static u64 sLastSwapTick;
+
+/*
+ * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, default off). libctru has two, so a frame finished
+ * before the last one reached the screen waits for it (wait_for_present). With three, of our own in linear memory,
+ * it is copied into one that is neither on screen nor waiting to be, and carries on. citro3d copies a frame into what
+ * gfxGetFramebuffer returns and shows it with gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours while
+ * sTripleFrame is set, which is fixed for each frame when it is handed over (triple_choose).
+ * sTripleShown is the buffer on screen, sTripleMaybe one that may have reached it (presented while another was still
+ * waiting, just as the screen took that), sTriplePresented the last presented: none of them is written next.
+ */
+#define TRIPLE_BYTES (GSP_SCREEN_WIDTH * GSP_SCREEN_HEIGHT_TOP_2X * 3) // 800 pixels across or two eyes, 24-bit
+static int sTripleWanted;
+static volatile int sTripleFrame;
+static u8 *sTriple[3];
+static int sTripleNext, sTripleShown = -1, sTripleMaybe = -1, sTriplePresented = -1, sTripleFail;
+static unsigned int sTripleId;
+
+u8 *__real_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height);
+__attribute__((used)) u8 *__wrap_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height) {
+    u8 *fb = __real_gfxGetFramebuffer(screen, side, width, height); // libctru's sizes for the mode
+    if (screen == GFX_TOP && sTripleFrame) {
+        fb = sTriple[sTripleNext] + (gfxIs3D() && side != GFX_LEFT ? TRIPLE_BYTES / 2 : 0);
+    }
+    return fb;
+}
+
+/* What libctru's gfxPresentFramebuffer does for the top screen, with our buffer (in linear memory). */
+static void triple_present(bool hasStereo) {
+    GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
+    u32 mode = format | (1 << 8);
+    const u8 *fbA = sTriple[sTripleNext], *fbB = fbA;
+    if (gfxIs3D()) {
+        mode |= BIT(5);
+        fbB = hasStereo ? fbA + TRIPLE_BYTES / 2 : fbA;
+    } else if (!gfxIsWide()) {
+        mode |= BIT(6);
+    }
+    if (gspIsPresentPending(GSP_SCREEN_TOP)) {
+        sTripleMaybe = sTriplePresented; // Replaced, unless the screen took it just now.
+    } else {
+        sTripleShown = sTriplePresented;
+        sTripleMaybe = -1;
+    }
+    sTriplePresented = sTripleNext;
+    sTripleId ^= 1;
+    gspPresentBuffer(GSP_SCREEN_TOP, sTripleId, fbA, fbB, GSP_SCREEN_WIDTH * gspGetBytesPerPixel(format), mode);
+}
+
 void __real_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
 __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo) {
     if (scr == GFX_TOP) {
@@ -1185,8 +1277,56 @@ __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool has
         sSwapGapUs = sLastSwapTick != 0 ? (unsigned int) ((now - sLastSwapTick) / (SYSCLOCK_ARM11 / 1000000)) : 0;
         sLastSwapTick = now;
         sSwapCount++;
+        if (sTripleFrame) {
+            triple_present(hasStereo);
+            return;
+        }
     }
     __real_gfxScreenSwapBuffers(scr, hasStereo);
+}
+
+/*
+ * Renderer thread, with the GPU done with the last frame and before C3D_FrameEnd: whether this frame goes to our three
+ * buffers, and which. Returns 0 when it must wait for the screen as with two (wait_for_present): the setting is off,
+ * or the three buffers are all in use (two frames presented within one refresh).
+ */
+static int triple_choose(void) {
+    int i;
+    if (!sTripleWanted || sStereo || sTripleFail) {
+        if (sTripleFrame) {
+            sTripleFrame = 0;
+            sTripleShown = sTripleMaybe = sTriplePresented = -1; // libctru's buffers are on screen again.
+        }
+        return 0;
+    }
+    if (sTriple[0] == NULL) {
+        for (i = 0; i < 3; i++) {
+            sTriple[i] = linearAlloc(TRIPLE_BYTES);
+            if (sTriple[i] == NULL) {
+                plat_log("top screen: no memory for a third buffer, two kept");
+                sTripleFail = 1;
+                for (i = 0; i < 3; i++) {
+                    linearFree(sTriple[i]);
+                    sTriple[i] = NULL;
+                }
+                return 0;
+            }
+        }
+    }
+    if (sTriplePresented >= 0 && !gspIsPresentPending(GSP_SCREEN_TOP)) {
+        sTripleShown = sTriplePresented;
+        sTripleMaybe = -1;
+    }
+    for (i = 0; i < 3; i++) {
+        if (i != sTripleShown && i != sTripleMaybe && i != sTriplePresented) {
+            sTripleNext = i;
+            sTripleFrame = 1;
+            return 1;
+        }
+    }
+    sTripleFrame = 0; // All three in use: wait like two (libctru's back buffer isn't on screen either).
+    sTripleShown = sTripleMaybe = sTriplePresented = -1;
+    return 0;
 }
 
 /*
@@ -1720,6 +1860,7 @@ typedef struct FrameSlot {
     u32 *eyeCmd;         // EYE_CMD_WORDS: the two eyes' short command lists of a stereo frame made once
     void **meshFrees;    // Meshes freed while the frame was built (gfxb_mesh_free)
     int numMeshFrees, meshFreesCapacity;
+    int adaptAa;         // Adaptive anti-aliasing: 0 not in use, 1 drawn anti-aliased, 2 at the low resolution
 } FrameSlot;
 static FrameSlot sSlots[2];
 static int sNumSlots = 1; // 2 unless the second slot didn't fit
@@ -2070,6 +2211,85 @@ static int overlap_setting(void) {
     return sSetting && sNumSlots == 2;
 }
 
+/* Renderer thread, after apply_screen_mode: the target for the frame about to be built (see sAdaptive). */
+static void adaptive_pick(void) {
+    if (!sAdaptive || sAdaptHold <= 0 || sRenderScale != 2 || sStereo || sSnapshotPending || sTarget == NULL) {
+        return;
+    }
+    if (sLowTarget == NULL) {
+        if (sLowFailed) {
+            return;
+        }
+        sLowTarget = new_target(TOP_HEIGHT, TOP_WIDTH * (s800 ? 2 : 1));
+        if (sLowTarget == NULL) {
+            sLowFailed = 1; // Until the screen mode changes.
+            plat_log("adaptive anti-aliasing: no VRAM for the low resolution target");
+            return;
+        }
+        sLowFresh = 1;
+    }
+    sMainTarget = sTarget;
+    sMainScale = sRenderScale;
+    sMainScaleX = sScaleX;
+    sTarget = sLowTarget;
+    sRenderScale = 1;
+    sScaleX = s800 ? 2 : 1;
+    sLowActive = 1;
+    if (sLowFresh) {
+        sLowFresh = 0;
+        sFrameStarted = 0; // Cleared like a new target.
+    }
+}
+
+/* Just before a frame is handed over, inside citro3d's frame: the screen shows the frame's target. */
+static void adaptive_link(FrameSlot *slot) {
+    slot->adaptAa = !sAdaptive ? 0 : sLowActive ? 2 : (sRenderScale == 2 && !sStereo) ? 1 : 0;
+    if (sLinked != sTarget) {
+        link_target();
+    }
+}
+
+/* Once the GPU has drawn a frame: how long it took (ms) decides the next frames' resolution (see sAdaptive). */
+static void adaptive_observe(const FrameSlot *slot, float gpuMs) {
+    float budget;
+    if (slot->frame == sAdaptLastFrame) {
+        return; // Already seen (wait_for_gpu again with nothing new handed over).
+    }
+    sAdaptLastFrame = slot->frame;
+    if (!sAdaptive) {
+        sAdaptHold = 0;
+        sAdaptHoldLen = ADAPT_HOLD;
+        sAdaptProbe = 0;
+        return;
+    }
+    if (slot->adaptAa == 0) {
+        return;
+    }
+    budget = 1000.0f / 60.0f * (float) plat_frame_retraces();
+    sAdaptSeen++;
+    if (slot->adaptAa == 2) {
+        sAdaptLow++;
+        if (sAdaptHold > 0 && --sAdaptHold == 0) {
+            sAdaptProbe = ADAPT_PROBE;
+        }
+    } else if (gpuMs > budget * 0.92f || sAdaptive == 2) {
+        sAdaptSlow++;
+        if (sAdaptProbe > 0 && sAdaptHoldLen < ADAPT_HOLD_MAX) {
+            sAdaptHoldLen *= 2; // Slow again straight after a hold: hold longer.
+        }
+        sAdaptProbe = 0;
+        sAdaptHold = sAdaptHoldLen;
+    } else if (sAdaptProbe > 0 && --sAdaptProbe == 0) {
+        sAdaptHoldLen = ADAPT_HOLD; // Anti-aliased frames are fast enough again.
+    }
+    if (sAdaptSeen >= 600) {
+        plat_log("adaptive anti-aliasing: %d of the last %d frames at the low resolution, %d slow anti-aliased "
+                 "frames, hold %d frames",
+                 sAdaptLow, sAdaptSeen, sAdaptSlow, sAdaptHoldLen);
+        sAdaptSeen = sAdaptLow = sAdaptSlow = 0;
+    }
+}
+
 /*
  * Waits for the GPU to finish the frame it was given last, and begins a citro3d frame (which sets citro3d's own
  * command buffer: the caller sets the slot's). Then that frame's freed textures are deleted.
@@ -2099,6 +2319,7 @@ static void wait_for_gpu(int measure) {
     }
     if (sOnGpu >= 0) {
         transform_frame_drawn(sSlots[sOnGpu].frame);
+        adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
     }
     if (measure && prof_enabled()) {
         prof_add(PROF_GPU_WAIT, plat_time_ns() - waitStart);
@@ -2386,6 +2607,8 @@ static void read_switches(void) {
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
+    sAdaptive = plat_switch("DKR_ADAPTIVE_AA", 0);
+    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", 0) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -2406,6 +2629,8 @@ static void read_switches(void) {
     plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
              sTransformHung ? " (but it hung before: left off)" : !sProgramTUsable ? " (shader not usable)" : "",
              sStereoOnce ? "made once, drawn twice" : "made for each eye");
+    plat_log("switches: adaptive anti-aliasing %s, top screen buffers %d, queue wake-ups %s", sAdaptive ? "on" : "off",
+             sTripleWanted ? 3 : 2, plat_switch("DKR_QUEUE_WAKE", 0) ? "per queue" : "all threads");
 }
 
 void gfxb_start_frame(void) {
@@ -2413,6 +2638,7 @@ void gfxb_start_frame(void) {
     // No vblank throttling here: the emulated VI already paces the game.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
     apply_screen_mode();
+    adaptive_pick();
     // The first frame of a render target clears it with the GPU idle, and a snapshot frame is checked once the GPU
     // has drawn it, before the next is built: those wait for the GPU first, as every frame used to.
     sOverlap = overlap_setting() && sFrameStarted < 0 && !sSnapshotPending;
@@ -2633,6 +2859,7 @@ void gfxb_end_frame(void) {
                 GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
             }
         }
+        adaptive_link(slot);
         sTarget->used = true;
         if (sStereo) {
             sTargetRight->used = true;
@@ -2644,7 +2871,9 @@ void gfxb_end_frame(void) {
         sDrainSplits = 0;
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
-        wait_for_present();
+        if (!triple_choose()) {
+            wait_for_present();
+        }
         find_recent_screen();
         watch_for_line();
         if (full_flush()) {

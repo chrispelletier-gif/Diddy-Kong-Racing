@@ -69,6 +69,12 @@ void plat_kwait(void);
 /* Waits with a timeout. Returns 0 if woken, 1 on timeout. */
 int plat_kwait_timeout(unsigned long long ns);
 void plat_kbroadcast(void);
+/* Roadmap P32: the same, on one of a few condition variables picked by key (a message queue), so a message wakes only
+ * the threads waiting on its queue (and any that share its variable). Kernel lock held. */
+int plat_kwait_on_timeout(const void *key, unsigned long long ns);
+void plat_kbroadcast_on(const void *key);
+#define PLAT_KEYED_CONDS 32
+#define PLAT_KEY_SLOT(key) ((unsigned) (((unsigned long) (key) >> 3) ^ ((unsigned long) (key) >> 9)) % PLAT_KEYED_CONDS)
 
 /* A non recursive mutex that emulates "interrupts disabled". Ownership is tracked by the OS layer. */
 void plat_intlock_lock(void);

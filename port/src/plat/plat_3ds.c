@@ -40,6 +40,7 @@ struct PlatSem {
 
 static LightLock sKernelLock;
 static CondVar sKernelCond;
+static CondVar sKeyedConds[PLAT_KEYED_CONDS];
 static LightLock sIntLock;
 static __thread void *sCurrentOsThread;
 static int sRcpCore;
@@ -67,6 +68,9 @@ void plat_init(void) {
 
     LightLock_Init(&sKernelLock);
     CondVar_Init(&sKernelCond);
+    for (int i = 0; i < PLAT_KEYED_CONDS; i++) {
+        CondVar_Init(&sKeyedConds[i]);
+    }
     LightLock_Init(&sIntLock);
 
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
@@ -390,6 +394,14 @@ int plat_kwait_timeout(unsigned long long ns) {
 
 void plat_kbroadcast(void) {
     CondVar_Broadcast(&sKernelCond);
+}
+
+int plat_kwait_on_timeout(const void *key, unsigned long long ns) {
+    return CondVar_WaitTimeout(&sKeyedConds[PLAT_KEY_SLOT(key)], &sKernelLock, (s64) ns) != 0;
+}
+
+void plat_kbroadcast_on(const void *key) {
+    CondVar_Broadcast(&sKeyedConds[PLAT_KEY_SLOT(key)]);
 }
 
 void plat_intlock_lock(void) {
