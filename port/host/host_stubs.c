@@ -33,6 +33,10 @@ const char *plat_audio_setup(void) {
     return pv_active() ? pv_describe() : "host";
 }
 
+int plat_renderer_syscore_share(void) {
+    return 0;
+}
+
 /* DKR_AUDIO_RATE runs the mixer at another rate (32000 for the 3DS's "High" sound quality). */
 u32 port_audio_output_rate(u32 requested) {
     const char *env = getenv("DKR_AUDIO_RATE");

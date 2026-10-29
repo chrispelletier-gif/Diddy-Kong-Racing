@@ -250,6 +250,8 @@ const char *plat_build_version(void);
 const char *plat_version(void);
 /* How the sound is being made, for the test runs' results (e.g. "sys/22k/smooth"; "host" on the host). */
 const char *plat_audio_setup(void);
+/* The share of the system core an Old 3DS lends the renderer (30, 50 or 80 percent), or 0 when it isn't there. */
+int plat_renderer_syscore_share(void);
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that

@@ -20,6 +20,7 @@
 #include "plat/options.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "plat/settings.h"
 
 void plat_3ds_menu_draw(const BsMenu *menu);
 void plat_3ds_set_antialias_setting(int aa);
@@ -97,8 +98,18 @@ enum {
     MAIN_AHEAD,
     MAIN_PROFILER,
     MAIN_UPDATES,
-    MAIN_BUGREPORT
+    MAIN_BUGREPORT,
+    MAIN_O3DS_RENDER
 };
+
+/* The Old 3DS renderer row (plat_init): the game's core, or the system core with a share of its time. */
+static const char *const sO3dsRender[4] = { "Game core", "System 30%", "System 50%", "System 80%" };
+
+static int is_old_3ds(void) {
+    bool isNew3DS = false;
+    APT_CheckNew3DS(&isNew3DS);
+    return !isNew3DS;
+}
 
 /* Anti-aliasing in the order the row steps through (PLAT_AA_* values). */
 static const int sAaOrder[3] = { PLAT_AA_OFF, PLAT_AA_2X, PLAT_AA_4X };
@@ -132,6 +143,8 @@ static const char *row_label(int i) {
         return "Profiler";
     } else if (i == MAIN_UPDATES) {
         return "Check for updates";
+    } else if (i == MAIN_O3DS_RENDER) {
+        return "Renderer (restart)";
     }
     return "Send a bug report";
 }
@@ -151,6 +164,8 @@ static void row_value(int i, char *out, int size) {
         snprintf(out, size, "%d frame%s", plat_render_ahead(), plat_render_ahead() == 1 ? "" : "s");
     } else if (i == MAIN_PROFILER) {
         snprintf(out, size, "%s", prof_user_enabled() ? "On" : "Off");
+    } else if (i == MAIN_O3DS_RENDER) {
+        snprintf(out, size, "%s", sO3dsRender[settings_get("o3ds_render", 0) & 3]);
     } else {
         out[0] = '\0';
     }
@@ -176,6 +191,8 @@ static const char *row_hint(int i) {
         return "Frame times on this screen";
     } else if (i == MAIN_UPDATES) {
         return "Install a newer build from GitHub";
+    } else if (i == MAIN_O3DS_RENDER) {
+        return "Old 3DS: lend it the system core";
     }
     return "Log and snapshot (also SELECT+touch)";
 }
@@ -202,6 +219,8 @@ static void row_change(int i, int step) {
         prof_set_user_enabled(!prof_user_enabled());
     } else if (i == MAIN_UPDATES) {
         sResult = MENU_UPDATES;
+    } else if (i == MAIN_O3DS_RENDER) {
+        settings_set("o3ds_render", ((settings_get("o3ds_render", 0) & 3) + step + 4) % 4);
     } else {
         sResult = MENU_BUGREPORT;
     }
@@ -241,9 +260,10 @@ static void picture_change(int i, int step) {
 static const MenuPage sPicturePage = { "Picture", picture_count, picture_label, picture_value,
                                        picture_change, picture_hint, NULL };
 
-/* The Tools page (a debug build's only): the profiler, updates and bug reports. */
+/* The Tools page (a debug build's only): the profiler, updates and bug reports, and on an Old 3DS where its renderer
+ * runs. */
 static int tools_count(void) {
-    return 3;
+    return is_old_3ds() ? 4 : 3;
 }
 
 static const char *tools_label(int i) {

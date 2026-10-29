@@ -22,6 +22,8 @@ extern void (*__system_retAddr)(void);
 #define PRIO_RCP 0x1A
 /* The sound on the system core: below the system's services there (see plat_init). */
 #define PRIO_SYSCORE_AUDIO 0x30
+/* The renderer on an Old 3DS's system core: below the system's services there too. */
+#define PRIO_SYSCORE_RCP 0x30
 #define PRIO_GAME_HIGHEST 0x1B
 #define PRIO_GAME_LOWEST 0x3F
 
@@ -42,6 +44,7 @@ static LightLock sIntLock;
 static __thread void *sCurrentOsThread;
 static int sRcpCore;
 static int sAudioCore;
+static int sSyscoreShare; // The system core's share lent to the renderer (percent), when it runs there.
 static LightLock sConsoleLock;
 
 static void watchdog_start(void);
@@ -73,6 +76,24 @@ void plat_init(void) {
         osSetSpeedupEnable(true);
     }
     sRcpCore = (isNew3DS && plat_getenv("DKR_SINGLE_CORE") == NULL) ? 2 : 0;
+    // An Old 3DS has no core of its own to give the renderer, but the system core lends an application a share of
+    // its time. The Tools page's "Old 3DS renderer" setting (or DKR_O3DS_RENDER=0-3) moves the renderer there with
+    // a share of 30, 50 or 80 percent (roadmap O8): it takes the renderer's ~32 ms off the game's core. The system's
+    // own services, the GPU's among them, slow down as the share grows, so it is a bench setting for now.
+    if (!isNew3DS && plat_getenv("DKR_SINGLE_CORE") == NULL) {
+        static const int sShares[4] = { 0, 30, 50, 80 };
+        const char *env = plat_getenv("DKR_O3DS_RENDER");
+        int mode = env != NULL ? atoi(env) : settings_get("o3ds_render", 0);
+        if (mode > 0 && mode < 4) {
+            Result res = APT_SetAppCpuTimeLimit(sShares[mode]);
+            plat_log("system core time limit %d%%: %s (0x%08lX)", sShares[mode], R_SUCCEEDED(res) ? "ok" : "failed",
+                     (unsigned long) res);
+            if (R_SUCCEEDED(res)) {
+                sRcpCore = 1;
+                sSyscoreShare = sShares[mode];
+            }
+        }
+    }
     plat_status("%s, renderer on core %d", isNew3DS ? "New 3DS" : "Old 3DS", sRcpCore);
     // The scheduler cannot start the next frame while an audio task is running, so audio tasks must finish quickly:
     // they run next to the renderer, at a higher priority than it. The Sound page's "Mixing core" setting can move
@@ -80,8 +101,9 @@ void plat_init(void) {
     // default share they took several times longer), so the share is raised first (DKR_SYSCORE_LIMIT, percent).
     // The system's own services, the GPU's among them, run there too: at the renderer's priority the sound held
     // them up and frame times doubled (bug report #78), so there it runs below them (DKR_SYSCORE_PRIO).
-    sAudioCore = sRcpCore;
-    if (settings_get("sound_core", 0) && plat_getenv("DKR_SINGLE_CORE") == NULL) {
+    // With the renderer on the system core the sound stays on the game's core (the DSP voices barely use it).
+    sAudioCore = sRcpCore == 1 ? 0 : sRcpCore;
+    if (sRcpCore != 1 && settings_get("sound_core", 0) && plat_getenv("DKR_SINGLE_CORE") == NULL) {
         const char *env = plat_getenv("DKR_SYSCORE_LIMIT");
         int limit = env != NULL ? atoi(env) : 80;
         Result res = APT_SetAppCpuTimeLimit(limit);
@@ -124,10 +146,15 @@ static void start_idle_meters(void) {
     if (!sStarted) {
         sStarted = 1;
         threadCreate(idle_meter, (void *) &sIdleNs, 4096, 0x3F, 0, true);
-        if (sRcpCore != 0) {
+        // Not on the system core: spinning there would use up the time it lends the renderer.
+        if (sRcpCore > 1) {
             threadCreate(idle_meter, (void *) &sRenderIdleNs, 4096, 0x3F, sRcpCore, true);
         }
     }
+}
+
+int plat_renderer_syscore_share(void) {
+    return sRcpCore == 1 ? sSyscoreShare : 0;
 }
 
 /* The Sound page's results label (audio_ndsp.c). */
@@ -142,7 +169,7 @@ unsigned long long plat_idle_ns(void) {
 
 unsigned long long plat_render_idle_ns(void) {
     start_idle_meters();
-    return sRcpCore != 0 ? sRenderIdleNs : sIdleNs;
+    return sRcpCore > 1 ? sRenderIdleNs : sIdleNs;
 }
 
 void plat_shutdown(void) {
@@ -258,6 +285,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
         case PLAT_THREAD_RCP:
             prio = PRIO_RCP;
             core = sRcpCore;
+            if (core == 1) {
+                const char *env = plat_getenv("DKR_SYSCORE_RCP_PRIO");
+                prio = env != NULL ? (int) strtol(env, NULL, 0) : PRIO_SYSCORE_RCP;
+            }
             stackSize = 128 * 1024;
             break;
         case PLAT_THREAD_AUDIO:
@@ -285,6 +316,11 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
     }
     if (thread->handle == NULL && core != 0) {
         plat_log("thread %s: core %d unavailable, using core 0", name, core);
+        if (kind == PLAT_THREAD_RCP) {
+            sRcpCore = 0;
+            sSyscoreShare = 0;
+            prio = PRIO_RCP;
+        }
         core = 0;
         thread->handle = threadCreate(thread_entry, thread, stackSize, prio, 0, true);
     }
@@ -619,7 +655,8 @@ static void screen_thread(void *arg) {
 
 /*
  * The drawing thread runs at a low priority next to the renderer (on its core on a New 3DS, which waits on the GPU
- * much of the time), so the screen is only drawn when nothing else needs that core.
+ * much of the time; on the game's core when an Old 3DS lends the renderer the system core's time), so the screen is
+ * only drawn when nothing else needs that core.
  */
 static void screen_thread_start(int core) {
     LightLock_Lock(&sConsoleLock);
@@ -655,7 +692,7 @@ void plat_rom_loaded(void) {
     bs_load_assets();
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
-    screen_thread_start(sRcpCore);
+    screen_thread_start(sRcpCore == 1 ? 0 : sRcpCore);
 }
 
 /* The buttons (see bs_set_buttons). */
@@ -907,7 +944,7 @@ static void watchdog(void *arg) {
         }
         {
             // Idle time is only counted while the profiler runs (a test run turns it on); 0 otherwise.
-            unsigned long long idle = sIdleNs, renderIdle = sRcpCore != 0 ? sRenderIdleNs : sIdleNs;
+            unsigned long long idle = sIdleNs, renderIdle = sRcpCore > 1 ? sRenderIdleNs : sIdleNs;
             unsigned idlePct = lastIdle != 0 ? (unsigned) ((idle - lastIdle) / 10000000ULL) : 0;
             unsigned renderIdlePct = lastRenderIdle != 0 ? (unsigned) ((renderIdle - lastRenderIdle) / 10000000ULL) : 0;
             lastIdle = idle;

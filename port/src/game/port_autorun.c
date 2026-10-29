@@ -532,11 +532,17 @@ static const char *aa_label(void) {
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
 }
 
-/* The graphics settings the frames are drawn with now, for the results (e.g. "aa4x/60fps/fb32/ahead2"). */
+/* The graphics settings the frames are drawn with now, for the results (e.g. "aa4x/60fps/fb32/ahead2"; an Old 3DS
+ * renderer on the system core adds its share, e.g. "/sys50"). */
 static const char *graphics_setup(void) {
-    static char text[40];
+    static char text[48];
+    s32 share = plat_renderer_syscore_share();
     plat_snprintf(text, sizeof(text), "aa%s/%dfps/fb%d/ahead%d", aa_label(), plat_frame_retraces() == 1 ? 60 : 30,
                   plat_fb16() ? 16 : 32, plat_render_ahead());
+    if (share > 0) {
+        s32 len = (s32) strlen(text);
+        plat_snprintf(text + len, sizeof(text) - len, "/sys%d", (int) share);
+    }
     return text;
 }
 
