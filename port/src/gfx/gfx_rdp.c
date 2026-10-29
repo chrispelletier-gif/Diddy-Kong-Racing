@@ -1343,6 +1343,10 @@ static void flush_model_batch(void) {
     if (sModelCount == 0) {
         return;
     }
+    if (sFrameCount == sTraceFrame) {
+        trace_state(&sModelState, sModelCount);
+        plat_log("    model batch, %d vertices", (int) sModelVertices);
+    }
     part = walk_switch(WALK_DRAWS);
     gfxb_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount);
     prof_count(PROF_TRIANGLES, sModelCount);
@@ -1572,6 +1576,10 @@ static void flush_mesh_batch(void) {
     if (sMeshPartCount == 0) {
         return;
     }
+    if (sFrameCount == sTraceFrame) {
+        trace_state(&sModelState, sMeshTriangles);
+        plat_log("    mesh batch, %d parts", (int) sMeshPartCount);
+    }
     part = walk_switch(WALK_DRAWS);
     gfxb_draw_meshes(&sModelState, &sModelParams, sMeshParts, sMeshPartCount);
     prof_count(PROF_TRIANGLES, sMeshTriangles);
@@ -1734,6 +1742,12 @@ static s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     }
     pending_box(pl);
     verdict = gfxb_model_check(params.mtx, pl->boxMin, pl->boxMax);
+    if (sFrameCount == sTraceFrame) {
+        plat_log("  MODEL %d tris, load %d of %d at %d, box %d %d %d .. %d %d %d: %s", (int) count, (int) l,
+                 (int) pl->count, (int) pl->dest, pl->boxMin[0], pl->boxMin[1], pl->boxMin[2], pl->boxMax[0],
+                 pl->boxMax[1], pl->boxMax[2],
+                 verdict == GFX_MODEL_HIDDEN ? "hidden" : verdict == GFX_MODEL_GPU ? "GPU" : "CPU");
+    }
     if (verdict == GFX_MODEL_HIDDEN) {
         return TRUE;
     }
