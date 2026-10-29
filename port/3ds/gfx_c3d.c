@@ -829,7 +829,7 @@ static void link_target(void) {
 }
 
 /*
- * Adaptive anti-aliasing (DKR_ADAPTIVE_AA, default off): with anti-aliasing on, a frame the GPU took nearly a whole
+ * Adaptive anti-aliasing (DKR_ADAPTIVE_AA, default off; shelved after switch bench #246, where it never switched): with anti-aliasing on, a frame the GPU took nearly a whole
  * frame's time to draw (over 92% of it, see adaptive_observe) sends the next ones to a target at the screen's own
  * resolution (sLowTarget, made when first needed) for sAdaptHoldLen frames; the first anti-aliased frame after that
  * is a probe, and if it is slow again the hold doubles (up to ADAPT_HOLD_MAX), so a heavy stretch of track stays at
@@ -1220,7 +1220,8 @@ static volatile unsigned int sSwapCount, sSwapReplaced, sSwapGapUs;
 static u64 sLastSwapTick;
 
 /*
- * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, default off). libctru has two, so a frame finished
+ * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, on by default since switch bench #246: Crescent Island
+ * and Haunted Woods went from 48 to 60 fps with the same GPU time; DKR_TRIPLE_BUFFER=0 = two). libctru has two, so a frame finished
  * before the last one reached the screen waits for it (wait_for_present). With three, of our own in linear memory,
  * it is copied into one that is neither on screen nor waiting to be, and carries on. citro3d copies a frame into what
  * gfxGetFramebuffer returns and shows it with gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours while
@@ -2608,7 +2609,7 @@ static void read_switches(void) {
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
     sAdaptive = plat_switch("DKR_ADAPTIVE_AA", 0);
-    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", 0) != 0;
+    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", 1) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();

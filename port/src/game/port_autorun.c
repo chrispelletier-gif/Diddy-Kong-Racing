@@ -156,13 +156,10 @@ typedef struct BenchSwitch {
  * depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
  * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
  * transforms (P27) gained nothing and stay off. The list ends with an empty entry, so it may be otherwise empty (the
- * bench then says so instead of racing). The races run with anti-aliasing 2x, which adaptive anti-aliasing needs and
- * where the heavy tracks drop below 60 fps. */
+ * bench then says so instead of racing). Bench #246 settled the third top screen buffer (P35, on by default: the heavy
+ * tracks went from 48 to 60 fps), while adaptive anti-aliasing and kernel waits per queue (P32) showed nothing and stay
+ * off. The races run with anti-aliasing 2x, where the heavy tracks used to drop below 60 fps. */
 static const BenchSwitch sSwitches[] = {
-    { "Adaptive anti-aliasing", { "DKR_ADAPTIVE_AA", NULL, NULL }, 0, 1 },
-    { "Third top screen buffer (P35)", { "DKR_TRIPLE_BUFFER", NULL, NULL }, 0, 1 },
-    { "Kernel waits per queue (P32)", { "DKR_QUEUE_WAKE", NULL, NULL }, 0, 1 },
-    { "All three together", { "DKR_ADAPTIVE_AA", "DKR_TRIPLE_BUFFER", "DKR_QUEUE_WAKE" }, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

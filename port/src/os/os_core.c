@@ -433,7 +433,7 @@ void port_describe_threads(char *buffer, s32 size) {
 #define QUEUE_WAIT_NS 4000000ULL
 
 /*
- * Roadmap P32 (DKR_QUEUE_WAKE=1, a switch bench race): every message used to wake every blocked N64 thread through
+ * Roadmap P32 (DKR_QUEUE_WAKE=1, off: no gain in switch bench #246): every message used to wake every blocked N64 thread through
  * the kernel's one condition variable, each looking at its own queue again. With the switch on (outside lockstep), a
  * thread waiting on a queue sleeps on that queue's variable (plat_kwait_on_timeout) and a message wakes only those.
  * Nothing else waits on queues, so nothing else needs the queue's wake-ups; the bounded wait stays as it was.
