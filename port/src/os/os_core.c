@@ -439,7 +439,13 @@ void port_describe_threads(char *buffer, s32 size) {
  * Nothing else waits on queues, so nothing else needs the queue's wake-ups; the bounded wait stays as it was.
  */
 static int queue_wake_keyed(void) {
-    return !port_lockstep_enabled() && plat_switch("DKR_QUEUE_WAKE", 0) != 0;
+    // Read again only when a switch override changes (gPlatSwitchEpoch): this runs for every message.
+    static int sEpoch = -1, sKeyed;
+    if (sEpoch != gPlatSwitchEpoch) {
+        sEpoch = gPlatSwitchEpoch;
+        sKeyed = plat_switch("DKR_QUEUE_WAKE", 0) != 0;
+    }
+    return sKeyed && !port_lockstep_enabled();
 }
 
 static void queue_wake(OSMesgQueue *mq) {

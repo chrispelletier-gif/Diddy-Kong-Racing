@@ -1386,14 +1386,19 @@ static u64 sLastSwapTick;
  * and Haunted Woods went from 48 to 60 fps with the same GPU time; DKR_TRIPLE_BUFFER=0 = two). libctru has two, so a frame finished
  * before the last one reached the screen waits for it (wait_for_present). With three, of our own in linear memory,
  * it is copied into one that is neither on screen nor waiting to be, and carries on. citro3d copies a frame into what
- * gfxGetFramebuffer returns and shows it with gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours while
- * sTripleFrame is set, which is fixed for each frame when it is handed over (triple_choose).
+ * gfxGetFramebuffer returns and shows it with gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours: the
+ * first while sTripleGet is set (only around the frame's C3D_FrameEnd, so the error console still gets libctru's), the
+ * second for a frame handed over with sTripleFrame set (triple_choose). The swap runs on the GSP thread after the GPU
+ * finishes, which libctru may report before it has run, so triple_choose first waits for the last one (sTripleSwaps
+ * catching up with sTripleQueued) before it changes anything the swap reads.
  * sTripleShown is the buffer on screen, sTripleMaybe one that may have reached it (presented while another was still
- * waiting, just as the screen took that), sTriplePresented the last presented: none of them is written next.
+ * waiting, just as the screen took that), sTriplePresented the last presented: none of them is written next. They are
+ * kept while frames go to libctru's buffers, as one of ours may still be on screen then.
  */
 #define TRIPLE_BYTES (GSP_SCREEN_WIDTH * GSP_SCREEN_HEIGHT_TOP_2X * 3) // 800 pixels across or two eyes, 24-bit
 static int sTripleWanted;
-static volatile int sTripleFrame;
+static volatile int sTripleFrame, sTripleGet;
+static volatile unsigned int sTripleQueued, sTripleSwaps;
 static u8 *sTriple[3];
 static int sTripleNext, sTripleShown = -1, sTripleMaybe = -1, sTriplePresented = -1, sTripleFail;
 static unsigned int sTripleId;
@@ -1401,7 +1406,7 @@ static unsigned int sTripleId;
 u8 *__real_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height);
 __attribute__((used)) u8 *__wrap_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height) {
     u8 *fb = __real_gfxGetFramebuffer(screen, side, width, height); // libctru's sizes for the mode
-    if (screen == GFX_TOP && sTripleFrame) {
+    if (screen == GFX_TOP && sTripleGet) {
         fb = sTriple[sTripleNext] + (gfxIs3D() && side != GFX_LEFT ? TRIPLE_BYTES / 2 : 0);
     }
     return fb;
@@ -1427,6 +1432,7 @@ static void triple_present(bool hasStereo) {
     sTriplePresented = sTripleNext;
     sTripleId ^= 1;
     gspPresentBuffer(GSP_SCREEN_TOP, sTripleId, fbA, fbB, GSP_SCREEN_WIDTH * gspGetBytesPerPixel(format), mode);
+    sTripleSwaps++;
 }
 
 void __real_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
@@ -1453,13 +1459,46 @@ __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool has
  * buffers, and which. Returns 0 when it must wait for the screen as with two (wait_for_present): the setting is off,
  * or the three buffers are all in use (two frames presented within one refresh).
  */
+/* Polls (at most ~35 ms) until done() says so; returns whether it did. */
+static int triple_poll(int (*done)(void)) {
+    int i;
+    for (i = 0; i < 70 && !done(); i++) {
+        svcSleepThread(500 * 1000);
+    }
+    return done();
+}
+
+static int triple_swapped(void) {
+    return sTripleSwaps == sTripleQueued;
+}
+
+static int triple_shown(void) {
+    return !gspIsPresentPending(GSP_SCREEN_TOP);
+}
+
+/* Picks a buffer that is neither on screen, nor may be, nor waiting to be; -1 if there is none. */
+static int triple_free(void) {
+    int i;
+    if (sTriplePresented >= 0 && !gspIsPresentPending(GSP_SCREEN_TOP)) {
+        sTripleShown = sTriplePresented;
+        sTripleMaybe = -1;
+    }
+    for (i = 0; i < 3; i++) {
+        if (i != sTripleShown && i != sTripleMaybe && i != sTriplePresented) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 static int triple_choose(void) {
     int i;
+    if (sTripleFrame && !triple_poll(triple_swapped)) {
+        plat_log("top screen: the last frame's swap never came, two buffers from now");
+        sTripleFail = 1;
+    }
+    sTripleFrame = 0;
     if (!sTripleWanted || sStereo || sTripleFail) {
-        if (sTripleFrame) {
-            sTripleFrame = 0;
-            sTripleShown = sTripleMaybe = sTriplePresented = -1; // libctru's buffers are on screen again.
-        }
         return 0;
     }
     if (sTriple[0] == NULL) {
@@ -1476,20 +1515,17 @@ static int triple_choose(void) {
             }
         }
     }
-    if (sTriplePresented >= 0 && !gspIsPresentPending(GSP_SCREEN_TOP)) {
-        sTripleShown = sTriplePresented;
-        sTripleMaybe = -1;
+    i = triple_free();
+    if (i < 0 && triple_poll(triple_shown)) {
+        i = triple_free(); // All three were in use (two frames presented within one refresh): one is free now.
     }
-    for (i = 0; i < 3; i++) {
-        if (i != sTripleShown && i != sTripleMaybe && i != sTriplePresented) {
-            sTripleNext = i;
-            sTripleFrame = 1;
-            return 1;
-        }
+    if (i < 0) {
+        return 0; // Still none: wait like two (libctru's back buffer isn't on screen).
     }
-    sTripleFrame = 0; // All three in use: wait like two (libctru's back buffer isn't on screen either).
-    sTripleShown = sTripleMaybe = sTriplePresented = -1;
-    return 0;
+    sTripleNext = i;
+    sTripleQueued++;
+    sTripleFrame = 1;
+    return 1;
 }
 
 /*
@@ -3030,11 +3066,13 @@ void gfxb_end_frame(void) {
         }
         find_recent_screen();
         watch_for_line();
+        sTripleGet = sTripleFrame; // citro3d's display transfer goes to our buffer (see sTripleFrame)
         if (full_flush()) {
             C3D_FrameEnd(0); // Also flushes the whole linear heap.
         } else {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
+        sTripleGet = 0;
         record_recent_frame();
     }
     sFrameStarted = -1; // A frame has been drawn, so the target holds an image.

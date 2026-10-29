@@ -175,7 +175,7 @@ static void apply_config(s32 config) {
         plat_clear_switch_overrides();
         return;
     }
-    if (config_count() == SWITCH_CONFIGS) {
+    if (sMode == MODE_SWITCH) {
         // The same render settings for every race, whatever the player's are: anti-aliasing 2x, 32-bit buffers,
         // 60 fps, Balanced widescreen, 400 pixels, mipmaps on, no colour boost, edge trimming on, render ahead 1,
         // GPU vertex maths off (the menu's settings would otherwise change what the bench measures). Then every
