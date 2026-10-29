@@ -142,8 +142,8 @@ static void add_game_menu_options(void) {
     static const OptionsSection sIntro = { intro_option_count, intro_option_label, intro_option_value,
                                            intro_option_change, intro_option_hint, intro_option_in_race };
     menu_3ds_add_options();
-    options_add(OPTIONS_VIDEO, &sRaceHud);
-    options_add(OPTIONS_VIDEO, &sIntro);
+    options_add(OPTIONS_SCREEN, &sRaceHud);
+    options_add(OPTIONS_GENERAL, &sIntro);
     options_add(OPTIONS_CAMERA, &sCamera);
     options_add(OPTIONS_AUDIO, &sSound);
     options_add(OPTIONS_CONTROLS, &sControls);

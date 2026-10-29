@@ -142,7 +142,7 @@ ifeq ($(TARGET),3ds)
                 -DPORT_VERSION=\"$(PORT_VERSION)\" -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\" \
                 -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
-  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers
+  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers -Wl,--wrap=gfxGetFramebuffer
   # curl and mbedtls (devkitPro's 3ds-curl) send bug reports and download updates, so a player's build has neither.
   LIBS      := -lcitro3d $(if $(filter 1,$(RELEASE)),,-lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz) -lctru -lm
   EXE       := $(BUILD_DIR)/dkr.elf

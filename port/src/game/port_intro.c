@@ -1,8 +1,9 @@
 /*
  * The intro logos (port.h, roadmap Q10): the Rareware and N64 logo screen that plays before the title screen. The
- * Intro logos setting (Settings > Start-up, VIDEO OPTIONS in the game's menus, skipintro= in settings.txt; DKR_SKIP_INTRO
- * in env.txt for a test) leaves it out, so the game goes from the boot screen straight to the title screen. It is off,
- * the N64's sequence, by default. Pressing A, B or START on the logo screen skips it either way (src/menu.c).
+ * Intro logos setting (Settings > Start-up, a row of the game's Options menu, skipintro= in settings.txt;
+ * DKR_SKIP_INTRO in env.txt for a test) leaves it out, so the game goes from the boot screen straight to the title
+ * screen. It is off, the N64's sequence, by default. Pressing A, B or START on the logo screen skips it either way
+ * (src/menu.c).
  */
 #include <stdlib.h>
 
@@ -25,7 +26,7 @@ void port_set_skip_intro(s32 on) {
     settings_set("skipintro", sSkipIntro);
 }
 
-/* The Start-up page of the Settings menu (menu_3ds_add_page on the 3DS) and its row in VIDEO OPTIONS. */
+/* The Start-up page of the Settings menu (menu_3ds_add_page on the 3DS) and its row on the game's Options menu. */
 int intro_option_count(void) {
     return 1;
 }

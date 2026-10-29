@@ -432,10 +432,34 @@ void port_describe_threads(char *buffer, s32 size) {
  */
 #define QUEUE_WAIT_NS 4000000ULL
 
+/*
+ * Roadmap P32 (DKR_QUEUE_WAKE=1, off: no gain in switch bench #246): every message used to wake every blocked N64 thread through
+ * the kernel's one condition variable, each looking at its own queue again. With the switch on (outside lockstep), a
+ * thread waiting on a queue sleeps on that queue's variable (plat_kwait_on_timeout) and a message wakes only those.
+ * Nothing else waits on queues, so nothing else needs the queue's wake-ups; the bounded wait stays as it was.
+ */
+static int queue_wake_keyed(void) {
+    // Read again only when a switch override changes (gPlatSwitchEpoch): this runs for every message.
+    static int sEpoch = -1, sKeyed;
+    if (sEpoch != gPlatSwitchEpoch) {
+        sEpoch = gPlatSwitchEpoch;
+        sKeyed = plat_switch("DKR_QUEUE_WAKE", 0) != 0;
+    }
+    return sKeyed && !port_lockstep_enabled();
+}
+
+static void queue_wake(OSMesgQueue *mq) {
+    if (queue_wake_keyed()) {
+        plat_kbroadcast_on(mq);
+    } else {
+        plat_kbroadcast();
+    }
+}
+
 static void wait_on_queue_inner(OSMesgQueue *mq, int forSpace) {
     s32 i = port_lockstep_enabled() ? thread_index((OSThread *) plat_get_current_os_thread()) : -1;
     if (i < 0) {
-        if (plat_kwait_timeout(QUEUE_WAIT_NS) &&
+        if ((queue_wake_keyed() ? plat_kwait_on_timeout(mq, QUEUE_WAIT_NS) : plat_kwait_timeout(QUEUE_WAIT_NS)) &&
             (forSpace ? mq->validCount < mq->msgCount : mq->validCount > 0)) {
             gPortMissedWakeups++;
         }
@@ -474,7 +498,7 @@ s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     }
     mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
     mq->validCount++;
-    plat_kbroadcast();
+    queue_wake(mq);
     plat_kunlock();
     port_int_restore(hadInt);
     if (waited) {
@@ -500,7 +524,7 @@ s32 osJamMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     mq->first = (mq->first + mq->msgCount - 1) % mq->msgCount;
     mq->msg[mq->first] = msg;
     mq->validCount++;
-    plat_kbroadcast();
+    queue_wake(mq);
     plat_kunlock();
     port_int_restore(hadInt);
     if (waited) {
@@ -528,7 +552,7 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag) {
     }
     mq->first = (mq->first + 1) % mq->msgCount;
     mq->validCount--;
-    plat_kbroadcast();
+    queue_wake(mq);
     plat_kunlock();
     port_int_restore(hadInt);
     if (waited) {
@@ -548,7 +572,7 @@ static s32 post_mesg(OSMesgQueue *mq, OSMesg msg) {
     if (mq->validCount < mq->msgCount) {
         mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
         mq->validCount++;
-        plat_kbroadcast();
+        queue_wake(mq);
         posted = TRUE;
     }
     plat_kunlock();

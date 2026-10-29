@@ -59,7 +59,8 @@ Buttons can be remapped, and the circle pad's deadzone, sensitivity and response
 Controls**.
 
 **Settings** is the button at the bottom of the touch screen, and the same settings are also in the game's own Options
-menu (VIDEO, CAMERA and CONTROL OPTIONS) and the pause menu. What you can change:
+menu (INTRO LOGOS, and VIDEO, SCREEN, CAMERA and CONTROL OPTIONS) and the pause menu, in English or French as the game
+is set. What you can change:
 - **Picture:** anti-aliasing (4x, 2x or off), 30 or 60 fps, mipmaps, colour boost.
 - **Screen:** widescreen (Wide, Balanced or Zoomed), the sharper 800-pixel mode, stereo 3D (follows the 3D slider),
   HUD at the screen edges or in the 4:3 area.

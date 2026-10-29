@@ -241,6 +241,12 @@ s32 port_skip_intro(void);
 void port_set_skip_intro(s32 on);
 
 /*
+ * The port's text in the game's menus (port/src/game/port_text.c): english as the game's current language writes it
+ * (French when it is set to FRANCAIS), or english itself when there is no translation.
+ */
+const char *port_text(const char *english);
+
+/*
  * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c, roadmap G9): port_race_hud_frame copies the
  * race's state for the bottom screen once a frame; port_race_hud_map takes the track map's sprite from minimap_init;
  * port_race_hud_hides says which HUD elements (HUD_*, or -1 for the track map) src/game_ui.c leaves off the top screen.

@@ -69,6 +69,12 @@ void plat_kwait(void);
 /* Waits with a timeout. Returns 0 if woken, 1 on timeout. */
 int plat_kwait_timeout(unsigned long long ns);
 void plat_kbroadcast(void);
+/* Roadmap P32: the same, on one of a few condition variables picked by key (a message queue), so a message wakes only
+ * the threads waiting on its queue (and any that share its variable). Kernel lock held. */
+int plat_kwait_on_timeout(const void *key, unsigned long long ns);
+void plat_kbroadcast_on(const void *key);
+#define PLAT_KEYED_CONDS 32
+#define PLAT_KEY_SLOT(key) ((unsigned) (((unsigned long) (key) >> 3) ^ ((unsigned long) (key) >> 9)) % PLAT_KEYED_CONDS)
 
 /* A non recursive mutex that emulates "interrupts disabled". Ownership is tracked by the OS layer. */
 void plat_intlock_lock(void);
@@ -197,13 +203,13 @@ void plat_overlay_show(const char *text);
 void plat_send_test_results(const char *title, const char *summary);
 /*
  * The 3DS render target: anti-aliasing (the GPU draws more pixels than the screen has and the display transfer averages
- * them; PLAT_AA_4X twice the resolution both ways, PLAT_AA_2X twice the height only) and 16-bit colour and depth
- * buffers, 1 on. -1 for either is the player's setting (the Settings menu, else DKR_AA and DKR_FB16).
- * The renderer switches between two frames. plat_antialias and plat_fb16 say what the frames drawn now use (the host
- * build only remembers the setting).
+ * them; PLAT_AA_4X twice the resolution both ways, PLAT_AA_2X twice the height only). -1 is the player's setting
+ * (the Settings menu, else DKR_AA). Colour and depth are always 32-bit: the 16-bit buffers setting was removed
+ * (2026-10-29) because it changed the picture, fog among it. The renderer switches between two frames.
+ * plat_antialias says what the frames drawn now use (the host build only remembers the setting).
  */
 enum { PLAT_AA_OFF, PLAT_AA_4X, PLAT_AA_2X };
-void plat_set_gpu_config(int aa, int fb16);
+void plat_set_gpu_config(int aa);
 int plat_antialias(void);
 /*
  * Widescreen (roadmap item G3): how much wider than 4:3 the game's camera is to be, 1 for 4:3 or 1.25 to fill the
@@ -221,9 +227,7 @@ float plat_camera_fov(float fovy);
 float plat_fov_tan_scale(void);
 /*
  * The camera's near plane (src/camera.h CAMERA_NEAR): the N64's 10, or 2.5 in widescreen, whose wider picture shows
- * rock faces right beside the camera that 4:3 never reached. With 16-bit buffers widescreen keeps 10: a 16-bit depth
- * buffer has 4 times too little precision at a distance with 2.5, and distant doors and signs flickered against the
- * walls behind them (Dragon Forest hub). Decal pulls and billboards' depth offsets scale with it.
+ * rock faces right beside the camera that 4:3 never reached. Decal pulls and billboards' depth offsets scale with it.
  */
 float plat_camera_near(void);
 /*
@@ -233,7 +237,6 @@ float plat_camera_near(void);
  */
 int plat_hud_edges(void);
 void plat_set_hud_edges(int on);
-int plat_fb16(void);
 /*
  * The frame rate cap (roadmap G6): the scheduler hands the game each finished frame after 2 retraces (30 fps, the
  * N64 game's own) or, at 60 fps, after 1. The game's logic already steps by however many retraces a frame took, and
@@ -244,12 +247,17 @@ int plat_frame_retraces(void);
 void plat_set_60fps(int on);
 int plat_60fps_setting(void);
 void plat_set_60fps_setting(int on);
+/* The Frame rate row: 30, 60 or the steady 20 (an Old 3DS's choice; three retraces a frame). */
+int plat_frame_rate_setting(void);
+void plat_set_frame_rate_setting(int fps);
 /* The build's version (git describe), as bug reports show it; "host" for a host build without one. */
 const char *plat_build_version(void);
 /* The version players see, from the newest version tag (port/Makefile): "0.1.0-beta", "0.1.0-beta+3" or "dev". */
 const char *plat_version(void);
 /* How the sound is being made, for the test runs' results (e.g. "sys/22k/smooth"; "host" on the host). */
 const char *plat_audio_setup(void);
+/* The share of the system core an Old 3DS lends the renderer (30, 50 or 80 percent), or 0 when it isn't there. */
+int plat_renderer_syscore_share(void);
 
 /*
  * Progress counters, for diagnosing hangs: on the 3DS a watchdog shows them on the bottom screen, so the one that
@@ -275,6 +283,18 @@ extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
  */
 int plat_render_ahead(void);
 void plat_set_render_ahead(int frames);
+
+/* The usual setting of the switches from the other ports survey (DKR_GPU_TRANSFORM, DKR_TRACK_MESH, DKR_MODEL_MESH,
+ * DKR_STEREO_ONCE) while settings.txt has none: off, until hardware says otherwise; a test build can be made with
+ * them all on. Settings > Picture changes them mid-race (debug builds): GPU vertex maths 0 off, 1 on (P30), 2 also
+ * the track recorded (P31), 3 also models (P34); 3D made once (P33) 0 or 1. A DKR_* variable wins over both. */
+#ifndef GFX_SURVEY_DEFAULT
+#define GFX_SURVEY_DEFAULT 0
+#endif
+int plat_gpu_maths_setting(void);
+void plat_set_gpu_maths_setting(int level);
+int plat_stereo_once_setting(void);
+void plat_set_stereo_once_setting(int on);
 /* What the renderer thread is doing right now. */
 extern const char *volatile gPlatGfxStage;
 

@@ -15,8 +15,8 @@
  *   DKR_AUTORUN_TIME_TRIAL=1        Race in time trial (alone, with the ghosts) instead of against the field.
  *
  * The GPU benchmark is a short run instead: the heaviest races of the hardware test runs, each raced once with every
- * render setting of sBenchConfigs (anti-aliasing 4x, 2x or off, 32 or 16-bit buffers, 30 or 60 fps), with the
- * profiler's numbers for each set side by side in the results. About 50 minutes. It replaced the anti-aliasing
+ * render setting of sBenchConfigs (anti-aliasing 4x, 2x or off, 30 or 60 fps), with the
+ * profiler's numbers for each set side by side in the results. About 30 minutes. It replaced the anti-aliasing
  * benchmark of roadmap item G0 (AA off and on only). It is started with the "GPU bench" button in the Test run
  * confirmation, or always runs with:
  *   DKR_AUTORUN_BENCH=1               Turns it on (instead of the full run).
@@ -118,41 +118,45 @@ typedef struct Race {
 /* The GPU benchmark's render settings. The first is the default ones, which the others are compared with. */
 typedef struct BenchConfig {
     s8 aa;    // PLAT_AA_*
-    s8 fb16;  // 16-bit colour and depth buffers
     s8 fps60; // The 60 fps cap
     const char *name;
 } BenchConfig;
 
 static const BenchConfig sBenchConfigs[] = {
-    { PLAT_AA_4X, 0, 0, "AA 4x" },
-    { PLAT_AA_4X, 1, 0, "AA 4x, 16-bit" },
-    { PLAT_AA_2X, 0, 0, "AA 2x" },
-    { PLAT_AA_2X, 1, 0, "AA 2x, 16-bit" },
-    { PLAT_AA_OFF, 0, 0, "AA off" },
-    { PLAT_AA_OFF, 1, 0, "AA off, 16-bit" },
-    { PLAT_AA_OFF, 1, 1, "60 fps, AA off, 16-bit" },
-    { PLAT_AA_2X, 1, 1, "60 fps, AA 2x, 16-bit" },
+    { PLAT_AA_4X, 0, "AA 4x" },
+    { PLAT_AA_2X, 0, "AA 2x" },
+    { PLAT_AA_OFF, 0, "AA off" },
+    { PLAT_AA_OFF, 1, "60 fps, AA off" },
+    { PLAT_AA_2X, 1, "60 fps, AA 2x" },
 };
 #define BENCH_CONFIGS ((s32) ARRAY_COUNT(sBenchConfigs))
 
 /*
  * The switch bench's experimental switches (plat_switch names, read by the renderer at the start of a frame). Each
- * is raced at its usual setting and, by itself, at its test setting; a switch can set two variables together.
+ * is raced at its usual setting and, by itself, at its test setting; a switch can set up to three variables together,
+ * and several switches can share a variable (one that the others need).
  */
+#define BENCH_SWITCH_VARS 3
 typedef struct BenchSwitch {
     const char *name; // For the results: what the test setting does.
-    const char *env[2];
+    const char *env[BENCH_SWITCH_VARS];
     s8 usual, test;
 } BenchSwitch;
 
-/* Nothing to compare right now. Command list splits (P19) are off by default (#153), early depth (P20) was dropped
+/* Every race sets 3D itself (DKR_STEREO3D, off unless a switch turns it on) and the other render settings (see
+ * apply_config), so the player's settings don't change what the bench measures. Settled before: GPU vertex maths
+ * (P30) with the track and models recorded (P31, P34) gained nothing on a New 3DS, whose races are GPU-bound (#237),
+ * and stay off (Settings > Picture > GPU vertex maths); stereo frames made once (P33) saved under 1 ms of renderer CPU
+ * for more GPU time in 3D (#240) and stays off (3D made once); command list splits (P19) are off by default (#153), early depth (P20) was dropped
  * (#155), the white-line diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches: the
  * depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
  * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
- * transforms (P27) gained nothing and stay off. The bench says so instead of racing. The list ends with an empty
- * entry, so it may be otherwise empty. */
+ * transforms (P27) gained nothing and stay off. The list ends with an empty entry, so it may be otherwise empty (the
+ * bench then says so instead of racing). Bench #246 settled the third top screen buffer (P35, on by default: the heavy
+ * tracks went from 48 to 60 fps), while adaptive anti-aliasing and kernel waits per queue (P32) showed nothing and stay
+ * off. The races run with anti-aliasing 2x, where the heavy tracks used to drop below 60 fps. */
 static const BenchSwitch sSwitches[] = {
-    { NULL, { NULL, NULL }, 0, 0 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
 #define MAX_CONFIGS 16
@@ -166,20 +170,43 @@ static const char *config_name(s32 config);
 static void apply_config(s32 config) {
     s32 i, k;
     if (config < 0 || config >= config_count()) {
-        plat_set_gpu_config(-1, -1);
+        plat_set_gpu_config(-1);
         plat_set_60fps(-1);
         plat_clear_switch_overrides();
         return;
     }
-    if (config_count() == SWITCH_CONFIGS) {
+    if (sMode == MODE_SWITCH) {
+        // The same render settings for every race, whatever the player's are: anti-aliasing 2x, 32-bit buffers,
+        // 60 fps, Balanced widescreen, 400 pixels, mipmaps on, no colour boost, edge trimming on, render ahead 1,
+        // GPU vertex maths off (the menu's settings would otherwise change what the bench measures). Then every
+        // variable at its usual setting, then the race's switch: a variable shared by several switches keeps the
+        // race's test setting.
+        static const struct {
+            const char *name;
+            s8 value;
+        } sBenchRender[] = {
+            { "BENCH_WIDESCREEN", 2 }, { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },
+            { "BENCH_COLOUR", 0 },     { "BENCH_GUARD_BAND", 1 },  { "BENCH_RENDER_AHEAD", 1 },
+            { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 },   { "DKR_MODEL_MESH", 0 },
+        };
+        plat_set_gpu_config(PLAT_AA_2X);
+        plat_set_60fps(1);
+        for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
+            plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
+        }
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
-            for (k = 0; k < 2 && sSwitches[i].env[k] != NULL; k++) {
-                plat_override_switch(sSwitches[i].env[k], config == i + 1 ? sSwitches[i].test : sSwitches[i].usual);
+            for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
+                plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
+            }
+        }
+        if (config > 0) {
+            for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[config - 1].env[k] != NULL; k++) {
+                plat_override_switch(sSwitches[config - 1].env[k], sSwitches[config - 1].test);
             }
         }
         return;
     }
-    plat_set_gpu_config(sBenchConfigs[config].aa, sBenchConfigs[config].fb16);
+    plat_set_gpu_config(sBenchConfigs[config].aa);
     plat_set_60fps(sBenchConfigs[config].fps60);
 }
 
@@ -532,11 +559,17 @@ static const char *aa_label(void) {
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
 }
 
-/* The graphics settings the frames are drawn with now, for the results (e.g. "aa4x/60fps/fb32/ahead2"). */
+/* The graphics settings the frames are drawn with now, for the results (e.g. "aa4x/60fps/ahead2"; an Old 3DS
+ * renderer on the system core adds its share, e.g. "/sys50"). */
 static const char *graphics_setup(void) {
-    static char text[40];
-    plat_snprintf(text, sizeof(text), "aa%s/%dfps/fb%d/ahead%d", aa_label(), plat_frame_retraces() == 1 ? 60 : 30,
-                  plat_fb16() ? 16 : 32, plat_render_ahead());
+    static char text[48];
+    s32 share = plat_renderer_syscore_share();
+    plat_snprintf(text, sizeof(text), "aa%s/%dfps/ahead%d", aa_label(), 60 / plat_frame_retraces(),
+                  plat_render_ahead());
+    if (share > 0) {
+        s32 len = (s32) strlen(text);
+        plat_snprintf(text + len, sizeof(text) - len, "/sys%d", (int) share);
+    }
     return text;
 }
 
@@ -1144,17 +1177,14 @@ static void bench_summary(char *out, s32 size) {
                                    (int) sRun, (int) previousRun);
         }
     } else if (sMode == MODE_SWITCH) {
-        static const char *const sAaNames[3] = { "off", "4x", "2x" };
-        s32 aa = plat_antialias();
         length = plat_snprintf(out, size,
                                "\n### Switches (averages of the finished races)\n\n"
                                "Each switch is flipped by itself; saved is against the usual settings' races. "
-                               "Render settings: %d fps cap, anti-aliasing %s, %d-bit buffers.\n\n"
+                               "Render settings, the bench's own in every race (see apply_config): 60 fps cap, "
+                               "anti-aliasing 2x, Balanced widescreen, 400 pixels, 3D off.\n\n"
                                "| track | switch | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | rdp ms | rdp saved "
                                "| worst GPU | worst frame | limit |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n",
-                               plat_frame_retraces() == 1 ? 60 : 30, aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
-                               plat_fb16() ? 16 : 32);
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n");
     } else {
         length = plat_snprintf(out, size,
                                "\n### Render settings (averages of the finished races)\n\n"
@@ -1314,9 +1344,9 @@ static void send_results(const char *why) {
                            sFpsCount ? sFpsSum / sFpsCount : 0.0, (int) sFpsCount);
     if (length > 0 && length < (s32) sizeof(summary)) {
         length += plat_snprintf(summary + length, sizeof(summary) - length,
-                                "Graphics when sent: anti-aliasing %s, %d fps cap, %d-bit buffers, render ahead %d "
+                                "Graphics when sent: anti-aliasing %s, %d fps cap, render ahead %d "
                                 "(each race's are in the results file's graphics column).\n",
-                                aa_label(), plat_frame_retraces() == 1 ? 60 : 30, plat_fb16() ? 16 : 32,
+                                aa_label(), 60 / plat_frame_retraces(),
                                 plat_render_ahead());
     }
     if (sMode == MODE_BOSS && length > 0 && length < (s32) sizeof(summary)) {

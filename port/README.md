@@ -35,7 +35,7 @@ make -C port TARGET=3ds -j8
 ```
 
 The result is `port/build/3ds/dkr.3dsx`, a debug build: its Settings menu has the profiler, the test runs, bug
-reports, updates and the performance switches (16-bit buffers, render ahead, edge trimming, the sound engine's
+reports, updates and the performance switches (render ahead, edge trimming, the sound engine's
 switches). `make -C port TARGET=3ds RELEASE=1` builds the one for players, `port/build/3ds-release/dkr.3dsx`, whose
 menus offer only the settings a player needs; the hidden switches keep their defaults. The debug tools are left out of
 it altogether (`PLAT_DEBUG_TOOLS` in `port/src/plat/plat.h`, `port/src/release/`): no profiler, test runs, bug reports,
@@ -89,9 +89,12 @@ back. Test runs and CI never play multiplayer.
 
 Settings are saved in `sdmc:/3ds/dkr/settings.txt` (`src/plat/settings.c`). The player settings (picture, screen,
 race HUD, camera, controls, sound, start-up) are listed in the [main README](../README.md#playing). They are in the
-bottom screen's Settings menu and in the game's own menus: VIDEO, CAMERA and CONTROL OPTIONS in Options, MORE AUDIO
-OPTIONS in Audio Options, and an OPTIONS row in the pause menu without the settings that only apply after a restart
-(`src/menu.c`, categories registered in `src/plat/options.c`). Both change the same saved values.
+bottom screen's Settings menu and in the game's own menus: an INTRO LOGOS row and VIDEO, SCREEN, CAMERA and CONTROL
+OPTIONS in Options, MORE AUDIO OPTIONS in Audio Options, and an OPTIONS row in the pause menu without the settings
+that only apply after a restart (`src/menu.c`, categories registered in `src/plat/options.c`). Both change the same
+saved values. The game's menus show the port's text in French when the game is set to FRANCAIS
+(`src/game/port_text.c`): a new row's label, values and hint each need a line there, or they show in English. The
+bottom screen stays English.
 
 The bottom screen is drawn in the game's own style (`src/plat/bottom_screen.c`, menu in `3ds/menu_3ds.c`), with its
 fonts, logo, arrows and menu sounds read from the ROM; until the ROM is loaded it uses a plain 8x8 font. Other parts
@@ -104,8 +107,6 @@ function.
 debug or performance row must be added to the hidden lists in `3ds/menu_3ds.c` and to `is_debug_switch` in
 `src/plat/settings.c`.
 - **Mipmaps: Show**: mipmaps on, with the levels tinted red, green, blue and yellow, to see where the GPU uses them.
-- **16-bit buffers**: RGB565 colour and 16-bit depth (off by default; 16-bit depth makes distant detail flicker in
-  widescreen).
 - **Render ahead**: 1 frame (the N64's timing: the game builds a frame while the renderer draws the one before, and
   waits for it) or 2 frames (the game runs one frame further ahead, so a slow frame in the renderer is absorbed
   instead of dropped, at the cost of one frame more input lag; the game keeps a third display list heap for it).
@@ -401,15 +402,15 @@ through the ground shows up as unsticks or as a race that never finishes. The ra
 
 ### GPU benchmark
 
-Tap Settings, Test run, then GPU bench. It is a short test run (about 50 minutes) that measures the render settings on
+Tap Settings, Test run, then GPU bench. It is a short test run (about 30 minutes) that measures the render settings on
 the heaviest races: Jungle Falls, Crescent Island and Haunted Woods, the slowest tracks of the quick tests, raced by
-Bumper once with each of 8 settings: anti-aliasing 4x, 2x or off, 32 or 16-bit buffers, and 60 fps with AA off or 2x.
+Bumper once with each of 5 settings: anti-aliasing 4x, 2x or off, and 60 fps with AA off or 2x.
 The game switches the settings itself before each race and puts your own back at the end. The results issue
 ("[3DS test run] GPU benchmark ...") has one line per track and setting, with the GPU time it saves against AA 4x and
 how many frames made 60 fps; the races are in `gpu_bench_results.csv` (the test run's columns plus `config` and
 `pct_60fps`), which `autorun_report.py` also splits by track and setting. It keeps its own progress file, so a full test
 run it interrupts carries on afterwards. `DKR_AUTORUN_BENCH=1` runs it at every start instead;
-`DKR_AUTORUN_BENCH_TRACKS`, `DKR_AUTORUN_BENCH_CHARACTER` and `DKR_AUTORUN_BENCH_CONFIGS` (indexes into the 8 settings)
+`DKR_AUTORUN_BENCH_TRACKS`, `DKR_AUTORUN_BENCH_CHARACTER` and `DKR_AUTORUN_BENCH_CONFIGS` (indexes into the 5 settings)
 change the tracks, the character and the settings. It replaced the anti-aliasing benchmark of roadmap item G0.
 
 ## Automated testing

@@ -1,0 +1,83 @@
+; Vertex shader for GPU vertex maths (roadmap item P30), used for every draw while DKR_GPU_TRANSFORM is on (the
+; pass-through shader in shader.v.pica otherwise).
+; Two kinds of draws go through it, told apart only by their uniforms (gfx_c3d.c, set_shader_uniforms):
+;  - model draws (gfxb_draw_model): the game's own vertices, s16 positions and texture coordinates, transformed here
+;    by the draw's matrix, the way the N64's RSP does it;
+;  - every other draw (positions already worked out by the CPU, as for shader.v.pica): the matrix is the identity
+;    and the texture coordinates go through unchanged.
+; Rules for a shader that a real 3DS runs (emulators run anything): every output register is written whole, once,
+; with no branches (a shader that left outtc0.zw unwritten is the likeliest reason the first shader of 2026-10-16
+; hung the GPU on its first triangle, see the Star Fox Adventures 3DS port's HARDWARE_DEBUG.md); intermediate results
+; go to temporaries.
+
+.entry transform_main
+
+; Uniforms
+.fvec eye     ; Stereo 3D: the position moves across (clip y) by eye.x * w + eye.y, as in shader.v.pica
+.fvec mtx[4]  ; Rows: each output coordinate's factors for the vertex's x, y, z and 1
+.fvec camoff  ; Whole numbers taken off the position first (w = 0), so the matrix's own offset stays small
+.fvec texa    ; Texture coordinates: t0 = v1 * texa.xy + texb.xy, t1 = v1 * texa.zw + v2 * texc.zw + texb.zw
+.fvec texc
+.fvec texb
+.fvec fogp    ; Fog factor = clamp(z / w * fogp.x + fogp.y, 0, 1) replaces the colour's alpha when fogp.z = 1
+
+; Constants
+.constf consts(0.00392156862745098, 0.0, 1.0, 0.0001)
+.alias rgba_scale consts.xxxx
+.alias zeros consts.yyyy
+.alias ones consts.zzzz
+.alias tiny consts.wwww
+
+; Outputs
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+; Inputs
+.alias inpos v0
+.alias intc0 v1
+.alias intc1 v2
+.alias inclr v3
+
+.proc transform_main
+	; Position
+	add r0, -camoff, inpos
+	dp4 r1.x, mtx[0], r0
+	dp4 r1.y, mtx[1], r0
+	dp4 r1.z, mtx[2], r0
+	dp4 r1.w, mtx[3], r0
+
+	; Fog factor, from z before the depth clamp below
+	max r2, tiny, r1.wwww
+	rcp r2, r2.x
+	mul r2, r2, r1.zzzz
+	mul r2, fogp.xxxx, r2
+	add r2, fogp.yyyy, r2
+	max r2, zeros, r2
+	min r2, ones, r2
+
+	; Colour, the alpha replaced by the fog factor when fogp.z is 1
+	mul r3, rgba_scale, inclr
+	add r4, r2, -r3.wwww
+	mul r4, fogp.zzzz, r4
+	add r3.w, r3, r4
+
+	; Stereo offset, then the depth clamp (the N64 has no far plane)
+	mul r5, eye.xxxx, r1.wwww
+	add r5, eye.yyyy, r5
+	add r1.y, r1, r5
+	min r1.z, zeros, r1
+
+	; Texture coordinates
+	mul r6, texa, intc0.xyxy
+	mul r7, texc, intc1.xyxy
+	add r6, r6, r7
+	add r6, texb, r6
+
+	mov outpos, r1
+	mov outtc0, r6
+	mov outtc1, r6.zwzw
+	mov outclr, r3
+	end
+.end

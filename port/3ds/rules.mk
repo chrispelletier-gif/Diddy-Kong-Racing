@@ -3,7 +3,7 @@
 ifeq ($(TARGET),3ds)
 
 TOOLS_BIN   := $(DEVKITPRO)/tools/bin
-SHADER_SRC  := 3ds/shader.v.pica
+SHADER_SRC  := 3ds/shader.v.pica 3ds/transform.v.pica
 SHADER_BIN  := $(BUILD_DIR)/shader/shader.shbin
 SHADER_ASM  := $(BUILD_DIR)/shader/shader_shbin.s
 SHADER_HDR  := $(BUILD_DIR)/shader/shader_shbin.h

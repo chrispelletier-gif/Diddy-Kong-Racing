@@ -26,6 +26,15 @@ struct PlatSem {
 
 static pthread_mutex_t sKernelLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t sKernelCond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t sKeyedConds[PLAT_KEYED_CONDS];
+static pthread_once_t sKeyedOnce = PTHREAD_ONCE_INIT;
+
+static void keyed_init(void) {
+    int i;
+    for (i = 0; i < PLAT_KEYED_CONDS; i++) {
+        pthread_cond_init(&sKeyedConds[i], NULL);
+    }
+}
 static pthread_mutex_t sIntLock = PTHREAD_MUTEX_INITIALIZER;
 static __thread void *sCurrentOsThread;
 static unsigned long long sNextVblank;
@@ -89,11 +98,10 @@ void plat_send_test_results(const char *title, const char *summary) {
     fprintf(stderr, "test results: %s\n%s\n", title, summary);
 }
 
-static int sAntialias = PLAT_AA_4X, sFb16;
+static int sAntialias = PLAT_AA_4X;
 
-void plat_set_gpu_config(int aa, int fb16) {
+void plat_set_gpu_config(int aa) {
     sAntialias = aa < 0 ? PLAT_AA_4X : aa;
-    sFb16 = fb16 > 0;
 }
 
 float plat_aspect_scale(void) {
@@ -128,15 +136,6 @@ float plat_camera_fov(float fovy) {
 
 int plat_antialias(void) {
     return sAntialias;
-}
-
-int plat_fb16(void) {
-    // DKR_FB16=1 previews the 3DS's 16-bit buffers where the game cares (the near plane, plat_camera_near).
-    static int sEnv = -1;
-    if (sEnv < 0) {
-        sEnv = getenv("DKR_FB16") != NULL && atoi(getenv("DKR_FB16")) != 0;
-    }
-    return sFb16 || sEnv;
 }
 
 static void *thread_entry(void *arg) {
@@ -232,6 +231,23 @@ int plat_kwait_timeout(unsigned long long ns) {
 
 void plat_kbroadcast(void) {
     pthread_cond_broadcast(&sKernelCond);
+}
+
+int plat_kwait_on_timeout(const void *key, unsigned long long ns) {
+    struct timespec ts;
+    unsigned long long deadline;
+
+    pthread_once(&sKeyedOnce, keyed_init);
+    clock_gettime(CLOCK_REALTIME, &ts);
+    deadline = (unsigned long long) ts.tv_sec * 1000000000ULL + ts.tv_nsec + ns;
+    ts.tv_sec = deadline / 1000000000ULL;
+    ts.tv_nsec = deadline % 1000000000ULL;
+    return pthread_cond_timedwait(&sKeyedConds[PLAT_KEY_SLOT(key)], &sKernelLock, &ts) == ETIMEDOUT;
+}
+
+void plat_kbroadcast_on(const void *key) {
+    pthread_once(&sKeyedOnce, keyed_init);
+    pthread_cond_broadcast(&sKeyedConds[PLAT_KEY_SLOT(key)]);
 }
 
 void plat_intlock_lock(void) {

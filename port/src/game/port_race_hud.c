@@ -666,7 +666,7 @@ void port_race_hud_frame(s32 updateRate) {
     plat_set_race_hud(&hud);
 }
 
-/* The Race HUD row of the Settings menu (and VIDEO OPTIONS in the game's menus). */
+/* The Race HUD row of the Settings menu (and SCREEN OPTIONS in the game's menus). */
 int race_hud_option_count(void) {
     return 1;
 }

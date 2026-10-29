@@ -882,7 +882,7 @@ void viewport_scissor(Gfx **dList) {
 #ifdef TARGET_PORT
 /**
  * Widescreen in the port: rebuilds the perspective matrix when the camera's aspect ratio, field of view setting or
- * near plane (which 16-bit buffers change) changes.
+ * near plane changes.
  */
 static void cam_port_update_aspect(void) {
     static f32 sAspect = 1.0f, sFov = -1.0f, sNear = 10.0f;

@@ -20,12 +20,11 @@
 #include "plat/options.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "plat/settings.h"
 
 void plat_3ds_menu_draw(const BsMenu *menu);
 void plat_3ds_set_antialias_setting(int aa);
 int plat_3ds_antialias_setting(void);
-void plat_3ds_set_fb16_setting(int on);
-int plat_3ds_fb16_setting(void);
 void plat_3ds_set_mipmap_setting(int mode);
 int plat_3ds_mipmap_setting(void);
 void plat_3ds_set_colour_setting(int level);
@@ -83,24 +82,34 @@ static void open_page(const MenuPage *page) {
 }
 
 /*
- * The settings of the first and last tabs, numbered as the old main page had them (the game's Video Options follow
- * the same numbers): anti-aliasing, frame rate, 16-bit buffers, mipmaps, colour boost, the Screen page (a tab now),
- * render ahead, the profiler, updates and the bug report. The Picture and Tools pages each show some of them, less
- * the ones a player's build (plat.h PLAT_DEBUG_TOOLS) hides (main_hidden): the pages' own functions number the rows
- * shown and the row_* ones these.
+ * The settings of the first and last tabs, numbered as the old main page had them: anti-aliasing, frame rate, mipmaps, colour boost, the Screen page (a tab now), render ahead, the profiler, updates and the bug report.
+ * The Picture page (also the game's VIDEO OPTIONS) and the Tools page each show some of them, less the ones a player's
+ * build (plat.h PLAT_DEBUG_TOOLS) hides (main_hidden): the pages' own functions number the rows shown and the row_*
+ * ones these.
  */
 enum {
     MAIN_AA,
     MAIN_FPS,
-    MAIN_FB16,
     MAIN_MIPMAPS,
     MAIN_COLOUR,
     MAIN_SCREEN,
     MAIN_AHEAD,
+    MAIN_GPU_MATHS,
+    MAIN_STEREO_ONCE,
     MAIN_PROFILER,
     MAIN_UPDATES,
-    MAIN_BUGREPORT
+    MAIN_BUGREPORT,
+    MAIN_O3DS_RENDER
 };
+
+/* The Old 3DS renderer row (plat_init): the game's core, or the system core with a share of its time. */
+static const char *const sO3dsRender[4] = { "Game core", "System 30%", "System 50%", "System 80%" };
+
+static int is_old_3ds(void) {
+    bool isNew3DS = false;
+    APT_CheckNew3DS(&isNew3DS);
+    return !isNew3DS;
+}
 
 /* Anti-aliasing in the order the row steps through (PLAT_AA_* values). */
 static const int sAaOrder[3] = { PLAT_AA_OFF, PLAT_AA_2X, PLAT_AA_4X };
@@ -112,7 +121,7 @@ static const char *const sMipmapModes[3] = { "Off", "On", "Show" };
 /* The performance switches and the debug tools: the profiler, updates (which install test builds) and bug reports
  * (which need a GitHub token). */
 static int main_hidden(int row) {
-    return !PLAT_DEBUG_TOOLS && (row == MAIN_FB16 || row == MAIN_AHEAD || row >= MAIN_PROFILER);
+    return !PLAT_DEBUG_TOOLS && (row == MAIN_AHEAD || row >= MAIN_GPU_MATHS);
 }
 
 static const char *row_label(int i) {
@@ -120,8 +129,6 @@ static const char *row_label(int i) {
         return "Anti-aliasing";
     } else if (i == MAIN_FPS) {
         return "Frame rate";
-    } else if (i == MAIN_FB16) {
-        return "16-bit buffers";
     } else if (i == MAIN_MIPMAPS) {
         return "Mipmaps";
     } else if (i == MAIN_COLOUR) {
@@ -130,10 +137,16 @@ static const char *row_label(int i) {
         return "Screen";
     } else if (i == MAIN_AHEAD) {
         return "Render ahead";
+    } else if (i == MAIN_GPU_MATHS) {
+        return "GPU vertex maths";
+    } else if (i == MAIN_STEREO_ONCE) {
+        return "3D made once";
     } else if (i == MAIN_PROFILER) {
         return "Profiler";
     } else if (i == MAIN_UPDATES) {
         return "Check for updates";
+    } else if (i == MAIN_O3DS_RENDER) {
+        return "Renderer (restart)";
     }
     return "Send a bug report";
 }
@@ -142,17 +155,22 @@ static void row_value(int i, char *out, int size) {
     if (i == MAIN_AA) {
         snprintf(out, size, "%s", sAaNames[plat_3ds_antialias_setting()]);
     } else if (i == MAIN_FPS) {
-        snprintf(out, size, "%s", plat_60fps_setting() ? "60 fps" : "30 fps");
-    } else if (i == MAIN_FB16) {
-        snprintf(out, size, "%s", plat_3ds_fb16_setting() ? "On" : "Off");
+        snprintf(out, size, "%d fps", plat_frame_rate_setting());
     } else if (i == MAIN_MIPMAPS) {
         snprintf(out, size, "%s", sMipmapModes[plat_3ds_mipmap_setting()]);
     } else if (i == MAIN_COLOUR) {
         snprintf(out, size, "%s", sColourLevels[plat_3ds_colour_setting()]);
     } else if (i == MAIN_AHEAD) {
         snprintf(out, size, "%d frame%s", plat_render_ahead(), plat_render_ahead() == 1 ? "" : "s");
+    } else if (i == MAIN_GPU_MATHS) {
+        static const char *const sLevels[4] = { "Off", "On", "+ track", "+ track, models" };
+        snprintf(out, size, "%s", sLevels[plat_gpu_maths_setting()]);
+    } else if (i == MAIN_STEREO_ONCE) {
+        snprintf(out, size, "%s", plat_stereo_once_setting() ? "On" : "Off");
     } else if (i == MAIN_PROFILER) {
         snprintf(out, size, "%s", prof_user_enabled() ? "On" : "Off");
+    } else if (i == MAIN_O3DS_RENDER) {
+        snprintf(out, size, "%s", sO3dsRender[settings_get("o3ds_render", 0) & 3]);
     } else {
         out[0] = '\0';
     }
@@ -163,9 +181,7 @@ static const char *row_hint(int i) {
         return plat_3ds_antialias_setting() == PLAT_AA_2X ? "Smoother edges; the GPU draws 2x"
                                                            : "Smoother edges; the GPU draws 4x";
     } else if (i == MAIN_FPS) {
-        return "60 when a frame fits (try AA off)";
-    } else if (i == MAIN_FB16) {
-        return "Less GPU memory work, like the N64";
+        return plat_frame_rate_setting() == 20 ? "Steady 20 (Old 3DS)" : "60 when a frame fits (try AA off)";
     } else if (i == MAIN_MIPMAPS) {
         return plat_3ds_mipmap_setting() == 2 ? "Tints each level a colour" : "No shimmer on distant textures";
     } else if (i == MAIN_COLOUR) {
@@ -174,10 +190,16 @@ static const char *row_hint(int i) {
         return "Widescreen, 800 pixels, 3D";
     } else if (i == MAIN_AHEAD) {
         return plat_render_ahead() == 2 ? "Fewer dropped frames, a frame more lag" : "The N64's timing";
+    } else if (i == MAIN_GPU_MATHS) {
+        return "Test: P30, then P31 track, P34 models";
+    } else if (i == MAIN_STEREO_ONCE) {
+        return "Test (P33): needs the 3D slider up";
     } else if (i == MAIN_PROFILER) {
         return "Frame times on this screen";
     } else if (i == MAIN_UPDATES) {
         return "Install a newer build from GitHub";
+    } else if (i == MAIN_O3DS_RENDER) {
+        return "Old 3DS: lend it the system core";
     }
     return "Log and snapshot (also SELECT+touch)";
 }
@@ -188,9 +210,11 @@ static void row_change(int i, int step) {
         for (at = 0; at < 3 && sAaOrder[at] != plat_3ds_antialias_setting(); at++) {}
         plat_3ds_set_antialias_setting(sAaOrder[(at + step + 3) % 3]);
     } else if (i == MAIN_FPS) {
-        plat_set_60fps_setting(!plat_60fps_setting());
-    } else if (i == MAIN_FB16) {
-        plat_3ds_set_fb16_setting(!plat_3ds_fb16_setting());
+        // 30, 60, then a steady 20 for an Old 3DS.
+        static const int sRates[3] = { 30, 60, 20 };
+        int at;
+        for (at = 0; at < 2 && sRates[at] != plat_frame_rate_setting(); at++) {}
+        plat_set_frame_rate_setting(sRates[(at + step + 3) % 3]);
     } else if (i == MAIN_MIPMAPS) {
         int modes = PLAT_DEBUG_TOOLS ? 3 : 2; // Show is for debugging.
         plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + modes) % modes);
@@ -200,28 +224,35 @@ static void row_change(int i, int step) {
         open_page(&sScreenPage);
     } else if (i == MAIN_AHEAD) {
         plat_set_render_ahead(plat_render_ahead() == 1 ? 2 : 1);
+    } else if (i == MAIN_GPU_MATHS) {
+        plat_set_gpu_maths_setting((plat_gpu_maths_setting() + step + 4) % 4);
+    } else if (i == MAIN_STEREO_ONCE) {
+        plat_set_stereo_once_setting(!plat_stereo_once_setting());
     } else if (i == MAIN_PROFILER) {
         prof_set_user_enabled(!prof_user_enabled());
     } else if (i == MAIN_UPDATES) {
         sResult = MENU_UPDATES;
+    } else if (i == MAIN_O3DS_RENDER) {
+        settings_set("o3ds_render", ((settings_get("o3ds_render", 0) & 3) + step + 4) % 4);
     } else {
         sResult = MENU_BUGREPORT;
     }
 }
 
 /* The Picture page: the players' settings first, then the performance switches. */
-static const int sPictureRows[6] = { MAIN_AA, MAIN_FPS, MAIN_MIPMAPS, MAIN_COLOUR, MAIN_FB16, MAIN_AHEAD };
+static const int sPictureRows[7] = { MAIN_AA,    MAIN_FPS,       MAIN_MIPMAPS,    MAIN_COLOUR,
+                                     MAIN_AHEAD, MAIN_GPU_MATHS, MAIN_STEREO_ONCE };
 
 static int picture_hidden(int row) {
     return main_hidden(sPictureRows[row]);
 }
 
 static int picture_row(int i) {
-    return sPictureRows[options_visible_row(6, picture_hidden, i)];
+    return sPictureRows[options_visible_row(7, picture_hidden, i)];
 }
 
 static int picture_count(void) {
-    return options_visible_count(6, picture_hidden);
+    return options_visible_count(7, picture_hidden);
 }
 
 static const char *picture_label(int i) {
@@ -243,9 +274,10 @@ static void picture_change(int i, int step) {
 static const MenuPage sPicturePage = { "Picture", picture_count, picture_label, picture_value,
                                        picture_change, picture_hint, NULL };
 
-/* The Tools page (a debug build's only): the profiler, updates and bug reports. */
+/* The Tools page (a debug build's only): the profiler, updates and bug reports, and on an Old 3DS where its renderer
+ * runs. */
 static int tools_count(void) {
-    return 3;
+    return is_old_3ds() ? 4 : 3;
 }
 
 static const char *tools_label(int i) {
@@ -386,7 +418,7 @@ static void test_value(int i, char *out, int size) {
 
 static const char *test_hint(int i) {
     static const char *const sStart[5] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
-                                           "All 10 boss races once, ~30 minutes", "3 heavy tracks x 8 GPU settings, ~50 min",
+                                           "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
                                            NULL };
     static char sSwitchHint[48];
     if (port_autorun_enabled()) {
@@ -424,56 +456,17 @@ static const MenuPage sTestRunPage = {
 };
 
 /*
- * The game's VIDEO OPTIONS (plat/options.h): the main page's anti-aliasing to colour boost rows, then the Screen
- * page's, then Render ahead, less the ones a player's build hides. Every one can change mid-race, as here.
+ * The game's VIDEO OPTIONS and SCREEN OPTIONS (plat/options.h): the Picture and Screen pages' rows, less the ones a
+ * player's build hides, as here. Every one can change mid-race.
  */
-enum { VIDEO_ROWS = MAIN_SCREEN + SCREEN_ROWS + 1 };
-
-/* The main page row a Video Options row (of all of them) stands for, or -1 for a Screen page row. */
-static int video_main_row(int row) {
-    return row < MAIN_SCREEN ? row : row == MAIN_SCREEN + SCREEN_ROWS ? MAIN_AHEAD : -1;
-}
-
-static int video_hidden(int row) {
-    int main = video_main_row(row);
-    return main >= 0 ? main_hidden(main) : screen_hidden(row - MAIN_SCREEN);
-}
-
-static int video_count(void) {
-    return options_visible_count(VIDEO_ROWS, video_hidden);
-}
-
-static const char *video_label(int i) {
-    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
-    return main >= 0 ? row_label(main) : screen_row_label(row - MAIN_SCREEN);
-}
-
-static void video_value(int i, char *out, int size) {
-    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
-    if (main >= 0) {
-        row_value(main, out, size);
-    } else {
-        screen_row_value(row - MAIN_SCREEN, out, size);
-    }
-}
-
-static void video_change(int i, int step) {
-    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
-    if (main >= 0) {
-        row_change(main, step);
-    } else {
-        screen_row_change(row - MAIN_SCREEN, step);
-    }
-}
-
-static const char *video_hint(int i) {
-    int row = options_visible_row(VIDEO_ROWS, video_hidden, i), main = video_main_row(row);
-    return main >= 0 ? row_hint(main) : screen_row_hint(row - MAIN_SCREEN);
-}
-
 void menu_3ds_add_options(void) {
-    static const OptionsSection sVideo = { video_count, video_label, video_value, video_change, video_hint, NULL };
+    static const OptionsSection sVideo = { picture_count,  picture_label, picture_value,
+                                           picture_change, picture_hint,  NULL };
+    static const OptionsSection sScreen = {
+        screen_count, screen_label, screen_value, screen_change, screen_hint, NULL
+    };
     options_add(OPTIONS_VIDEO, &sVideo);
+    options_add(OPTIONS_SCREEN, &sScreen);
 }
 
 void menu_3ds_add_page(const char *title, int (*count)(void), const char *(*label)(int i),

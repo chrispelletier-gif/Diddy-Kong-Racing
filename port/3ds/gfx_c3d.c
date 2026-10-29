@@ -18,12 +18,11 @@
 #include "plat/settings.h"
 #include "shader_shbin.h"
 
-/* The display transfer converts to the screen's format and, with anti-aliasing, averages each 2x2 (or 2x1) block of
- * pixels. It can't widen pixels: an RGB565 target hangs a real 3DS's transfer to an RGB8 screen (emulators do it), so
- * with 16-bit buffers the top screen is RGB565 too (see link_target). */
-#define DISPLAY_TRANSFER_FLAGS(format, scaling)                                                                        \
-    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | GX_TRANSFER_IN_FORMAT(format) |  \
-     GX_TRANSFER_OUT_FORMAT((format) == GX_TRANSFER_FMT_RGB565 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGB8) |     \
+/* The display transfer converts the RGBA8 target to the screen's RGB8 and, with anti-aliasing, averages each 2x2 (or
+ * 2x1) block of pixels. */
+#define DISPLAY_TRANSFER_FLAGS(scaling)                                                                                \
+    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |                                 \
+     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |                    \
      GX_TRANSFER_SCALING(scaling))
 
 #define TOP_WIDTH 400
@@ -45,9 +44,9 @@ _Static_assert(offsetof(C3DContextStart, flags) == 32, "citro3d's context change
 /* Bytes of vertices per frame. Each of the two frame slots has its own buffer (see FrameSlot); races draw at most
  * about 3000 triangles, 9000 vertices, a frame, which is 48K of the largest vertices. */
 #define VBO_BYTES (48 * 1024 * 48)
-/* Bytes of vertex indices per frame (gfxb_draw_indexed): three 16-bit indices a triangle, more for triangles the guard
- * band cuts up. */
-#define IBO_BYTES (64 * 1024)
+/* Bytes of vertex indices per frame (gfxb_draw_indexed, and the meshes' copied by gfxb_draw_meshes): three 16-bit
+ * indices a triangle, more for triangles the guard band cuts up. */
+#define IBO_BYTES (192 * 1024)
 
 /*
  * What the vertex shader receives (roadmap item P5): the position already in the 3DS screen's clip space, the first
@@ -74,14 +73,19 @@ typedef struct C3DVertexOld { // VFMT_OLD
     float tc1[2];
     float color[4];
 } C3DVertexOld;
-enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_COUNT };
-static const int sVfmtStride[VFMT_COUNT] = { sizeof(C3DVertex), sizeof(C3DVertex2), sizeof(C3DVertexOld) };
+/* VFMT_MODEL is the game's own vertices for GPU vertex maths (P30, GfxModelVertex): s16 position and texture
+ * coordinates and byte colours, 16 bytes; the second coordinates come from the fixed attribute. */
+enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_MODEL, VFMT_COUNT };
+static const int sVfmtStride[VFMT_COUNT] = { sizeof(C3DVertex), sizeof(C3DVertex2), sizeof(C3DVertexOld),
+                                             sizeof(GfxModelVertex) };
+_Static_assert(sizeof(GfxModelVertex) == 16, "the model vertex format's attributes must add up to its stride");
 static C3D_AttrInfo sVfmtAttr[VFMT_COUNT];
 static int sVfmtOld;       // DKR_VERTEX_FORMAT=48
 static int sVfmtAttrSet;   // The format of citro3d's attribute setting
 static int sVfmtBound = -1; // The format the vertex buffer setting reads, -1 for none yet this frame
 static int sVfmtBase;      // Where in sVbo (bytes) the vertex buffer setting starts
 static int sVfmtSwitches;   // Format changes in the frame
+static const void *sBufMesh; // The mesh arena when the vertex buffer setting points at it (gfxb_draw_meshes), NULL for the frame's
 
 typedef struct C3DTexture {
     C3D_Tex tex;
@@ -104,13 +108,9 @@ static C3D_RenderTarget *sTargetRight; // The right eye's, while the screen is i
 static int sRenderScale = 1, sScaleX = 1;
 static int sDefaultAa = PLAT_AA_4X;              // The setting (settings.txt, else DKR_AA).
 static volatile int sWantedAa = PLAT_AA_4X;      // plat_set_gpu_config, applied by the renderer between frames.
-/* 16-bit buffers (RGB565 colour, 16-bit depth) halve the memory the GPU reads and writes per pixel; the N64 game drew
- * to a 16-bit framebuffer itself. The setting (settings.txt, else DKR_FB16), the wanted one and the targets' own. */
-static int sDefaultFb16;
-static volatile int sWantedFb16;
-static int sTargetFb16;
-/* A memory fill of the colour buffer takes a pixel in the buffer's format: black either way. */
-#define CLEAR_BLACK (sTargetFb16 ? 0 : 0x000000FF)
+/* A memory fill of the colour buffer takes a pixel in the buffer's format (RGBA8): black. The 16-bit buffers setting
+ * (RGB565 colour, 16-bit depth) was removed on 2026-10-29 because it changed the picture (fog went missing). */
+#define CLEAR_BLACK 0x000000FF
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
 static u8 *sVbo; // The vertex buffer of the frame being built
@@ -162,6 +162,16 @@ static int sWideUnsupported;    // An original 2DS, which can't show 800 pixels
  * w = sEyeConv * sHudW. The player's tuning (roadmap G5a-G5e, "stereo tuning" below) sets all three each frame. */
 static float sEyeSep, sEyeConv = 130.0f, sHudW = 1.0f;
 static int sEyeUniform = -1; // The shader's eye uniform register, if found
+static int sStereoOnce;      // DKR_STEREO_ONCE (P33): stereo frames made once and drawn twice, see stereo_once_lists
+static int sOnceFrame;       // This frame is
+#define EYE_CMD_WORDS 64
+/* citro3d's flags (internal.h C3DiF_*): the target, and the groups of settings a frame made once writes again at its
+ * start: attributes, buffers, effect, viewport, scissor, program, combiner buffer and fog, texture status, fog table,
+ * textures and combiner stages. */
+#define C3D_FLAG_FRAMEBUF (1u << 5)
+#define C3D_ONCE_FLAGS ((1u << 2) | (1u << 3) | (1u << 4) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | \
+                        (1u << 14) | (1u << 17) | (7u << 23) | (0x3Fu << 26))
+void C3Di_DirtyUniforms(GPU_SHADER_TYPE type);
 
 /*
  * The GPU reads vertices and textures from memory, not from the CPU's cache, so whatever the CPU wrote has to be
@@ -437,6 +447,13 @@ static void init_vertex_formats(void) {
     for (i = 0; i < VFMT_COUNT; i++) {
         attr = &sVfmtAttr[i];
         AttrInfo_Init(attr);
+        if (i == VFMT_MODEL) {
+            AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
+            AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);
+            AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4);
+            AttrInfo_AddFixed(attr, 2);
+            continue;
+        }
         AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);
         AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
         if (i == VFMT_OLD) {
@@ -453,9 +470,8 @@ static void init_vertex_formats(void) {
     }
     sVfmtAttrSet = sVfmtOld ? VFMT_OLD : VFMT_SHORT;
     C3D_SetAttrInfo(&sVfmtAttr[sVfmtAttrSet]);
-    if (!sVfmtOld) {
-        C3D_FixedAttribSet(3, 0.0f, 0.0f, 0.0f, 0.0f); // Attribute 3 of the short format: v2
-    }
+    // Attribute 3 of the short and model formats: v2. The old format loads that attribute, so it doesn't mind.
+    C3D_FixedAttribSet(3, 0.0f, 0.0f, 0.0f, 0.0f);
     plat_log("vertex format: %s", sVfmtOld ? "48 bytes (DKR_VERTEX_FORMAT=48)" : "28 bytes, 36 with a second texture");
 }
 
@@ -475,7 +491,9 @@ static int use_vertex_format(int fmt) {
             sVfmtAttrSet = fmt;
         }
         BufInfo_Init(buf);
-        BufInfo_Add(buf, sVbo + sVfmtBase, stride, fmt == VFMT_SHORT ? 3 : 4, fmt == VFMT_SHORT ? 0x210 : 0x3210);
+        BufInfo_Add(buf, sVbo + sVfmtBase, stride, fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 3 : 4,
+                    fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 0x210 : 0x3210);
+        sBufMesh = NULL;
         if (sVfmtBound >= 0) {
             sVfmtSwitches++;
         }
@@ -498,6 +516,8 @@ static void apply_combiner(const GfxDrawState *state);
 static void apply_fog(const GfxDrawState *state);
 static void write_eye(float mul, float add);
 static void hand_over_draw_parts(void);
+static void init_transform(void);
+static void transform_frame_drawn(int frame);
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
 void C3Di_UpdateContext(void);
 
@@ -744,7 +764,7 @@ static const char *aa_name(int aa) {
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
 }
 
-/* A render target in the current buffer formats (sTargetFb16). */
+/* A render target: RGBA8 colour, 24-bit depth and stencil. */
 static C3D_RenderTarget *new_target(int width, int height) {
     C3D_RenderTarget *target = NULL;
     int tries;
@@ -753,19 +773,16 @@ static C3D_RenderTarget *new_target(int width, int height) {
         if (tries == 1 && evict_vram_textures() == 0) {
             break;
         }
-        target = C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
-                                        sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+        target = C3D_RenderTargetCreate(width, height, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     }
     return target;
 }
 
 /*
  * The render target for the top screen: twice the screen's resolution down for anti-aliasing (scale), and across for
- * 4x anti-aliasing or the 800 pixel mode (across), with 16-bit buffers or not. The doubled one needs 3MB of VRAM
- * (half that with 16-bit buffers), so fall back if it does not fit.
+ * 4x anti-aliasing or the 800 pixel mode (across). The doubled one needs 3MB of VRAM, so fall back if it does not fit.
  */
-static void create_target(int scale, int across, int fb16) {
-    sTargetFb16 = fb16;
+static void create_target(int scale, int across) {
     sTarget = NULL;
     if (scale == 2 || across == 2) {
         sTarget = new_target(TOP_HEIGHT * scale, TOP_WIDTH * across);
@@ -784,18 +801,16 @@ static void create_target(int scale, int across, int fb16) {
  * unless the screen shows 800 pixels. In 3D, sTarget is the left eye's and sTargetRight the right eye's.
  */
 static u32 sTransferFlags;
+static C3D_RenderTarget *sLinked; // The target the top screen shows (link_target)
 
 static void link_target(void) {
     u32 scaling = GX_TRANSFER_SCALE_NO;
     if (sRenderScale == 2) {
         scaling = sScaleX == 2 && !s800 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_X;
     }
-    sTransferFlags = DISPLAY_TRANSFER_FLAGS(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8, scaling);
-    // Called with the GPU idle, so no transfer is still writing the old framebuffers (which this may reallocate).
-    if (gfxGetScreenFormat(GFX_TOP) != (sTargetFb16 ? GSP_RGB565_OES : GSP_BGR8_OES)) {
-        gfxSetScreenFormat(GFX_TOP, sTargetFb16 ? GSP_RGB565_OES : GSP_BGR8_OES);
-    }
+    sTransferFlags = DISPLAY_TRANSFER_FLAGS(scaling);
     C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sTransferFlags);
+    sLinked = sTarget;
     if (sStereo && sTargetRight != NULL) {
         C3D_RenderTargetSetOutput(sTargetRight, GFX_TOP, GFX_RIGHT, sTransferFlags);
     } else {
@@ -803,11 +818,49 @@ static void link_target(void) {
     }
 }
 
-/* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) and 16-bit buffers for the frames from the next
- * one; -1 for either is the player's setting. */
-void plat_set_gpu_config(int aa, int fb16) {
+/*
+ * Adaptive anti-aliasing (DKR_ADAPTIVE_AA, default off; shelved after switch bench #246, where it never switched): with anti-aliasing on, a frame the GPU took nearly a whole
+ * frame's time to draw (over 92% of it, see adaptive_observe) sends the next ones to a target at the screen's own
+ * resolution (sLowTarget, made when first needed) for sAdaptHoldLen frames; the first anti-aliased frame after that
+ * is a probe, and if it is slow again the hold doubles (up to ADAPT_HOLD_MAX), so a heavy stretch of track stays at
+ * the low resolution instead of flickering between the two. Never in 3D (which has no anti-aliasing) or while a
+ * snapshot is taken. The main target keeps its sizes in sMainScale and sMainScaleX while the low one is in use.
+ * Switching targets needs no wait for the GPU: the screen is linked to the frame's target just before it is handed
+ * over (adaptive_link, inside citro3d's frame). DKR_ADAPTIVE_AA=2 counts every anti-aliased frame as slow, to see the
+ * switching itself (each hold, then one probe frame).
+ */
+#define ADAPT_HOLD 60
+#define ADAPT_HOLD_MAX 960
+#define ADAPT_PROBE 30
+static int sAdaptive;
+static C3D_RenderTarget *sLowTarget, *sMainTarget;
+static int sMainScale, sMainScaleX, sLowActive, sLowFresh, sLowFailed;
+static int sAdaptHold, sAdaptHoldLen = ADAPT_HOLD, sAdaptProbe, sAdaptLastFrame = -1;
+static int sAdaptSeen, sAdaptLow, sAdaptSlow;
+
+/* Back to the main target (the frame's choice is made again in adaptive_pick). */
+static void adaptive_restore_main(void) {
+    if (sLowActive) {
+        sTarget = sMainTarget;
+        sRenderScale = sMainScale;
+        sScaleX = sMainScaleX;
+        sLowActive = 0;
+    }
+}
+
+/* With the GPU idle and not in a citro3d frame (apply_screen_mode): the low target is made again for the new mode. */
+static void adaptive_delete_low(void) {
+    if (sLowTarget != NULL) {
+        C3D_RenderTargetDelete(sLowTarget);
+        sLowTarget = NULL;
+    }
+    sLowFailed = 0;
+}
+
+/* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) for the frames from the next one; -1 is the player's
+ * setting. */
+void plat_set_gpu_config(int aa) {
     sWantedAa = aa < 0 ? sDefaultAa : aa;
-    sWantedFb16 = fb16 < 0 ? sDefaultFb16 : fb16 != 0;
 }
 
 /* The Settings menu: the player's anti-aliasing choice (PLAT_AA_*), saved, and used from the next frame. */
@@ -819,17 +872,6 @@ void plat_3ds_set_antialias_setting(int aa) {
 
 int plat_3ds_antialias_setting(void) {
     return sDefaultAa;
-}
-
-/* The Settings menu: 16-bit colour and depth buffers on or off, saved, and used from the next frame. */
-void plat_3ds_set_fb16_setting(int on) {
-    sDefaultFb16 = on != 0;
-    sWantedFb16 = sDefaultFb16;
-    settings_set("fb16", sDefaultFb16);
-}
-
-int plat_3ds_fb16_setting(void) {
-    return sDefaultFb16;
 }
 
 /* The Settings menu: the colour boost level (0 off, 1 to 3 stronger; see add_colour_boost), from the next frame. */
@@ -845,10 +887,6 @@ int plat_3ds_colour_setting(void) {
 /* The anti-aliasing (PLAT_AA_*) of the frames being drawn now. With 800 pixels across, either is 2x. */
 int plat_antialias(void) {
     return sRenderScale != 2 ? PLAT_AA_OFF : sScaleX == 2 && !s800 ? PLAT_AA_4X : PLAT_AA_2X;
-}
-
-int plat_fb16(void) {
-    return sTargetFb16;
 }
 
 /* The Settings menu's screen page (phase 6, see sWideSetting): each is saved and used from the next frame. */
@@ -872,14 +910,19 @@ int plat_3ds_wide800_supported(void) {
     return !sWideUnsupported;
 }
 
+/* The widescreen setting, unless the switch bench sets its own (BENCH_WIDESCREEN). */
+static int wide_setting(void) {
+    return plat_switch("BENCH_WIDESCREEN", sWideSetting);
+}
+
 float plat_aspect_scale(void) {
-    return sWideSetting ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
+    return wide_setting() ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
 }
 
 float plat_fov_tan_scale(void) {
     // Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
     static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
-    int style = sWideSetting;
+    int style = wide_setting();
     return style >= 0 && style <= 3 ? sTanScale[style] : 1.0f;
 }
 
@@ -1110,23 +1153,27 @@ static void apply_stereo_tuning(int stereo, float slider) {
  * first; a new target is cleared like the very first one.
  */
 static void apply_screen_mode(void) {
-    float slider = osGet3DSliderState();
-    int stereo = sStereoSetting && slider > 0.0f && __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
-    int wide800 = s800Setting && !stereo && !sWideUnsupported;
-    int aa = stereo ? PLAT_AA_OFF : sWantedAa, fb16 = sWantedFb16;
+    float slider;
+    adaptive_restore_main();
+    slider = osGet3DSliderState();
+    // The switch bench sets DKR_STEREO3D for each race, so the player's 3D setting doesn't change what it measures.
+    int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
+                 __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
+    int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
+    int aa = stereo ? PLAT_AA_OFF : sWantedAa;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;
 
-    if ((sWideSetting != 0) != sWide && sTarget != NULL) {
+    if ((wide_setting() != 0) != sWide && sTarget != NULL) {
         // The game only clears its 4:3 part of the screen: clear the sides of the last wide picture.
         sFrameStarted = 0;
     }
-    sWide = sWideSetting != 0;
+    sWide = wide_setting() != 0;
     sScale3D = sWide ? 1.0f : NARROW;
     apply_stereo_tuning(stereo, slider);
     if (sTarget == NULL ||
-        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX && fb16 == sTargetFb16)) {
+        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX)) {
         return;
     }
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
@@ -1134,14 +1181,15 @@ static void apply_screen_mode(void) {
         plat_sleep_ns(250000);
     }
     C3D_FrameEnd(0);
-    newTarget = scale != sRenderScale || across != sScaleX || fb16 != sTargetFb16;
+    adaptive_delete_low();
+    newTarget = scale != sRenderScale || across != sScaleX;
     if (newTarget) {
         C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
         if (sTargetRight != NULL) {
             C3D_RenderTargetDelete(sTargetRight); // Made again below, in the new formats.
             sTargetRight = NULL;
         }
-        create_target(scale, across, fb16);
+        create_target(scale, across);
         sFrameStarted = 0;
         if (wide800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target: don't try again every frame.
@@ -1173,9 +1221,8 @@ static void apply_screen_mode(void) {
     sStereo = stereo;
     s800 = wide800;
     link_target();
-    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s, %s buffers)",
-             sStereo ? "3D" : s800 ? "800 pixels" : "400 pixels", sScaleX, sRenderScale,
-             aa_name(plat_antialias()), sTargetFb16 ? "16-bit" : "32-bit");
+    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s)", sStereo ? "3D" : s800 ? "800 pixels" : "400 pixels",
+             sScaleX, sRenderScale, aa_name(plat_antialias()));
     if (newTarget && scale == 2 && sRenderScale != 2) {
         sWantedAa = PLAT_AA_OFF; // Didn't fit: don't try again every frame.
     }
@@ -1183,13 +1230,23 @@ static void apply_screen_mode(void) {
 
 static void alloc_frame_slots(void);
 
+/* An Old 3DS (roadmap O8): its one core already runs the renderer at under 20 fps, so the defaults it starts with
+ * (until the player picks in Settings) leave out what costs CPU or GPU time: anti-aliasing, 800 pixels and stereo 3D
+ * (which draws everything twice). The player's choice always wins. */
+static int is_old_3ds(void) {
+    bool isNew3DS = false;
+    APT_CheckNew3DS(&isNew3DS);
+    return !isNew3DS;
+}
+
 /* The screen settings (see sWideSetting), and whether the console can show 800 pixels across. */
 static void read_screen_settings(void) {
     u8 model = 0;
+    int old3ds = is_old_3ds();
     sWideSetting = settings_get("widescreen", 2);
     sWideSetting = sWideSetting < 0 || sWideSetting > 3 ? 2 : sWideSetting;
-    s800Setting = settings_get("wide800", 1) != 0;
-    sStereoSetting = settings_get("stereo3d", 1) != 0;
+    s800Setting = settings_get("wide800", !old3ds) != 0;
+    sStereoSetting = settings_get("stereo3d", !old3ds) != 0;
     read_stereo_tuning();
     if (R_SUCCEEDED(cfguInit())) {
         if (R_SUCCEEDED(CFGU_GetSystemModel(&model))) {
@@ -1216,19 +1273,16 @@ void gfxb_init(void) {
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
     {
         // Anti-aliasing is the Settings menu's choice; until one is made, 4x unless DKR_AA says otherwise (0 off, 1 4x,
-        // 2 2x, as settings.txt has it). The same for 16-bit buffers: off unless DKR_FB16=1.
+        // 2 2x, as settings.txt has it). An fb16 line left in settings.txt by an older build is ignored.
         const char *aa = plat_getenv("DKR_AA");
-        const char *fb16 = plat_getenv("DKR_FB16");
-        sDefaultAa = settings_get("aa", aa == NULL ? PLAT_AA_4X : atoi(aa));
+        sDefaultAa = settings_get("aa", aa != NULL ? atoi(aa) : is_old_3ds() ? PLAT_AA_OFF : PLAT_AA_4X);
         if (sDefaultAa < PLAT_AA_OFF || sDefaultAa > PLAT_AA_2X) {
             sDefaultAa = PLAT_AA_4X;
         }
-        sDefaultFb16 = settings_get("fb16", fb16 != NULL && atoi(fb16) != 0) != 0;
         sWantedAa = sDefaultAa;
-        sWantedFb16 = sDefaultFb16;
         read_screen_settings();
         s800 = s800Setting && !sWideUnsupported;
-        create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1, sDefaultFb16);
+        create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1);
         if (s800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target.
             s800 = 0;
@@ -1237,8 +1291,7 @@ void gfxb_init(void) {
             gfxSetWide(true);
         }
         link_target();
-        plat_status("Graphics started (anti-aliasing %s, %s buffers%s)", aa_name(plat_antialias()),
-                    sTargetFb16 ? "16-bit" : "32-bit", s800 ? ", 800 pixels" : "");
+        plat_status("Graphics started (anti-aliasing %s%s)", aa_name(plat_antialias()), s800 ? ", 800 pixels" : "");
     }
     sMipmapSetting = settings_get("mipmaps", 1);
     // 2, "Show" (each level tinted), is a debug build's view.
@@ -1258,6 +1311,7 @@ void gfxb_init(void) {
     shaderProgramSetVsh(&sProgram, &sShaderDvlb->DVLE[0]);
     C3D_BindProgram(&sProgram);
     sEyeUniform = shaderInstanceGetUniformLocation(sProgram.vertexShader, "eye");
+    init_transform();
 
     init_vertex_formats();
     alloc_frame_slots();
@@ -1326,6 +1380,61 @@ static u64 sLastEndTick;
  * thread), so the swap is wrapped (-Wl,--wrap=gfxScreenSwapBuffers) to see when, not when the CPU ended the frame. */
 static volatile unsigned int sSwapCount, sSwapReplaced, sSwapGapUs;
 static u64 sLastSwapTick;
+
+/*
+ * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, on by default since switch bench #246: Crescent Island
+ * and Haunted Woods went from 48 to 60 fps with the same GPU time; DKR_TRIPLE_BUFFER=0 = two). libctru has two, so a frame finished
+ * before the last one reached the screen waits for it (wait_for_present). With three, of our own in linear memory,
+ * it is copied into one that is neither on screen nor waiting to be, and carries on. citro3d copies a frame into what
+ * gfxGetFramebuffer returns and shows it with gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours: the
+ * first while sTripleGet is set (only around the frame's C3D_FrameEnd, so the error console still gets libctru's), the
+ * second for a frame handed over with sTripleFrame set (triple_choose). The swap runs on the GSP thread after the GPU
+ * finishes, which libctru may report before it has run, so triple_choose first waits for the last one (sTripleSwaps
+ * catching up with sTripleQueued) before it changes anything the swap reads.
+ * sTripleShown is the buffer on screen, sTripleMaybe one that may have reached it (presented while another was still
+ * waiting, just as the screen took that), sTriplePresented the last presented: none of them is written next. They are
+ * kept while frames go to libctru's buffers, as one of ours may still be on screen then.
+ */
+#define TRIPLE_BYTES (GSP_SCREEN_WIDTH * GSP_SCREEN_HEIGHT_TOP_2X * 3) // 800 pixels across or two eyes, 24-bit
+static int sTripleWanted;
+static volatile int sTripleFrame, sTripleGet;
+static volatile unsigned int sTripleQueued, sTripleSwaps;
+static u8 *sTriple[3];
+static int sTripleNext, sTripleShown = -1, sTripleMaybe = -1, sTriplePresented = -1, sTripleFail;
+static unsigned int sTripleId;
+
+u8 *__real_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height);
+__attribute__((used)) u8 *__wrap_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height) {
+    u8 *fb = __real_gfxGetFramebuffer(screen, side, width, height); // libctru's sizes for the mode
+    if (screen == GFX_TOP && sTripleGet) {
+        fb = sTriple[sTripleNext] + (gfxIs3D() && side != GFX_LEFT ? TRIPLE_BYTES / 2 : 0);
+    }
+    return fb;
+}
+
+/* What libctru's gfxPresentFramebuffer does for the top screen, with our buffer (in linear memory). */
+static void triple_present(bool hasStereo) {
+    GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
+    u32 mode = format | (1 << 8);
+    const u8 *fbA = sTriple[sTripleNext], *fbB = fbA;
+    if (gfxIs3D()) {
+        mode |= BIT(5);
+        fbB = hasStereo ? fbA + TRIPLE_BYTES / 2 : fbA;
+    } else if (!gfxIsWide()) {
+        mode |= BIT(6);
+    }
+    if (gspIsPresentPending(GSP_SCREEN_TOP)) {
+        sTripleMaybe = sTriplePresented; // Replaced, unless the screen took it just now.
+    } else {
+        sTripleShown = sTriplePresented;
+        sTripleMaybe = -1;
+    }
+    sTriplePresented = sTripleNext;
+    sTripleId ^= 1;
+    gspPresentBuffer(GSP_SCREEN_TOP, sTripleId, fbA, fbB, GSP_SCREEN_WIDTH * gspGetBytesPerPixel(format), mode);
+    sTripleSwaps++;
+}
+
 void __real_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
 __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo) {
     if (scr == GFX_TOP) {
@@ -1337,8 +1446,86 @@ __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool has
         sSwapGapUs = sLastSwapTick != 0 ? (unsigned int) ((now - sLastSwapTick) / (SYSCLOCK_ARM11 / 1000000)) : 0;
         sLastSwapTick = now;
         sSwapCount++;
+        if (sTripleFrame) {
+            triple_present(hasStereo);
+            return;
+        }
     }
     __real_gfxScreenSwapBuffers(scr, hasStereo);
+}
+
+/*
+ * Renderer thread, with the GPU done with the last frame and before C3D_FrameEnd: whether this frame goes to our three
+ * buffers, and which. Returns 0 when it must wait for the screen as with two (wait_for_present): the setting is off,
+ * or the three buffers are all in use (two frames presented within one refresh).
+ */
+/* Polls (at most ~35 ms) until done() says so; returns whether it did. */
+static int triple_poll(int (*done)(void)) {
+    int i;
+    for (i = 0; i < 70 && !done(); i++) {
+        svcSleepThread(500 * 1000);
+    }
+    return done();
+}
+
+static int triple_swapped(void) {
+    return sTripleSwaps == sTripleQueued;
+}
+
+static int triple_shown(void) {
+    return !gspIsPresentPending(GSP_SCREEN_TOP);
+}
+
+/* Picks a buffer that is neither on screen, nor may be, nor waiting to be; -1 if there is none. */
+static int triple_free(void) {
+    int i;
+    if (sTriplePresented >= 0 && !gspIsPresentPending(GSP_SCREEN_TOP)) {
+        sTripleShown = sTriplePresented;
+        sTripleMaybe = -1;
+    }
+    for (i = 0; i < 3; i++) {
+        if (i != sTripleShown && i != sTripleMaybe && i != sTriplePresented) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int triple_choose(void) {
+    int i;
+    if (sTripleFrame && !triple_poll(triple_swapped)) {
+        plat_log("top screen: the last frame's swap never came, two buffers from now");
+        sTripleFail = 1;
+    }
+    sTripleFrame = 0;
+    if (!sTripleWanted || sStereo || sTripleFail) {
+        return 0;
+    }
+    if (sTriple[0] == NULL) {
+        for (i = 0; i < 3; i++) {
+            sTriple[i] = linearAlloc(TRIPLE_BYTES);
+            if (sTriple[i] == NULL) {
+                plat_log("top screen: no memory for a third buffer, two kept");
+                sTripleFail = 1;
+                for (i = 0; i < 3; i++) {
+                    linearFree(sTriple[i]);
+                    sTriple[i] = NULL;
+                }
+                return 0;
+            }
+        }
+    }
+    i = triple_free();
+    if (i < 0 && triple_poll(triple_shown)) {
+        i = triple_free(); // All three were in use (two frames presented within one refresh): one is free now.
+    }
+    if (i < 0) {
+        return 0; // Still none: wait like two (libctru's back buffer isn't on screen).
+    }
+    sTripleNext = i;
+    sTripleQueued++;
+    sTripleFrame = 1;
+    return 1;
 }
 
 /*
@@ -1671,19 +1858,10 @@ static void capture_pending_frame(void) {
                                 GX_BUFFER_DIM(TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX), pixels,
                                 GX_BUFFER_DIM(w, h),
                                 GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                                    GX_TRANSFER_IN_FORMAT(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8) |
-                                    GX_TRANSFER_OUT_FORMAT(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                     GX_TRANSFER_SCALING(halve ? GX_TRANSFER_SCALE_X : GX_TRANSFER_SCALE_NO));
         GSPGPU_InvalidateDataCache(pixels, w * h * 4);
-        if (sTargetFb16) {
-            // The transfer can't widen pixels (see DISPLAY_TRANSFER_FLAGS): RGB565 to RGBA8 here, from the end back.
-            const u16 *in = (const u16 *) pixels;
-            u32 i;
-            for (i = w * h; i-- > 0;) {
-                u32 p = in[i], r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
-                pixels[i] = ((r << 3 | r >> 2) << 24) | ((g << 2 | g >> 4) << 16) | ((b << 3 | b >> 2) << 8) | 0xFF;
-            }
-        }
         file = fopen(sCapturePath, "wb");
         if (file != NULL) {
             fwrite(&w, 4, 1, file);
@@ -1869,6 +2047,10 @@ typedef struct FrameSlot {
     int numDraws;        // Draws in the frame, which can be more than HANG_DRAWS
     int frame;           // sFrameCount when it was built
     u32 words;           // Command list words used
+    u32 *eyeCmd;         // EYE_CMD_WORDS: the two eyes' short command lists of a stereo frame made once
+    void **meshFrees;    // Meshes freed while the frame was built (gfxb_mesh_free)
+    int numMeshFrees, meshFreesCapacity;
+    int adaptAa;         // Adaptive anti-aliasing: 0 not in use, 1 drawn anti-aliased, 2 at the low resolution
 } FrameSlot;
 static FrameSlot sSlots[2];
 static int sNumSlots = 1; // 2 unless the second slot didn't fit
@@ -1893,6 +2075,7 @@ static void alloc_frame_slots(void) {
         sSlots[i].vbo = linearAlloc(VBO_BYTES);
         sSlots[i].ibo = linearAlloc(IBO_BYTES);
         sSlots[i].cmd = linearAlloc(sCmdWords * 4);
+        sSlots[i].eyeCmd = linearAlloc(EYE_CMD_WORDS * 4);
         if (sSlots[i].vbo == NULL || sSlots[i].ibo == NULL || sSlots[i].cmd == NULL) {
             if (sSlots[i].vbo != NULL) {
                 linearFree(sSlots[i].vbo);
@@ -1983,7 +2166,7 @@ static void bind_target(C3D_RenderTarget *target) {
 
 /* Draws count vertices from vertex on, or the count vertices the indices name; once, or in 3D once for each eye. */
 static void draw_prims(int vertex, int count, const u16 *indices) {
-    if (!sStereo) {
+    if (!sStereo || sOnceFrame) {
         if (indices != NULL) {
             C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
         } else {
@@ -2005,6 +2188,37 @@ static void draw_prims(int vertex, int count, const u16 *indices) {
         C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
     } else {
         C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    }
+}
+
+/*
+ * Stereo frames made once (roadmap item P33, DKR_STEREO_ONCE=1): instead of every draw being sent twice, the frame's
+ * commands are made once and the GPU runs them twice, the way the F-Zero X 3DS port does it. Each eye gets a short
+ * command list of its own that sets its target and eye offset, and the GPU queue gets the left eye's, the frame's,
+ * the right eye's and the frame's again. That saves the CPU writing every draw a second time, and the GPU a
+ * framebuffer flush and a change of target between every two draws. The frame's commands make no assumption about
+ * the settings they start with (see gfxb_start_frame), and command list splits (DKR_GPU_SPLIT) leave it off.
+ */
+static void stereo_once_lists(FrameSlot *slot) {
+    u32 *body, bodyWords, *eye[2], eyeWords[2], *saved = gpuCmdBuf, savedSize = gpuCmdBufSize;
+    int i;
+    if (slot->eyeCmd == NULL || slot->numParts + 4 > MAX_LIST_PARTS || !C3Di_SplitFrame(&body, &bodyWords)) {
+        return;
+    }
+    saved = gpuCmdBuf; // After the frame's commands: the frame's end goes on from there.
+    savedSize = gpuCmdBufSize;
+    GPUCMD_SetBuffer(slot->eyeCmd, EYE_CMD_WORDS, 0);
+    for (i = 0; i < 2; i++) {
+        bind_target(i == 0 ? sTarget : sTargetRight);
+        write_eye(i == 0 ? sEyeSep : -sEyeSep, i == 0 ? -sEyeSep * sEyeConv : sEyeSep * sEyeConv);
+        GPUCMD_Split(&eye[i], &eyeWords[i]);
+    }
+    GPUCMD_SetBuffer(saved, savedSize, 0);
+    for (i = 0; i < 2; i++) {
+        slot->partAddr[slot->numParts] = eye[i];
+        slot->partWords[slot->numParts++] = eyeWords[i];
+        slot->partAddr[slot->numParts] = body;
+        slot->partWords[slot->numParts++] = bodyWords;
     }
 }
 
@@ -2157,7 +2371,9 @@ void gfxb_3ds_shutdown(void) {
     C3D_Fini();
 }
 
-/* Deletes the textures freed while the slot's frame was built, once the GPU has drawn it. */
+static void delete_mesh(void *mesh);
+
+/* Deletes the textures (and meshes) freed while the slot's frame was built, once the GPU has drawn it. */
 static void process_pending_frees(FrameSlot *slot) {
     int i;
     for (i = 0; i < slot->numFrees; i++) {
@@ -2168,6 +2384,10 @@ static void process_pending_frees(FrameSlot *slot) {
         free(slot->frees[i]);
     }
     slot->numFrees = 0;
+    for (i = 0; i < slot->numMeshFrees; i++) {
+        delete_mesh(slot->meshFrees[i]);
+    }
+    slot->numMeshFrees = 0;
 }
 
 static int overlap_setting(void) {
@@ -2179,6 +2399,85 @@ static int overlap_setting(void) {
                  !sSetting ? "no (DKR_OVERLAP=0)" : sNumSlots < 2 ? "no (one slot)" : "yes");
     }
     return sSetting && sNumSlots == 2;
+}
+
+/* Renderer thread, after apply_screen_mode: the target for the frame about to be built (see sAdaptive). */
+static void adaptive_pick(void) {
+    if (!sAdaptive || sAdaptHold <= 0 || sRenderScale != 2 || sStereo || sSnapshotPending || sTarget == NULL) {
+        return;
+    }
+    if (sLowTarget == NULL) {
+        if (sLowFailed) {
+            return;
+        }
+        sLowTarget = new_target(TOP_HEIGHT, TOP_WIDTH * (s800 ? 2 : 1));
+        if (sLowTarget == NULL) {
+            sLowFailed = 1; // Until the screen mode changes.
+            plat_log("adaptive anti-aliasing: no VRAM for the low resolution target");
+            return;
+        }
+        sLowFresh = 1;
+    }
+    sMainTarget = sTarget;
+    sMainScale = sRenderScale;
+    sMainScaleX = sScaleX;
+    sTarget = sLowTarget;
+    sRenderScale = 1;
+    sScaleX = s800 ? 2 : 1;
+    sLowActive = 1;
+    if (sLowFresh) {
+        sLowFresh = 0;
+        sFrameStarted = 0; // Cleared like a new target.
+    }
+}
+
+/* Just before a frame is handed over, inside citro3d's frame: the screen shows the frame's target. */
+static void adaptive_link(FrameSlot *slot) {
+    slot->adaptAa = !sAdaptive ? 0 : sLowActive ? 2 : (sRenderScale == 2 && !sStereo) ? 1 : 0;
+    if (sLinked != sTarget) {
+        link_target();
+    }
+}
+
+/* Once the GPU has drawn a frame: how long it took (ms) decides the next frames' resolution (see sAdaptive). */
+static void adaptive_observe(const FrameSlot *slot, float gpuMs) {
+    float budget;
+    if (slot->frame == sAdaptLastFrame) {
+        return; // Already seen (wait_for_gpu again with nothing new handed over).
+    }
+    sAdaptLastFrame = slot->frame;
+    if (!sAdaptive) {
+        sAdaptHold = 0;
+        sAdaptHoldLen = ADAPT_HOLD;
+        sAdaptProbe = 0;
+        return;
+    }
+    if (slot->adaptAa == 0) {
+        return;
+    }
+    budget = 1000.0f / 60.0f * (float) plat_frame_retraces();
+    sAdaptSeen++;
+    if (slot->adaptAa == 2) {
+        sAdaptLow++;
+        if (sAdaptHold > 0 && --sAdaptHold == 0) {
+            sAdaptProbe = ADAPT_PROBE;
+        }
+    } else if (gpuMs > budget * 0.92f || sAdaptive == 2) {
+        sAdaptSlow++;
+        if (sAdaptProbe > 0 && sAdaptHoldLen < ADAPT_HOLD_MAX) {
+            sAdaptHoldLen *= 2; // Slow again straight after a hold: hold longer.
+        }
+        sAdaptProbe = 0;
+        sAdaptHold = sAdaptHoldLen;
+    } else if (sAdaptProbe > 0 && --sAdaptProbe == 0) {
+        sAdaptHoldLen = ADAPT_HOLD; // Anti-aliased frames are fast enough again.
+    }
+    if (sAdaptSeen >= 600) {
+        plat_log("adaptive anti-aliasing: %d of the last %d frames at the low resolution, %d slow anti-aliased "
+                 "frames, hold %d frames",
+                 sAdaptLow, sAdaptSeen, sAdaptSlow, sAdaptHoldLen);
+        sAdaptSeen = sAdaptLow = sAdaptSlow = 0;
+    }
 }
 
 /*
@@ -2208,6 +2507,10 @@ static void wait_for_gpu(int measure) {
             plat_sleep_ns(250000);
         }
     }
+    if (sOnGpu >= 0) {
+        transform_frame_drawn(sSlots[sOnGpu].frame);
+        adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
+    }
     if (measure && prof_enabled()) {
         prof_add(PROF_GPU_WAIT, plat_time_ns() - waitStart);
         if (sOnGpu >= 0) {
@@ -2234,6 +2537,234 @@ static void wait_for_gpu(int measure) {
     if (sOnGpu >= 0) {
         process_pending_frees(&sSlots[sOnGpu]);
     }
+}
+
+/******************************** GPU vertex maths ********************************/
+
+/*
+ * GPU vertex maths (roadmap item P30, DKR_GPU_TRANSFORM=1): every draw goes through transform.v.pica instead of the
+ * pass-through shader. The frontend hands most 3D triangles over as the game's own vertices with their matrix
+ * (gfxb_draw_model, gfxb_draw_meshes), and the GPU transforms them; the rest still arrive transformed by the CPU
+ * (gfxb_draw_indexed), drawn by the same shader with an identity matrix (set_cpu_uniforms).
+ *
+ * The first shader that transformed on the GPU hung a real New 3DS on its first triangle (2026-10-16), while
+ * emulators ran it. So the first frames drawn with it are watched: gpu_transform.txt says "testing" until 30 frames
+ * have been drawn, then "passed". If the console hangs meanwhile, the next start finds "testing", writes "hung" and
+ * leaves GPU vertex maths off (DKR_GPU_TRANSFORM is ignored) until TRANSFORM_TEST_VERSION changes with a new shader.
+ */
+#define TRANSFORM_TEST_VERSION 1
+#define TRANSFORM_TEST_FRAMES 30
+
+static shaderProgram_s sProgramT;
+static int sProgramTUsable;  // transform.v.pica's uniforms were all found
+static int sTransformHung;   // It hung the GPU in an earlier run (gpu_transform.txt)
+static int sTransformWanted; // DKR_GPU_TRANSFORM
+static int sTransformOn;     // This frame is drawn with transform.v.pica
+static int sTransformTestFrame = -1; // The first frame drawn with it this run, until it is known to work
+static int sEyeUniformP, sEyeUniformT; // The eye uniform of each program
+
+enum { UNIF_MTX, UNIF_CAMOFF = 4, UNIF_TEXA, UNIF_TEXC, UNIF_TEXB, UNIF_FOGP, UNIF_COUNT };
+static int sUnifLoc[UNIF_COUNT];
+static float sUnifVal[UNIF_COUNT][4];
+static int sUnifKnown; // sUnifVal holds what citro3d has
+static int sUnifModel; // The uniforms are a model draw's (else the CPU draws' identity)
+static unsigned sUnifChanged; // Uniforms set since they were last written (bit per UNIF_*)
+static int sUnifTwice;        // DKR_UNIF_TWICE: changed uniforms written twice (unif_write_twice)
+
+static void transform_marker_path(char *out, size_t size) {
+    snprintf(out, size, "%s/gpu_transform.txt", plat_data_dir());
+}
+
+static void transform_marker_write(const char *what) {
+    char path[256], text[32];
+    transform_marker_path(path, sizeof(path));
+    snprintf(text, sizeof(text), "%s %d\n", what, TRANSFORM_TEST_VERSION);
+    plat_save_file(path, text, strlen(text));
+}
+
+/* At start-up: finds the transform program's uniforms and reads what happened in earlier runs. */
+static void init_transform(void) {
+    static const char *const sNames[] = { "mtx", "camoff", "texa", "texc", "texb", "fogp" };
+    char path[256], text[32];
+    int i, got;
+
+    shaderProgramInit(&sProgramT);
+    sProgramTUsable = sShaderDvlb->numDVLE >= 2 && shaderProgramSetVsh(&sProgramT, &sShaderDvlb->DVLE[1]) == 0;
+    sEyeUniformP = sEyeUniform;
+    sEyeUniformT = sProgramTUsable ? shaderInstanceGetUniformLocation(sProgramT.vertexShader, "eye") : -1;
+    for (i = 0; i < UNIF_COUNT; i++) {
+        int name = i < UNIF_CAMOFF ? 0 : i - UNIF_CAMOFF + 1;
+        int loc = sProgramTUsable ? shaderInstanceGetUniformLocation(sProgramT.vertexShader, sNames[name]) : -1;
+        sUnifLoc[i] = loc >= 0 && i < UNIF_CAMOFF ? loc + i : loc;
+        if (sUnifLoc[i] < 0) {
+            sProgramTUsable = 0;
+        }
+    }
+    if (sEyeUniformT < 0) {
+        sProgramTUsable = 0;
+    }
+    plat_log("GPU vertex maths: shader %s, uniforms eye %d mtx %d camoff %d texa %d texc %d texb %d fogp %d",
+             sProgramTUsable ? "found" : "NOT usable", sEyeUniformT, sUnifLoc[UNIF_MTX], sUnifLoc[UNIF_CAMOFF],
+             sUnifLoc[UNIF_TEXA], sUnifLoc[UNIF_TEXC], sUnifLoc[UNIF_TEXB], sUnifLoc[UNIF_FOGP]);
+
+    transform_marker_path(path, sizeof(path));
+    got = plat_load_file_start(path, text, sizeof(text) - 1);
+    if (got > 0) {
+        text[got] = '\0';
+        if ((strncmp(text, "testing ", 8) == 0 && atoi(text + 8) == TRANSFORM_TEST_VERSION) ||
+            (strncmp(text, "hung ", 5) == 0 && atoi(text + 5) == TRANSFORM_TEST_VERSION)) {
+            sTransformHung = 1;
+            transform_marker_write("hung");
+            plat_log("GPU vertex maths: left off, the GPU hung with it in an earlier run (gpu_transform.txt)");
+        }
+    }
+}
+
+/* Writes the uniform if it changed (through citro3d, which writes it again after the HOME menu). */
+static void set_unif(int u, float x, float y, float z, float w) {
+    float *c = sUnifVal[u];
+    if (sUnifKnown && c[0] == x && c[1] == y && c[2] == z && c[3] == w) {
+        return;
+    }
+    c[0] = x;
+    c[1] = y;
+    c[2] = z;
+    c[3] = w;
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUnifLoc[u], x, y, z, w);
+    sUnifChanged |= 1u << u;
+}
+
+/*
+ * The GPU misses some settings written right after a draw (see drain_before_draw), and a model draw changes the
+ * matrix uniforms right after the CPU draw before it. Missed, the draw lands with the identity matrix, nowhere on the
+ * screen: a tunnel's walls and ceiling vanished at one spot of a track with GPU vertex maths on (bug report #234),
+ * the reference renderer drawing them from the same draw. So the changed uniforms are written now and once more with
+ * the draw, as write_settings_twice does for the other settings. DKR_UNIF_TWICE=0 writes them once.
+ */
+static void unif_write_twice(void) {
+    unsigned changed = sUnifChanged;
+    int u;
+    sUnifChanged = 0;
+    if (!sUnifTwice || changed == 0) {
+        return;
+    }
+    C3Di_UpdateContext();
+    for (u = 0; u < UNIF_COUNT; u++) {
+        if (changed & (1u << u)) {
+            C3D_FVUnifDirty[GPU_VERTEX_SHADER][sUnifLoc[u]] = true;
+        }
+    }
+}
+
+/* The uniforms for a draw the CPU transformed: the shader passes it through, as shader.v.pica does. */
+static void set_cpu_uniforms(void) {
+    if (!sTransformOn || (sUnifKnown && !sUnifModel)) {
+        return;
+    }
+    set_unif(UNIF_MTX + 0, 1.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_MTX + 1, 0.0f, 1.0f, 0.0f, 0.0f);
+    set_unif(UNIF_MTX + 2, 0.0f, 0.0f, 1.0f, 0.0f);
+    set_unif(UNIF_MTX + 3, 0.0f, 0.0f, 0.0f, 1.0f);
+    set_unif(UNIF_CAMOFF, 0.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_TEXA, 1.0f, 1.0f, 0.0f, 0.0f);
+    set_unif(UNIF_TEXC, 0.0f, 0.0f, 1.0f, 1.0f);
+    set_unif(UNIF_TEXB, 0.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
+    sUnifKnown = 1;
+    sUnifModel = 0;
+}
+
+/*
+ * The uniforms for a model draw: its matrix with what to_screen does folded in (the quarter turn, the 3D width, the
+ * depth remap; the clamp is the shader's), and its texture factors with the padded size and flipped t of
+ * write_vertices.
+ *
+ * The GPU works in 24-bit floats, with 16 bits after the point. A track's matrix takes the camera's position off
+ * coordinates in the thousands, and doing that inside the matrix loses the low bits: the nearby world would shake by
+ * pixels. So, as the F-Zero X 3DS port does, the whole-number part of the camera position (the model space point the
+ * matrix takes to x = y = w = 0) is taken off each vertex first, which is exact for whole numbers this size, and the
+ * matrix only keeps what is left of its offset.
+ */
+static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, float su1, float sv1) {
+    double rows[4][4], cam[3] = { 0.0, 0.0, 0.0 }, a[3][3], b[3], det;
+    static const int sCols[3] = { 0, 1, 3 };
+    int r, k;
+
+    for (r = 0; r < 4; r++) {
+        rows[0][r] = p->mtx[r][1];
+        rows[1][r] = -(double) p->mtx[r][0] * sScale3D;
+        rows[2][r] = 0.5 * ((double) p->mtx[r][2] - p->mtx[r][3]);
+        rows[3][r] = p->mtx[r][3];
+    }
+    for (k = 0; k < 3; k++) {
+        for (r = 0; r < 3; r++) {
+            a[k][r] = p->mtx[r][sCols[k]];
+        }
+        b[k] = -(double) p->mtx[3][sCols[k]];
+    }
+    det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+          a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    if (det > 1e-30 || det < -1e-30) {
+        for (k = 0; k < 3; k++) {
+            double m[3][3];
+            int i, j;
+            for (i = 0; i < 3; i++) {
+                for (j = 0; j < 3; j++) {
+                    m[i][j] = j == k ? b[i] : a[i][j];
+                }
+            }
+            cam[k] = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                      m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])) / det;
+            cam[k] = cam[k] < -60000.0 ? -60000.0 : cam[k] > 60000.0 ? 60000.0 : floor(cam[k] + 0.5);
+        }
+    }
+    for (k = 0; k < 4; k++) {
+        double t = rows[k][3] + cam[0] * rows[k][0] + cam[1] * rows[k][1] + cam[2] * rows[k][2];
+        set_unif(UNIF_MTX + k, (float) rows[k][0], (float) rows[k][1], (float) rows[k][2], (float) t);
+    }
+    set_unif(UNIF_CAMOFF, (float) cam[0], (float) cam[1], (float) cam[2], 0.0f);
+    set_unif(UNIF_TEXA, p->texScale[0] * su0, -p->texScale[1] * sv0, p->texScale[2] * su1, -p->texScale[3] * sv1);
+    set_unif(UNIF_TEXC, 0.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_TEXB, p->texOffset[0] * su0, 1.0f - p->texOffset[1] * sv0, p->texOffset[2] * su1,
+             1.0f - p->texOffset[3] * sv1);
+    if (p->fog) {
+        // The shader has z' = (z - w) / 2, so z / w = 2 z' / w + 1.
+        set_unif(UNIF_FOGP, 2.0f * p->fogMul / 255.0f, (p->fogMul + p->fogOffset) / 255.0f, 1.0f, 0.0f);
+    } else {
+        set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    sUnifKnown = 1;
+    sUnifModel = 1;
+}
+
+/* At the start of a frame: binds the program the frame is drawn with, and watches the first frames drawn with the
+ * transform one (see above). */
+static void transform_frame_start(void) {
+    int on = sTransformWanted && sProgramTUsable && !sTransformHung;
+    if (on != sTransformOn) {
+        sTransformOn = on;
+        C3D_BindProgram(on ? &sProgramT : &sProgram);
+        sEyeUniform = on ? sEyeUniformT : sEyeUniformP;
+        sUnifKnown = 0;
+        plat_log("GPU vertex maths %s (frame %d)", on ? "on" : "off", sFrameCount);
+        if (on && sTransformTestFrame == -1) {
+            transform_marker_write("testing");
+            sTransformTestFrame = sFrameCount;
+        }
+    }
+}
+
+/* Once the GPU has drawn a frame: marks the transform program as working after its first frames. */
+static void transform_frame_drawn(int frame) {
+    if (sTransformTestFrame >= 0 && frame >= sTransformTestFrame + TRANSFORM_TEST_FRAMES) {
+        sTransformTestFrame = -2;
+        transform_marker_write("passed");
+        plat_log("GPU vertex maths: %d frames drawn, the shader works on this console", TRANSFORM_TEST_FRAMES);
+    }
+}
+
+int gfxb_gpu_transform(void) {
+    return sTransformOn;
 }
 
 /*
@@ -2263,6 +2794,11 @@ static void read_switches(void) {
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
+    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
+    sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
+    sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
+    sAdaptive = plat_switch("DKR_ADAPTIVE_AA", 0);
+    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", 1) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -2280,6 +2816,11 @@ static void read_switches(void) {
     plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s",
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
              plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all");
+    plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
+             sTransformHung ? " (but it hung before: left off)" : !sProgramTUsable ? " (shader not usable)" : "",
+             sStereoOnce ? "made once, drawn twice" : "made for each eye");
+    plat_log("switches: adaptive anti-aliasing %s, top screen buffers %d, queue wake-ups %s", sAdaptive ? "on" : "off",
+             sTripleWanted ? 3 : 2, plat_switch("DKR_QUEUE_WAKE", 0) ? "per queue" : "all threads");
 }
 
 void gfxb_start_frame(void) {
@@ -2287,6 +2828,7 @@ void gfxb_start_frame(void) {
     // No vblank throttling here: the emulated VI already paces the game.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
     apply_screen_mode();
+    adaptive_pick();
     // The first frame of a render target clears it with the GPU idle, and a snapshot frame is checked once the GPU
     // has drawn it, before the next is built: those wait for the GPU first, as every frame used to.
     sOverlap = overlap_setting() && sFrameStarted < 0 && !sSnapshotPending;
@@ -2309,9 +2851,13 @@ void gfxb_start_frame(void) {
     sIboFlushed = 0;
     sVfmtBound = -1; // The first draw points the GPU at this slot's buffer.
     sVfmtSwitches = 0;
+    sBufMesh = NULL;
     GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
+    read_switches();
+    transform_frame_start();
+    sOnceFrame = sStereo && sStereoOnce && sSplitMode == 0;
     if (!sStereo) {
-        write_eye(0.0f, 0.0f); // In 3D, each draw sets it (draw_arrays).
+        write_eye(0.0f, 0.0f); // In 3D, each draw sets it (draw_arrays), or each eye's pass (stereo_once_lists).
     }
     // Like an N64 framebuffer, the colour buffer keeps the last image: the game clears it itself, and a frame that
     // draws nothing (while a level loads) must not show up as a black flash. So only the first frame uses a memory
@@ -2325,14 +2871,22 @@ void gfxb_start_frame(void) {
     }
     // What C3D_FrameDrawOn does, which needs a citro3d frame begun; the target is marked used when handed over.
     C3D_SetFrameBuf(&sTarget->frameBuf);
-    bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
+    if (sOnceFrame) {
+        // The frame's commands are run once for each eye, the target and eye offset set before each run
+        // (stereo_once_lists). So they must not set the target themselves, and the first draw writes every setting
+        // the draws rely on, which the second run would otherwise find as the first left them.
+        __C3D_Context.flags = (__C3D_Context.flags & ~C3D_FLAG_FRAMEBUF) | C3D_ONCE_FLAGS;
+        C3Di_DirtyUniforms(GPU_VERTEX_SHADER);
+    } else {
+        bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
+    }
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
-    read_switches();
     promote_textures();
     forget_gpu_state();
-    sMipmapsUsed = sMipmapSetting != 0;
-    sMipmapsShown = sMipmapSetting == 2;
-    sColourBoost = sColourSetting;
+    // The switch bench sets these itself (BENCH_*), so the player's settings don't change what it measures.
+    sMipmapsUsed = plat_switch("BENCH_MIPMAPS", sMipmapSetting) != 0;
+    sMipmapsShown = plat_switch("BENCH_MIPMAPS", sMipmapSetting) == 2;
+    sColourBoost = plat_switch("BENCH_COLOUR", sColourSetting);
     sFrameFirstDraw = 1;
     sDepthFillPending = 0;
     if (sFrameStarted < 0) {
@@ -2434,6 +2988,9 @@ void gfxb_end_frame(void) {
         save_command_list();
     }
     hand_over_draw_parts();
+    if (sOnceFrame) {
+        stereo_once_lists(&sSlots[sRec]);
+    }
     {
         static float sMaxUsage;
         FrameSlot *slot = &sSlots[sRec];
@@ -2492,6 +3049,7 @@ void gfxb_end_frame(void) {
                 GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
             }
         }
+        adaptive_link(slot);
         sTarget->used = true;
         if (sStereo) {
             sTargetRight->used = true;
@@ -2503,14 +3061,18 @@ void gfxb_end_frame(void) {
         sDrainSplits = 0;
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
-        wait_for_present();
+        if (!triple_choose()) {
+            wait_for_present();
+        }
         find_recent_screen();
         watch_for_line();
+        sTripleGet = sTripleFrame; // citro3d's display transfer goes to our buffer (see sTripleFrame)
         if (full_flush()) {
             C3D_FrameEnd(0); // Also flushes the whole linear heap.
         } else {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
+        sTripleGet = 0;
         record_recent_frame();
     }
     sFrameStarted = -1; // A frame has been drawn, so the target holds an image.
@@ -3841,7 +4403,7 @@ int plat_3ds_guard_band_setting(void) {
         const char *env = plat_getenv("DKR_GUARD_BAND");
         sGuardBand = settings_get("guardband", env == NULL || atoi(env) != 0) != 0;
     }
-    return sGuardBand;
+    return plat_switch("BENCH_GUARD_BAND", sGuardBand);
 }
 
 /*
@@ -4136,6 +4698,8 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         }
     }
 
+    set_cpu_uniforms();
+    unif_write_twice();
     if (timed) {
         t2 = plat_ticks();
         draw_part(DRAW_PART_STATE, t2 - t1, 1 + twiceReads);
@@ -4184,6 +4748,267 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         }
     }
     gfxb_draw_indexed(state, verts, numTriangles * 3, sIdentity, numTriangles);
+}
+
+/*
+ * GPU vertex maths (P30): whether a model draw can go to the GPU. The CPU path trims triangles to the guard band
+ * (clip_to_guard_band), which needs their positions; here only the corners of the vertices' box are transformed. A box
+ * wholly beyond one side of the band is drawn by neither path; one reaching past the band, or behind the camera, is
+ * left to the CPU path.
+ */
+int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]) {
+    int all = ~0, any = 0, i;
+    if (!sTransformOn) {
+        return GFX_MODEL_CPU;
+    }
+    if (!plat_3ds_guard_band_setting()) {
+        return GFX_MODEL_GPU;
+    }
+    sBandX = band_for(sTarget->frameBuf.height);
+    sBandY = band_for(sTarget->frameBuf.width);
+    for (i = 0; i < 8; i++) {
+        float x = (i & 1) ? boxMax[0] : boxMin[0], y = (i & 2) ? boxMax[1] : boxMin[1], z = (i & 4) ? boxMax[2] : boxMin[2];
+        GfxVertex c;
+        int out;
+        c.x = x * mtx[0][0] + y * mtx[1][0] + z * mtx[2][0] + mtx[3][0];
+        c.y = x * mtx[0][1] + y * mtx[1][1] + z * mtx[2][1] + mtx[3][1];
+        c.w = x * mtx[0][3] + y * mtx[1][3] + z * mtx[2][3] + mtx[3][3];
+        out = outside_band(&c);
+        all &= out;
+        any |= out;
+    }
+    return (all & OUTSIDE_PLANES) ? GFX_MODEL_HIDDEN : any ? GFX_MODEL_CPU : GFX_MODEL_GPU;
+}
+
+/* What a model or mesh draw does before its vertices: room, hang report, settings, uniforms. Returns FALSE if the draw
+ * is to be left out (no room left in the frame). */
+static int model_draw_begin(const GfxDrawState *state, const GfxModelParams *params, int vertBytes, int numIndices,
+                            int numTriangles, HangDraw **hangDraw) {
+    float su0, sv0, su1, sv1;
+    int first;
+    if (sVboUsed + 15 + vertBytes > VBO_BYTES || sIboUsed + numIndices > IBO_BYTES / (int) sizeof(u16) ||
+        gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+        if (sDrawsLeftOut++ < 5) {
+            plat_log("frame %d: buffers full (%d bytes of vertices, %d indices, %lu command words), model triangles "
+                     "left out", sFrameCount, sVboUsed, sIboUsed, (unsigned long) cmd_position());
+        }
+        return 0;
+    }
+    *hangDraw = hang_draw_start(state, numTriangles);
+    first = drain_before_draw(state, numTriangles);
+    if (first) {
+        forget_gpu_state();
+    }
+    set_all_state(state, &su0, &sv0, &su1, &sv1);
+    if (first) {
+        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+    }
+    set_model_uniforms(params, su0, sv0, su1, sv1);
+    unif_write_twice();
+    return 1;
+}
+
+void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
+                     const unsigned short *indices, int numTriangles) {
+    HangDraw *hangDraw;
+    int vertex, i, count = numTriangles * 3, vertBytes = numVerts * (int) sizeof(GfxModelVertex);
+    unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
+    u16 *ibo;
+
+    if (!model_draw_begin(state, params, vertBytes, count, numTriangles, &hangDraw)) {
+        return;
+    }
+    vertex = use_vertex_format(VFMT_MODEL);
+    if (vertex + numVerts > 0xFFFF) {
+        sVfmtBound = -1;
+        vertex = use_vertex_format(VFMT_MODEL);
+    }
+    memcpy(sVbo + sVboUsed, verts, vertBytes);
+    ibo = sIbo + sIboUsed;
+    for (i = 0; i < count; i++) {
+        ibo[i] = (u16) (vertex + indices[i]);
+    }
+    sIboUsed += count;
+    draw_prims(vertex, count, ibo);
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
+    sVboUsed += vertBytes;
+    sFrameTriangles += numTriangles;
+    if (t0 != 0) {
+        draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 2);
+        sDrawPartReads += 2;
+    }
+}
+
+/*
+ * Meshes (P31, P34). Their vertices live in one arena of linear memory, MESH_ARENA_VERTS model vertices, so that the
+ * GPU reads any mesh from the same vertex buffer setting with 16-bit indices: gfxb_draw_meshes then draws parts of
+ * many meshes as one draw, copying their indices (made relative to the arena when the mesh is created) into the
+ * frame's index buffer. The arena is handed out in runs of vertices, first fit, from a list of free runs.
+ */
+#define MESH_ARENA_VERTS 65536
+#define MESH_FREE_RUNS 2048
+
+typedef struct C3DMesh {
+    u32 base, numVerts;
+    u16 *indices; // Arena indices
+} C3DMesh;
+
+static GfxModelVertex *sMeshArena;
+static struct {
+    u32 start, count;
+} sArenaFree[MESH_FREE_RUNS];
+static int sArenaFreeRuns;
+
+static int arena_alloc(u32 count, u32 *start) {
+    int i;
+    if (sMeshArena == NULL) {
+        sMeshArena = linearAlloc(MESH_ARENA_VERTS * sizeof(GfxModelVertex));
+        if (sMeshArena == NULL) {
+            return 0;
+        }
+        sArenaFree[0].start = 0;
+        sArenaFree[0].count = MESH_ARENA_VERTS;
+        sArenaFreeRuns = 1;
+        plat_log("meshes: %d KB arena", (int) (MESH_ARENA_VERTS * sizeof(GfxModelVertex) / 1024));
+    }
+    for (i = 0; i < sArenaFreeRuns; i++) {
+        if (sArenaFree[i].count >= count) {
+            *start = sArenaFree[i].start;
+            sArenaFree[i].start += count;
+            sArenaFree[i].count -= count;
+            if (sArenaFree[i].count == 0) {
+                memmove(&sArenaFree[i], &sArenaFree[i + 1], (sArenaFreeRuns - i - 1) * sizeof(sArenaFree[0]));
+                sArenaFreeRuns--;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Gives a run back, joined to its free neighbours. With no room left in the list it is lost (logged once). */
+static void arena_free(u32 start, u32 count) {
+    int i = 0;
+    while (i < sArenaFreeRuns && sArenaFree[i].start < start) {
+        i++;
+    }
+    if (i > 0 && sArenaFree[i - 1].start + sArenaFree[i - 1].count == start) {
+        sArenaFree[i - 1].count += count;
+        if (i < sArenaFreeRuns && start + count == sArenaFree[i].start) {
+            sArenaFree[i - 1].count += sArenaFree[i].count;
+            memmove(&sArenaFree[i], &sArenaFree[i + 1], (sArenaFreeRuns - i - 1) * sizeof(sArenaFree[0]));
+            sArenaFreeRuns--;
+        }
+        return;
+    }
+    if (i < sArenaFreeRuns && start + count == sArenaFree[i].start) {
+        sArenaFree[i].start = start;
+        sArenaFree[i].count += count;
+        return;
+    }
+    if (sArenaFreeRuns == MESH_FREE_RUNS) {
+        static int sWarned;
+        if (!sWarned) {
+            sWarned = 1;
+            plat_log("meshes: arena free list full, a run is lost");
+        }
+        return;
+    }
+    memmove(&sArenaFree[i + 1], &sArenaFree[i], (sArenaFreeRuns - i) * sizeof(sArenaFree[0]));
+    sArenaFree[i].start = start;
+    sArenaFree[i].count = count;
+    sArenaFreeRuns++;
+}
+
+void *gfxb_mesh_create(const GfxModelVertex *verts, int numVerts, const unsigned short *indices, int numIndices) {
+    C3DMesh *m = malloc(sizeof(C3DMesh));
+    int i;
+    if (m == NULL || (m->indices = malloc(numIndices * sizeof(u16))) == NULL) {
+        free(m);
+        return NULL;
+    }
+    if (!arena_alloc(numVerts, &m->base)) {
+        free(m->indices);
+        free(m);
+        return NULL;
+    }
+    m->numVerts = numVerts;
+    memcpy(&sMeshArena[m->base], verts, numVerts * sizeof(GfxModelVertex));
+    for (i = 0; i < numIndices; i++) {
+        m->indices[i] = (u16) (m->base + indices[i]);
+    }
+    gpu_flush(&sMeshArena[m->base], numVerts * sizeof(GfxModelVertex));
+    return m;
+}
+
+/* The GPU may still draw the mesh in the frames it was handed: deleted once it has (process_pending_frees). */
+void gfxb_mesh_free(void *mesh) {
+    FrameSlot *slot = &sSlots[sRec];
+    if (mesh == NULL) {
+        return;
+    }
+    if (slot->numMeshFrees == slot->meshFreesCapacity) {
+        int capacity = slot->meshFreesCapacity ? slot->meshFreesCapacity * 2 : 64;
+        void **list = realloc(slot->meshFrees, capacity * sizeof(void *));
+        if (list == NULL) {
+            return; // Out of memory: the mesh is kept (a leak, but nothing the GPU reads is freed).
+        }
+        slot->meshFrees = list;
+        slot->meshFreesCapacity = capacity;
+    }
+    slot->meshFrees[slot->numMeshFrees++] = mesh;
+}
+
+static void delete_mesh(void *mesh) {
+    C3DMesh *m = mesh;
+    arena_free(m->base, m->numVerts);
+    free(m->indices);
+    free(m);
+}
+
+void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
+                      int numParts) {
+    HangDraw *hangDraw;
+    unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
+    int i, count = 0;
+    u16 *ibo;
+
+    for (i = 0; i < numParts; i++) {
+        count += parts[i].numTriangles * 3;
+    }
+    if (count == 0 || !model_draw_begin(state, params, 0, count, count / 3, &hangDraw)) {
+        return;
+    }
+    if (sBufMesh != sMeshArena) {
+        // The vertex buffer setting points at the arena until a draw from the frame's buffer points it back.
+        C3D_BufInfo *buf = C3D_GetBufInfo();
+        if (sVfmtAttrSet != VFMT_MODEL) {
+            C3D_SetAttrInfo(&sVfmtAttr[VFMT_MODEL]);
+            sVfmtAttrSet = VFMT_MODEL;
+        }
+        BufInfo_Init(buf);
+        BufInfo_Add(buf, sMeshArena, sizeof(GfxModelVertex), 3, 0x210);
+        sBufMesh = sMeshArena;
+        sVfmtBound = -1;
+    }
+    ibo = sIbo + sIboUsed;
+    for (i = 0, count = 0; i < numParts; i++) {
+        const C3DMesh *m = parts[i].mesh;
+        memcpy(ibo + count, m->indices + parts[i].firstIndex, parts[i].numTriangles * 3 * sizeof(u16));
+        count += parts[i].numTriangles * 3;
+    }
+    sIboUsed += count;
+    draw_prims(0, count, ibo);
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
+    sFrameTriangles += count / 3;
+    if (t0 != 0) {
+        draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 2);
+        sDrawPartReads += 2;
+    }
 }
 
 /* Draws a screen rectangle with a flat colour, optionally only writing depth. */
