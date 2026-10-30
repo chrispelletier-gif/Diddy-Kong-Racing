@@ -867,6 +867,12 @@ MenuElement gControllerPakMenuElement[7] = {
 };
 
 s32 gShowControllerPakMenu = FALSE;
+#ifdef TARGET_PORT
+// The 3DS port never asks the player to insert a Rumble Pak or a Controller Pak.
+#define SAVEMENU_RUMBLE_NAG_PENDING() 0
+#else
+#define SAVEMENU_RUMBLE_NAG_PENDING() (gSaveMenuRumbleNag != gSaveMenuRumbleConnected)
+#endif
 
 s32 gActiveMagicCodes = 0;
 s32 gUnlockedMagicCodes = 0;
@@ -5412,7 +5418,7 @@ s32 port_savemenu_input_source(s32 buttonsPressed, s32 xAxis, s32 yAxis) {
     }
     if (buttonsPressed & B_BUTTON) {
         gMenuStage = SAVEMENU_ENTER;
-        if (gSaveMenuRumbleNag != gSaveMenuRumbleConnected) {
+        if (SAVEMENU_RUMBLE_NAG_PENDING()) {
             savemenu_render_error(CONTROLLER_PAK_SWITCH_TO_RUMBLE);
             return 0;
         }
@@ -6415,7 +6421,7 @@ s32 savemenu_input_source(s32 buttonsPressed, s32 direction) {
     ret = 0;
     if (buttonsPressed & B_BUTTON) {
         gMenuStage = SAVEMENU_ENTER;
-        if (gSaveMenuRumbleNag != gSaveMenuRumbleConnected) {
+        if (SAVEMENU_RUMBLE_NAG_PENDING()) {
             savemenu_render_error(CONTROLLER_PAK_SWITCH_TO_RUMBLE);
         } else {
             sound_play(SOUND_MENU_BACK3, NULL);
@@ -6892,6 +6898,10 @@ SIDeviceStatus func_80087F14(s32 *controllerIndex, s32 xAxisDirection) {
 PakError check_for_controller_pak_errors(void) {
     s32 errorFound;
     s32 i;
+#ifdef TARGET_PORT
+    sControllerPakError = PAK_ERROR_NONE;
+    return sControllerPakError;
+#endif
 
     errorFound = FALSE;
     sControllerPakError = PAK_ERROR_NONE;
@@ -12397,6 +12407,12 @@ void postrace_viewport(UNUSED s32 updateRate) {
  * This tells the player they can insert their rumble pak if they wish.
  */
 void postrace_message(SIDeviceStatus status) {
+#ifdef TARGET_PORT
+    // No Controller Pak or Rumble Pak messages on the 3DS port.
+    (void) status;
+    gPostRaceMessage = NULL;
+    return;
+#endif
     // status may contain controllerIndex in it's upper bits
     // so grab the lower bits for the SIDeviceStatus
 

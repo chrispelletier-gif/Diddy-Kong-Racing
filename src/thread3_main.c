@@ -1690,9 +1690,13 @@ void mode_intro(void) {
     for (i = 0; i < MAXCONTROLLERS; i++) {
         buttonInputs |= input_held(i);
     }
+#ifndef TARGET_PORT
     if (buttonInputs & START_BUTTON) {
         gShowControllerPakMenu = TRUE;
     }
+#else
+    (void) buttonInputs; // The Controller Pak menu is not offered on the 3DS port.
+#endif
     sBootDelayTimer++;
     if (sBootDelayTimer >= 8) {
         load_menu_with_level_background(MENU_BOOT, ASSET_LEVEL_OPTIONSBACKGROUND, 2);
