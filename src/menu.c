@@ -4881,7 +4881,7 @@ void soundoptions_free(void) {
 #ifdef TARGET_PORT
 /*
  * The port's SAVE OPTIONS screen. The N64's shows every save as a card in a row that scrolls sideways, then a second
- * row of where it can go. This one sorts them into tabs (GAME PAK, CONTROLLER PAK and BACKUPS, the port's copies of
+ * row of where it can go. This one sorts them into tabs (SAVES, GHOSTS and BACKUPS, the port's copies of
  * the saves on the SD card) with a list on the left and a card on the right that shows the chosen save and then what
  * can be done with it. The game's own steps still do the work (savemenu_load_sources, savemenu_load_destinations,
  * savemenu_write and the Controller Pak messages); only how they are shown and chosen is new.
@@ -4920,7 +4920,7 @@ static const char *sPortSaveMessage; // What the last action did, shown on the c
 static s32 sPortSaveQuitTimer;
 static const char *sPortSaveDoneMessage; // Shown once the write the game is doing finishes.
 
-static const char *const sPortSaveTabNames[PORT_SAVE_TABS] = { "GAME PAK", "CONTROLLER PAK", "BACKUPS" };
+static const char *const sPortSaveTabNames[PORT_SAVE_TABS] = { "SAVES", "GHOSTS", "BACKUPS" };
 static const char sPortSaveSlotNames[NUMBER_OF_SAVE_FILES][7] = { "SLOT A", "SLOT B", "SLOT C" };
 
 /* Each tab's rows from the files the game found (and the backups' folders). */
@@ -5067,9 +5067,9 @@ static char *port_savemenu_action_name(SaveFileData *dest, char *buffer) {
             buffer[i] = '\0';
             return buffer;
         case SAVE_FILE_TYPE_CART_TIMES:
-            return (char *) port_text("COPY TO GAME PAK");
+            return (char *) port_text("COPY TO SAVES");
         case SAVE_FILE_TYPE_CPAK_EMPTY:
-            return (char *) port_text("COPY TO PAK");
+            return (char *) port_text("COPY TO GHOSTS");
         case SAVE_FILE_TYPE_UNK9:
             return gMenuText[ASSET_MENU_TEXT_VIEWGHOSTS];
         default:
@@ -5211,8 +5211,8 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
     adventureTwo = FALSE;
     if (row == NULL) {
         icon = gDrawTexContPakIcon;
-        title = (char *) port_text("CONTROLLER PAK");
-        line1 = (char *) port_text("HAS NO SAVES");
+        title = (char *) port_text("GHOSTS");
+        line1 = (char *) port_text("NOTHING SAVED YET");
     } else if (row->kind == PORT_SAVE_ROW_EMPTY_SLOT) {
         icon = gDrawTexN64Icon;
         title = (char *) port_text(sPortSaveSlotNames[row->index]);
@@ -5226,8 +5226,8 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
         icon = gDrawTexFileIcon;
         title = save_backups_is_undo(&sPortSaveBackups, row->index) ? (char *) port_text("BEFORE A RESTORE")
                                                                     : (char *) port_text("BACKUP");
-        line1 = (char *) port_text("GAME PAK");
-        line2 = (char *) port_text("AND CONTROLLER PAK");
+        line1 = (char *) port_text("SAVES");
+        line2 = (char *) port_text("AND GHOSTS");
     } else {
         file = &gSaveMenuFilesSource[row->index];
         title = port_savemenu_file_name(file, buffer);
