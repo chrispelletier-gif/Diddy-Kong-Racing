@@ -246,6 +246,7 @@ void port_set_skip_intro(s32 on);
  */
 const char *port_text(const char *english);
 
+/*
  * The first-run setup (port/src/game/port_setup.c): language, then a play style or a page each for the picture, the
  * screen shape, the camera and the race HUD, on the bottom screen the first time the title screen shows (setup= in
  * settings.txt; on PC only for DKR_SETUP=1). src/menu.c keeps START and OPTIONS back while it shows, gives it the
