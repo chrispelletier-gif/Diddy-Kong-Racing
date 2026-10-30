@@ -2,8 +2,6 @@
 #include <3ds.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <dirent.h>
 #include <sys/stat.h>
 
 #include "menu_3ds.h"
@@ -151,76 +149,6 @@ static void add_game_menu_options(void) {
     options_add(OPTIONS_CONTROLS, &sControls);
 }
 
-/*
- * One-time clean start (the combined test build, asked for by the user): the first run with this marker file empties
- * sdmc:/3ds/dkr, so settings, controls, saves, backups, logs, reports and leftovers from older builds all come back as
- * defaults. Kept: the bug report token (bugreport.txt), the ROM (the game can't start without it) and portraits/ (the
- * bottom screen's picture files, which the user made). Bump DATA_RESET_ID to ask for it again.
- */
-#define DATA_RESET_ID 1
-#define DATA_DIR_PATH "sdmc:/3ds/dkr"
-
-static int keep_file(const char *name) {
-    size_t length = strlen(name);
-    if (strcmp(name, "bugreport.txt") == 0 || strcmp(name, "portraits") == 0) {
-        return 1;
-    }
-    return length > 4 && (strcmp(name + length - 4, ".z64") == 0 || strcmp(name + length - 4, ".n64") == 0 ||
-                          strcmp(name + length - 4, ".v64") == 0);
-}
-
-static void remove_tree(const char *path) {
-    DIR *dir = opendir(path);
-    struct dirent *entry;
-    char child[300];
-
-    if (dir == NULL) {
-        remove(path);
-        return;
-    }
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
-        remove_tree(child);
-    }
-    closedir(dir);
-    remove(path);
-}
-
-static void data_reset_once(void) {
-    char marker[64];
-    DIR *dir;
-    struct dirent *entry;
-    FILE *f;
-
-    snprintf(marker, sizeof(marker), DATA_DIR_PATH "/reset_%d.txt", DATA_RESET_ID);
-    f = fopen(marker, "rb");
-    if (f != NULL) {
-        fclose(f);
-        return;
-    }
-    dir = opendir(DATA_DIR_PATH);
-    if (dir != NULL) {
-        while ((entry = readdir(dir)) != NULL) {
-            char path[300];
-            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 || keep_file(entry->d_name)) {
-                continue;
-            }
-            snprintf(path, sizeof(path), DATA_DIR_PATH "/%s", entry->d_name);
-            remove_tree(path);
-            rewinddir(dir);
-        }
-        closedir(dir);
-    }
-    f = fopen(marker, "wb");
-    if (f != NULL) {
-        fputs("The data folder was reset once; delete this file to reset it again.\n", f);
-        fclose(f);
-    }
-}
-
 int main(int argc, char **argv) {
 
     {
@@ -234,9 +162,6 @@ int main(int argc, char **argv) {
     hidInit();
     mkdir("sdmc:/3ds", 0777);
     mkdir(plat_data_dir(), 0777);
-    if (PLAT_DEBUG_TOOLS) {
-        data_reset_once(); // Test builds only: a player build never wipes the data folder.
-    }
     plat_3ds_console_init();
     bugreport_watch_thread("main");
     // Offers to report the last run if it did not end normally. Must come before anything is logged.
