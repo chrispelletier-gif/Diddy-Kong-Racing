@@ -11,7 +11,9 @@ Usage: bugreport_fetch.py <issue number or URL> [--out DIR] [--repo OWNER/NAME]
        bugreport_fetch.py --list [--repo OWNER/NAME]
 
 Writes DIR/issue.md (the title and body) and every attached file. Set GITHUB_TOKEN for private repositories or a
-higher rate limit. Snapshots (diff_N_ref.png + diff_N_gpu.bin) can then be compared with diff_frames.py.
+higher rate limit. Snapshots (diff_N_ref.png + diff_N_gpu.bin) can then be compared with diff_frames.py. The frames
+of the seconds before it that look most like a flash (diff_N_flash.bin) are also written as diff_N_flash.png: a row
+for each, the frame before, it, and the frame after.
 """
 import argparse
 import base64
@@ -19,8 +21,10 @@ import gzip
 import json
 import os
 import re
+import struct
 import sys
 import urllib.request
+import zlib
 
 DEFAULT_REPO = "chrispelletier-gif/Diddy-Kong-Racing-3DS"
 LABEL = "3ds-bug-report"
@@ -77,6 +81,45 @@ def attachments(comments, author):
     return files
 
 
+def write_png(path, width, height, rgb):
+    """Writes 8-bit RGB rows (bytes) as a PNG, without needing an image library."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    raw = b"".join(b"\0" + rgb[y * width * 3:(y + 1) * width * 3] for y in range(height))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) +
+                chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+def flash_to_png(data, path, scale=2):
+    """diff_N_flash.bin (the letters DKRH, width, height, pictures, then each picture's frame number and RGB565
+    pixels; three for each flash) as one PNG, a row of three for each flash, each picture scale times its size."""
+    magic, w, h, count = struct.unpack_from("<4sIII", data)
+    if magic != b"DKRH" or count == 0 or len(data) < 16 + count * (4 + w * h * 2):
+        print(f"{path}: not a frame history file", file=sys.stderr)
+        return
+    rows, gap = (count + 2) // 3, 4
+    width, height = 3 * w * scale + 2 * gap, rows * h * scale + (rows - 1) * gap
+    out = bytearray(b"\x40" * (width * height * 3))
+    frames = []
+    for n in range(count):
+        offset = 16 + n * (4 + w * h * 2)
+        frames.append(struct.unpack_from("<I", data, offset)[0])
+        pixels = struct.unpack_from(f"<{w * h}H", data, offset + 4)
+        x0, y0 = (n % 3) * (w * scale + gap), (n // 3) * (h * scale + gap)
+        for y in range(h * scale):
+            line = bytearray()
+            for x in range(w):
+                c = pixels[(y // scale) * w + x]
+                r, g, b = (c >> 11) << 3, ((c >> 5) & 0x3F) << 2, (c & 0x1F) << 3
+                line += bytes((r | r >> 5, g | g >> 6, b | b >> 5)) * scale
+            start = ((y0 + y) * width + x0) * 3
+            out[start:start + len(line)] = line
+    write_png(path, width, height, bytes(out))
+    print(f"{os.path.basename(path)}: frames " + ", ".join(
+        f"{frames[i]} {frames[i + 1]} {frames[i + 2]}" for i in range(0, count - 2, 3)))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("issue", nargs="?", help="issue number or its URL")
@@ -107,6 +150,8 @@ def main():
         with open(os.path.join(out, os.path.basename(name)), "wb") as f:
             f.write(data)
         print(f"{name}: {len(data)} bytes")
+        if name.endswith("_flash.bin"):
+            flash_to_png(data, os.path.join(out, os.path.basename(name)[:-4] + ".png"))
     print(f"saved to {out}/")
 
 

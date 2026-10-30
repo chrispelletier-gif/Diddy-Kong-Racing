@@ -127,6 +127,9 @@ static int sClearing; // draw_clear_rect is drawing
 static int sFrameFirstDraw; // No draw yet in this frame's command list
 static int sDepthFillPending; // The frame's depth clear is a memory fill (see gfxb_clear_depth)
 static int sFrameCount, sFrameTriangles;
+// This frame's draws, those of a texture the GPU has no copy of (drawn white instead), and the times every GPU
+// setting was forgotten and so written again: the per-frame list in a bug report (record_timing).
+static int sFrameDraws, sFrameNoGpuTex, sFrameForgets;
 /* For the hang report: the size of the last frame handed to the GPU. */
 static int sLastFrameTriangles;
 static float sLastFrameUsage;
@@ -399,6 +402,7 @@ static struct {
 
 static void forget_gpu_state(void) {
     sGpu.known = 0;
+    sFrameForgets++;
 }
 
 /******************************** Setup ********************************/
@@ -1383,11 +1387,13 @@ static u8 *sRecentRight; // The right eye's, in 3D (then 400 rows each, so both 
  * actually handed to the display. Two pictures handed over in one 16.7 ms screen refresh replace each other (the
  * first is never shown), which is what "replaced" counts.
  */
-#define TIMING_FRAMES 64
+#define TIMING_FRAMES 180 // 3 seconds at 60 fps, as many as the frame history (HISTORY_FRAMES)
 static struct {
     int frame;
     unsigned int gapUs, gpuUs;
     unsigned int swaps, replaced, swapGapUs; // Since the previous frame end; swapGapUs is between the last two swaps.
+    int draws, noGpuTex, forgets;            // sFrameDraws, sFrameNoGpuTex, sFrameForgets
+    int flash;                               // The frame history's score for it (history_score), -1 if none
     int haveNote;
     PlatGameNote note;
 } sTiming[TIMING_FRAMES];
@@ -1587,6 +1593,9 @@ static void find_recent_screen(void) {
     u16 w = 0, h = 0;
     GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
     sRecentScreen = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
+    if (sTripleFrame) {
+        sRecentScreen = sTriple[sTripleNext]; // Ours (see triple_choose); sTripleGet isn't set yet. Never in 3D.
+    }
     sRecentScreenBpp = format == GSP_BGR8_OES ? 3 : format == GSP_RGB565_OES ? 2 : 0;
     sRecentScreenRows = (w == TOP_HEIGHT && sRecentScreenBpp != 0) ? h : 0;
     sRecentRight = sStereo && h == TOP_WIDTH ? gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, NULL, NULL) : NULL;
@@ -1618,8 +1627,13 @@ static void record_timing(void) {
         sTiming[sTimingNext].replaced = replaced - lastReplaced;
         sTiming[sTimingNext].swapGapUs = sSwapGapUs;
         sTiming[sTimingNext].haveNote = plat_get_game_note(&sTiming[sTimingNext].note);
+        sTiming[sTimingNext].draws = sFrameDraws;
+        sTiming[sTimingNext].noGpuTex = sFrameNoGpuTex;
+        sTiming[sTimingNext].forgets = sFrameForgets;
+        sTiming[sTimingNext].flash = -1;
         sTimingNext = (sTimingNext + 1) % TIMING_FRAMES;
     }
+    sFrameDraws = sFrameNoGpuTex = sFrameForgets = 0;
     lastSwaps = swaps;
     lastReplaced = replaced;
     sLastEndTick = now;
@@ -1628,7 +1642,9 @@ static void record_timing(void) {
 static void log_timing(void) {
     int i;
     plat_log("last %d frames (CPU time since the previous frame ended, GPU time of the one before, top screen swaps "
-             "since then and the time between the last two, player):", TIMING_FRAMES);
+             "since then and the time between the last two, draws, those of a texture the GPU had no copy of, GPU "
+             "settings all written again, how much the picture looks like a flash (see frame history), player):",
+             TIMING_FRAMES);
     for (i = 0; i < TIMING_FRAMES; i++) {
         int k = (sTimingNext + i) % TIMING_FRAMES;
         char note[80];
@@ -1640,11 +1656,12 @@ static void log_timing(void) {
         } else {
             plat_snprintf(note, sizeof(note), "(player note busy)");
         }
-        plat_log("  frame %d: +%u.%u ms, gpu %u.%u ms, %u swap%s +%u.%u ms%s, %s", sTiming[k].frame,
-                 sTiming[k].gapUs / 1000, sTiming[k].gapUs / 100 % 10, sTiming[k].gpuUs / 1000,
-                 sTiming[k].gpuUs / 100 % 10, sTiming[k].swaps, sTiming[k].swaps == 1 ? "" : "s",
-                 sTiming[k].swapGapUs / 1000, sTiming[k].swapGapUs / 100 % 10,
-                 sTiming[k].replaced != 0 ? " (REPLACED one before it was shown)" : "", note);
+        plat_log("  frame %d: +%u.%u ms, gpu %u.%u ms, %u swap%s +%u.%u ms%s, %d draws, %d missing textures, "
+                 "%d resets, flash %d, %s", sTiming[k].frame, sTiming[k].gapUs / 1000, sTiming[k].gapUs / 100 % 10,
+                 sTiming[k].gpuUs / 1000, sTiming[k].gpuUs / 100 % 10, sTiming[k].swaps,
+                 sTiming[k].swaps == 1 ? "" : "s", sTiming[k].swapGapUs / 1000, sTiming[k].swapGapUs / 100 % 10,
+                 sTiming[k].replaced != 0 ? " (REPLACED one before it was shown)" : "", sTiming[k].draws,
+                 sTiming[k].noGpuTex, sTiming[k].forgets, sTiming[k].flash, note);
     }
 }
 
@@ -1800,14 +1817,273 @@ static void record_recent_frame(void) {
     sRecentNext = (sRecentNext + 1) % sRecentCount;
 }
 
-/* Saves the recent frames most likely to show a line as diff_NNNNN_recentK.bin (width, height, then BGR8), and
- * logs every frame's score. Called once the GPU has finished the snapshot frame, so the ring is idle. */
+/*
+ * The frame history for bug reports. A glitch seen for a moment is over by the time the player presses SELECT and
+ * touches the screen, and the snapshot only has the frame after that. So every frame's picture (the left eye) is kept
+ * small, HISTORY_W by HISTORY_H, for the last HISTORY_FRAMES frames: 3 seconds at 60 fps. Each frame, just before the
+ * screen buffer about to be written is written, its picture (finished at least a frame ago, so never one being drawn)
+ * is sampled by the CPU, every 2nd pixel down and every 2nd (4th at 800 pixels) across. The buffers' last frames
+ * (sHistoryBuf) say which frame that was. A snapshot scores every frame for how much it looks like a flash
+ * (history_score) and saves the three that do most, each with the frames it is compared with, as
+ * diff_NNNNN_flash.bin, which the bug report sends; each frame's score is in the snapshot's list of recent frames.
+ * On by default in builds with bug reports; DKR_FRAME_HISTORY=0 turns it off. Its time is logged every 10 s.
+ * DKR_FRAME_HISTORY=2 tests it: a white box in frame 1200's picture, and a snapshot 90 frames later.
+ */
 void plat_save_file_later(const char *path, void *data, unsigned int size);
 
+#define HISTORY_W 200
+#define HISTORY_H 120
+#define HISTORY_PIXELS (HISTORY_W * HISTORY_H)
+#define HISTORY_FRAMES 180
+#define HISTORY_PICKS 3
+static u16 *sHistory; // sHistorySlots pictures, RGB565, in the screen's own orientation (rows top to bottom)
+static int sHistoryFrame[HISTORY_FRAMES], sHistorySlots, sHistoryNext, sHistoryOn = -1, sHistoryTest;
+static unsigned long long sHistoryNs;
+static int sHistorySampled;
+static struct {
+    const u8 *buffer;
+    int frame;
+} sHistoryBuf[6]; // The screen buffers (two of libctru's, three of ours) and the frame last copied into each
+
+static void history_start(void) {
+#ifdef PORT_RELEASE
+    sHistoryOn = 0; // No bug reports to send it.
+#else
+    sHistoryOn = plat_switch("DKR_FRAME_HISTORY", 1);
+    sHistoryTest = sHistoryOn == 2;
+#endif
+    if (sHistoryOn) {
+        // An Old 3DS has half the memory: a second.
+        int slots = is_old_3ds() ? HISTORY_FRAMES / 3 : HISTORY_FRAMES;
+        while (slots >= 30 && (sHistory = malloc((size_t) slots * HISTORY_PIXELS * 2)) == NULL) {
+            slots /= 2;
+        }
+        sHistorySlots = sHistory != NULL ? slots : 0;
+        for (int i = 0; i < HISTORY_FRAMES; i++) {
+            sHistoryFrame[i] = -1;
+        }
+        plat_log("frame history for bug reports: last %d frames, %dx%d", sHistorySlots, HISTORY_W, HISTORY_H);
+    }
+}
+
+static int *history_buffer_frame(const u8 *buffer, int add) {
+    int i;
+    for (i = 0; i < 6; i++) {
+        if (sHistoryBuf[i].buffer == buffer) {
+            return &sHistoryBuf[i].frame;
+        }
+    }
+    if (!add) {
+        return NULL;
+    }
+    memmove(&sHistoryBuf[1], &sHistoryBuf[0], 5 * sizeof(sHistoryBuf[0])); // The oldest buffer seen is dropped.
+    sHistoryBuf[0].buffer = buffer;
+    sHistoryBuf[0].frame = -1;
+    return &sHistoryBuf[0].frame;
+}
+
+/* Called with sRecentScreen found for this frame, before its picture is copied in. */
+static void history_sample(void) {
+    const int rows = sRecentScreenRows, bpp = sRecentScreenBpp, step = rows >= 2 * TOP_WIDTH ? 4 : 2;
+    const u8 *src = sRecentScreen;
+    unsigned long long start;
+    int *frame, x, y;
+    u16 *out;
+
+    if (sHistoryOn < 0) {
+        history_start();
+    }
+    if (sHistorySlots == 0 || sRecentFrozen || src == NULL || rows == 0 || rows / step < HISTORY_W || in_vram(src)) {
+        return; // In VRAM it is too slow to read from the CPU (not used for the top screen).
+    }
+    frame = history_buffer_frame(src, 0);
+    if (frame == NULL || *frame < 0) {
+        return; // Nothing drawn into it yet.
+    }
+    start = plat_time_ns();
+    GSPGPU_InvalidateDataCache(src, rows * TOP_HEIGHT * bpp);
+    out = sHistory + sHistoryNext * HISTORY_PIXELS;
+    // Each buffer row is a screen column, bottom to top.
+    for (x = 0; x < HISTORY_W; x++) {
+        const u8 *column = src + x * step * TOP_HEIGHT * bpp;
+        u16 *o = out + (HISTORY_H - 1) * HISTORY_W + x;
+        if (bpp == 3) {
+            for (y = 0; y < HISTORY_H; y++, column += 6, o -= HISTORY_W) {
+                *o = ((column[2] >> 3) << 11) | ((column[1] >> 2) << 5) | (column[0] >> 3); // BGR8
+            }
+        } else {
+            for (y = 0; y < HISTORY_H; y++, column += 4, o -= HISTORY_W) {
+                *o = column[0] | (column[1] << 8);
+            }
+        }
+    }
+    if (sHistoryTest && *frame >= 1200 && sHistoryTest == 1) {
+        sHistoryTest = 2;
+        for (y = HISTORY_H / 3; y < HISTORY_H / 2; y++) {
+            for (x = HISTORY_W / 3; x < HISTORY_W / 2; x++) {
+                out[y * HISTORY_W + x] = 0xFFFF;
+            }
+        }
+        plat_log("frame history test: white box in frame %d", *frame);
+    } else if (sHistoryTest == 2 && *frame >= 1290) {
+        sHistoryTest = 0;
+        gPlatSnapshotRequested = 1;
+    }
+    sHistoryFrame[sHistoryNext] = *frame;
+    sHistoryNext = (sHistoryNext + 1) % sHistorySlots;
+    sHistoryNs += plat_time_ns() - start;
+    if (++sHistorySampled == 600) {
+        plat_log("frame history: %llu us a frame", sHistoryNs / 1000 / 600);
+        sHistorySampled = 0;
+        sHistoryNs = 0;
+    }
+}
+
+/* Called once this frame's picture has been queued for sRecentScreen. */
+static void history_note_copy(void) {
+    int *frame;
+    if (sHistorySlots == 0 || sRecentScreen == NULL) {
+        return;
+    }
+    frame = history_buffer_frame(sRecentScreen, 1);
+    *frame = sFrameCount - 1; // The frame just ended (sFrameCount already counts it).
+}
+
+static inline int history_luma(u16 c) {
+    return (((c >> 11) << 3) + ((c >> 5) & 0x3F) * 8 + ((c & 0x1F) << 3)) >> 2; // 0..255
+}
+
+/*
+ * How much picture b looks like a flash between a and c, the frames `gap` before and after it: the pixels clearly
+ * different from both, while those two agree. A camera turning or a picture fading changes b about half as much as
+ * it changes the two, so it scores little; a scene change scores nothing.
+ */
+static int history_flash_pixels(const u16 *a, const u16 *b, const u16 *c) {
+    int i, count = 0;
+    for (i = 0; i < HISTORY_PIXELS; i++) {
+        int la = history_luma(a[i]), lb = history_luma(b[i]), lc = history_luma(c[i]);
+        int da = abs(lb - la), dc = abs(lb - lc), d = da < dc ? da : dc;
+        if (d - abs(la - lc) > 40) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/*
+ * Scores every frame of the history (oldest first in order[]): its flash pixels against the frames 1, 2, 4 and 8
+ * before and after it, whichever is most, so a glitch lasting a few frames is found too. Frames that aren't each the
+ * next one drawn (a gap in the history) are compared all the same.
+ */
+static void history_score(int *order, int count, int *score, int *gapOf) {
+    static const int gaps[4] = { 1, 2, 4, 8 };
+    int i, g;
+    for (i = 0; i < count; i++) {
+        score[i] = 0;
+        gapOf[i] = 1;
+        for (g = 0; g < 4; g++) {
+            int k = gaps[g], s;
+            if (i - k < 0 || i + k >= count) {
+                break;
+            }
+            s = history_flash_pixels(sHistory + order[i - k] * HISTORY_PIXELS, sHistory + order[i] * HISTORY_PIXELS,
+                                     sHistory + order[i + k] * HISTORY_PIXELS);
+            if (s > score[i]) {
+                score[i] = s;
+                gapOf[i] = k;
+            }
+        }
+    }
+}
+
+/* Scores the history, puts each frame's score in the list of recent frames, and saves the frames that look most
+ * like a flash with those they were compared with: diff_NNNNN_flash.bin, a header (the letters DKRH, width, height,
+ * pictures) then for each picture its frame number and RGB565 pixels, three for each flash (before, it, after). */
+static void history_save(int snapshotFrame) {
+    static int order[HISTORY_FRAMES], score[HISTORY_FRAMES], gapOf[HISTORY_FRAMES];
+    int pick[HISTORY_PICKS], picks = 0, count = 0, i, k;
+    unsigned long long start = plat_time_ns();
+    char path[256];
+    u32 *file;
+
+    if (sHistorySlots == 0) {
+        return;
+    }
+    for (i = 0; i < sHistorySlots; i++) {
+        int slot = (sHistoryNext + i) % sHistorySlots;
+        if (sHistoryFrame[slot] >= 0) {
+            order[count++] = slot;
+        }
+    }
+    history_score(order, count, score, gapOf);
+    for (i = 0; i < count; i++) {
+        for (k = 0; k < TIMING_FRAMES; k++) {
+            if (sTiming[k].frame == sHistoryFrame[order[i]]) {
+                sTiming[k].flash = score[i];
+            }
+        }
+    }
+    // The highest scores, at least 8 frames apart (one flash is one pick).
+    while (picks < HISTORY_PICKS) {
+        int best = -1;
+        for (i = 0; i < count; i++) {
+            int near = 0;
+            for (k = 0; k < picks; k++) {
+                near |= abs(i - pick[k]) < 8;
+            }
+            if (!near && score[i] > 0 && (best < 0 || score[i] > score[best])) {
+                best = i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        pick[picks++] = best;
+    }
+    plat_log("frame history: %d frames (%d to %d), scored in %llu ms; most like a flash:", count,
+             count > 0 ? sHistoryFrame[order[0]] : -1, count > 0 ? sHistoryFrame[order[count - 1]] : -1,
+             (plat_time_ns() - start) / 1000000ULL);
+    for (k = 0; k < picks; k++) {
+        i = pick[k];
+        plat_log("  frame %d: %d of %d pixels, against frames %d and %d", sHistoryFrame[order[i]], score[i],
+                 HISTORY_PIXELS, sHistoryFrame[order[i - gapOf[i]]], sHistoryFrame[order[i + gapOf[i]]]);
+    }
+    if (picks == 0) {
+        plat_log("  none");
+        return;
+    }
+    file = malloc(16 + (size_t) picks * 3 * (4 + HISTORY_PIXELS * 2));
+    if (file == NULL) {
+        plat_log("frame history: no memory to save it");
+        return;
+    }
+    file[0] = 0x48524B44; // "DKRH"
+    file[1] = HISTORY_W;
+    file[2] = HISTORY_H;
+    file[3] = picks * 3;
+    {
+        u8 *p = (u8 *) (file + 4);
+        for (k = 0; k < picks; k++) {
+            int j, at[3] = { pick[k] - gapOf[pick[k]], pick[k], pick[k] + gapOf[pick[k]] };
+            for (j = 0; j < 3; j++) {
+                u32 frameNumber = (u32) sHistoryFrame[order[at[j]]];
+                memcpy(p, &frameNumber, 4);
+                memcpy(p + 4, sHistory + order[at[j]] * HISTORY_PIXELS, HISTORY_PIXELS * 2);
+                p += 4 + HISTORY_PIXELS * 2;
+            }
+        }
+    }
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_flash.bin", plat_data_dir(), snapshotFrame);
+    plat_save_file_later(path, file, 16 + picks * 3 * (4 + HISTORY_PIXELS * 2)); /* Frees file. */
+}
+
+/* Saves the recent frames most likely to show a line as diff_NNNNN_recentK.bin (width, height, then BGR8), and
+ * logs every frame's score. Called once the GPU has finished the snapshot frame, so the ring is idle. */
 static void save_recent_frames(int snapshotFrame) {
     int score[RECENT_SLOTS], where[RECENT_SLOTS], i, k;
     char path[256];
 
+    history_save(snapshotFrame);
     log_timing();
     for (i = 0; i < sRecentCount; i++) {
         score[i] = -1;
@@ -2185,6 +2461,7 @@ static void bind_target(C3D_RenderTarget *target) {
 
 /* Draws count vertices from vertex on, or the count vertices the indices name; once, or in 3D once for each eye. */
 static void draw_prims(int vertex, int count, const u16 *indices) {
+    sFrameDraws++;
     if (!sStereo || sOnceFrame) {
         if (indices != NULL) {
             C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
@@ -3084,6 +3361,7 @@ void gfxb_end_frame(void) {
             wait_for_present();
         }
         find_recent_screen();
+        history_sample();
         watch_for_line();
         sTripleGet = sTripleFrame; // citro3d's display transfer goes to our buffer (see sTripleFrame)
         if (full_flush()) {
@@ -3092,6 +3370,7 @@ void gfxb_end_frame(void) {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
         sTripleGet = 0;
+        history_note_copy();
         record_recent_frame();
     }
     sFrameStarted = -1; // A frame has been drawn, so the target holds an image.
@@ -3979,6 +4258,9 @@ static int bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV)
     C3DTexture *t = (tex != NULL) ? (C3DTexture *) tex->backendData : NULL;
     C3D_Tex *bind = (t != NULL) ? &t->tex : &sWhiteTex;
     int changed = !sGpu.known || bind != sGpu.tex[unit];
+    if (tex != NULL && t == NULL) {
+        sFrameNoGpuTex++;
+    }
     if (t != NULL && t->levels > 0 && t->tinted != sMipmapsShown && tex->pixels != NULL && !in_vram(t->tex.data)) {
         // The Show setting changed since the levels were built. The GPU may still be drawing the last frame with
         // them, which can show one frame of mixed levels.

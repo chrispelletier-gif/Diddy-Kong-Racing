@@ -40,7 +40,7 @@
 #define REPORT_LABEL "3ds-bug-report"
 /* Compressed size of all the files of one report; each 45 KB is one comment on the issue. */
 #define MAX_ATTACHMENT_BYTES (900 * 1024)
-#define MAX_FILES 16
+#define MAX_FILES 18
 
 extern u32 __ctru_heap_size;
 int port_gfx_frame_count(void);
@@ -766,6 +766,10 @@ static void report_now(void) {
         int frame = gPlatSnapshotSaved, largeRecent;
         snprintf(report.title, sizeof(report.title), "[3DS bug report] frame %d", frame);
         snprintf(name, sizeof(name), "diff_%05d_log.txt", frame);
+        add_file(&report, name);
+        // The frames of the last few seconds most like a flash (gfx_c3d.c, history_save): a glitch seen for a moment
+        // is over before the snapshot.
+        snprintf(name, sizeof(name), "diff_%05d_flash.bin", frame);
         add_file(&report, name);
         // The recent frame most likely to show the glitch, before the larger files (see save_recent_frames). In 3D (both
         // eyes) or at 800 pixels it is twice the size, so it goes after them instead of using up the attachment budget.
