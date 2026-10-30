@@ -1,6 +1,7 @@
 /* Nintendo 3DS (libctru) implementation of the platform layer. */
 #include "plat.h"
 #include "bottom_screen.h"
+#include "setup_screen.h"
 #include "settings.h"
 
 #include <3ds.h>
@@ -47,6 +48,7 @@ static int sRcpCore;
 static int sAudioCore;
 static int sSyscoreShare; // The system core's share lent to the renderer (percent), when it runs there.
 static LightLock sConsoleLock;
+static int sNew3DS;
 
 static void watchdog_start(void);
 
@@ -76,6 +78,7 @@ void plat_init(void) {
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
     // DKR_SINGLE_CORE=1 keeps everything on the application core, as on an Old 3DS.
     APT_CheckNew3DS(&isNew3DS);
+    sNew3DS = isNew3DS;
     if (isNew3DS) {
         osSetSpeedupEnable(true);
     }
@@ -702,6 +705,7 @@ void plat_3ds_console_init(void) {
 void plat_rom_loaded(void) {
     LightLock_Lock(&sConsoleLock);
     bs_load_assets();
+    bs_set_style(settings_get("bottomstyle", 0));
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
     screen_thread_start(sRcpCore == 1 ? 0 : sRcpCore);
@@ -765,6 +769,14 @@ static int same_standing(const RaceHud *a, const RaceHud *b) {
     return 1;
 }
 
+/* The bottom screen's look (Race HUD page, port_race_hud.c). */
+void plat_set_bottom_style(int style) {
+    LightLock_Lock(&sConsoleLock);
+    bs_set_style(style);
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+}
+
 void plat_set_race_hud(const RaceHud *hud) {
     static int sShown, sRacing;
     static RaceHud sLast;
@@ -795,6 +807,59 @@ void plat_set_race_hud(const RaceHud *hud) {
     }
 }
 
+/*
+ * The first-run setup (port_setup.c, setup_screen.h): the game thread's pages, drawn over the whole screen, buttons
+ * and all; while they show, every tap goes to them (plat_3ds_setup_touch), and the game thread takes it.
+ */
+static volatile int sSetupShown;
+static volatile int sSetupTap = SETUP_HIT_NONE;
+
+int plat_first_run_setup(void) {
+    return 1;
+}
+
+int plat_system_french(void) {
+    u8 language = CFG_LANGUAGE_EN;
+    if (R_SUCCEEDED(cfguInit())) {
+        CFGU_GetSystemLanguage(&language);
+        cfguExit();
+    }
+    return language == CFG_LANGUAGE_FR;
+}
+
+int plat_can_60fps(void) {
+    return sNew3DS;
+}
+
+void plat_set_setup_screen(const SetupScreen *screen) {
+    LightLock_Lock(&sConsoleLock);
+    bs_set_setup(screen);
+    sSetupShown = screen != NULL;
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+}
+
+int plat_take_setup_tap(void) {
+    int tap = sSetupTap;
+    sSetupTap = SETUP_HIT_NONE;
+    return tap;
+}
+
+/* A touch (update_3ds_touch): nonzero if the setup is showing, which takes it. */
+int plat_3ds_setup_touch(int x, int y) {
+    int hit;
+    if (!sSetupShown) {
+        return 0;
+    }
+    LightLock_Lock(&sConsoleLock);
+    hit = bs_setup_hit(x, y);
+    LightLock_Unlock(&sConsoleLock);
+    if (hit != SETUP_HIT_NONE) {
+        sSetupTap = hit;
+    }
+    return 1;
+}
+
 /* The profiler's readout, under the messages. */
 void plat_overlay_show(const char *text) {
     LightLock_Lock(&sConsoleLock);
@@ -822,10 +887,20 @@ void plat_status(const char *fmt, ...) {
     char buffer[256];
     va_list args;
     va_start(args, fmt);
+    va_list french;
+    va_copy(french, args);
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     log_line("", buffer);
-    plat_3ds_console_line(buffer);
+    // The log stays English; the bottom screen shows the game's language (port_text).
+    if (port_text_french()) {
+        char shown[256];
+        vsnprintf(shown, sizeof(shown), port_text(fmt), french);
+        plat_3ds_console_line(port_text(shown));
+    } else {
+        plat_3ds_console_line(buffer);
+    }
+    va_end(french);
 }
 
 static void status_lines(const char *first, const char *second) {

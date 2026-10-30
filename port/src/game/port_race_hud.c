@@ -34,6 +34,7 @@ void plat_set_race_hud(const RaceHud *hud);
 /* Whether there is a bottom screen to show the race HUD on. */
 int plat_race_hud_screen(void);
 int plat_race_hud_covered(void);
+void plat_set_bottom_style(int style);
 
 extern s32 gMinimapDotOffsetX;
 extern s16 gTTGhostTimeToBeat; // T.T.'s time on this track (objects.c), while his ghost is out.
@@ -666,19 +667,29 @@ void port_race_hud_frame(s32 updateRate) {
     plat_set_race_hud(&hud);
 }
 
-/* The Race HUD row of the Settings menu (and SCREEN OPTIONS in the game's menus). */
+/* The Race HUD page of the Settings menu (and SCREEN OPTIONS in the game's menus): where the HUD goes, and how the bottom screen looks. */
 int race_hud_option_count(void) {
-    return 1;
+    return 2;
 }
 
 const char *race_hud_option_label(int index) {
-    (void) index;
-    return "Race HUD on";
+    return index == 1 ? "Bottom screen look" : "Race HUD on";
+}
+
+static const char *const sLookNames[4] = { "Classic", "Glass", "Broadcast", "Dock" };
+
+s32 port_bottom_style(void) {
+    const char *env = plat_getenv("DKR_BOTTOM_STYLE");
+    s32 value = env != NULL ? atoi(env) : settings_get("bottomstyle", 0);
+    return (value < 0 || value > 3) ? 0 : value;
 }
 
 void race_hud_option_value(int index, char *out, int size) {
     static const char *const sNames[3] = { "Top", "Bottom", "Both" };
-    (void) index;
+    if (index == 1) {
+        plat_snprintf(out, size, "%s", sLookNames[port_bottom_style()]);
+        return;
+    }
     plat_snprintf(out, size, "%s", sNames[port_race_hud_setting()]);
 }
 
@@ -686,7 +697,12 @@ void race_hud_option_change(int index, int step) {
     // Bottom, Both, Top: the order the row steps through.
     static const s32 sOrder[3] = { RACE_HUD_BOTTOM, RACE_HUD_BOTH, RACE_HUD_TOP };
     s32 at = 0;
-    (void) index;
+    if (index == 1) {
+        s32 look = (port_bottom_style() + (step < 0 ? 3 : 1)) % 4;
+        settings_set("bottomstyle", look);
+        plat_set_bottom_style(look);
+        return;
+    }
     while (at < 2 && sOrder[at] != port_race_hud_setting()) {
         at++;
     }
@@ -694,7 +710,11 @@ void race_hud_option_change(int index, int step) {
 }
 
 const char *race_hud_option_hint(int index) {
-    (void) index;
+    if (index == 1) {
+        static const char *const sHints[4] = { "The game's own boxes", "Soft glass cards, round buttons",
+                                               "Race TV slabs in red and yellow", "Few boxes, icon bar below" };
+        return sHints[port_bottom_style()];
+    }
     switch (port_race_hud_setting()) {
         case RACE_HUD_TOP:
             return "Lap, item, map on the top screen";

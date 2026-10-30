@@ -319,28 +319,100 @@ static const char *results_file(void) {
     return sModes[sMode].resultsFile;
 }
 
-/* Appends text to a file in the data directory. */
-static void append_file(const char *name, const char *text) {
-    char path[256];
-    unsigned int size = 0, length = strlen(text);
-    char *old, *buffer;
+/*
+ * The results and state files are written by a thread of their own. On the 3DS every file opened, replaced or renamed
+ * on the SD card can take 100 ms and more (looking up a name reads the whole data directory, which keeps every bug
+ * report snapshot), and the results file used to be read and written whole: writing them as a race ended held the
+ * game for most of a second at the finish line (test runs #250 and #254: "long game frame: 773 / 829 ms" right after
+ * each race's results line). The writes keep their order; whatever reads the files back first waits for them
+ * (io_flush).
+ */
+#define IO_JOBS 16
 
-    make_path(path, sizeof(path), name);
-    old = plat_load_file(path, &size);
-    buffer = plat_malloc(size + length);
-    if (buffer == NULL) {
-        plat_free(old);
+typedef struct IoJob {
+    char path[256];
+    char *text;
+    char *header;       // Appends: written first if the file doesn't exist yet (or NULL).
+    s32 append;         // Added to the end of the file, else it replaces the file.
+} IoJob;
+
+static IoJob sIoJobs[IO_JOBS];
+static volatile u32 sIoQueued, sIoDone; // Jobs queued by the game thread, jobs the writer has finished.
+static PlatSem *sIoWake;
+
+static void io_thread(UNUSED void *arg) {
+    for (;;) {
+        IoJob *job;
+        unsigned long long start;
+        plat_sem_wait(sIoWake);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        job = &sIoJobs[sIoDone % IO_JOBS];
+        start = plat_time_ns();
+        if (job->append) {
+            if (job->header != NULL) {
+                char probe[1];
+                if (plat_load_file_start(job->path, probe, sizeof(probe)) < 0) {
+                    plat_append_file(job->path, job->header, strlen(job->header));
+                }
+            }
+            plat_append_file(job->path, job->text, strlen(job->text));
+        } else {
+            plat_save_file(job->path, job->text, strlen(job->text));
+        }
+        if (plat_time_ns() - start > 50000000ULL) {
+            port_log("autorun: writing %s took %d ms", job->path, (int) ((plat_time_ns() - start) / 1000000ULL));
+        }
+        plat_free(job->text);
+        plat_free(job->header);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        sIoDone++;
+    }
+}
+
+/* Waits until the writer has written everything queued. */
+static void io_flush(void) {
+    while (sIoDone != sIoQueued) {
+        plat_sleep_ns(1000000);
+    }
+}
+
+/* Hands a file write to the writer thread (text is copied). */
+static void io_queue(const char *name, const char *text, const char *header, s32 append) {
+    IoJob *job;
+    char *copy, *headerCopy = NULL;
+    u32 length = strlen(text);
+    if (sIoWake == NULL) {
+        sIoWake = plat_sem_create(0);
+        // Below every game thread, on the game's core, which is idle most of each frame.
+        plat_thread_create(io_thread, NULL, 2, PLAT_THREAD_GAME, "autorun files");
+    }
+    while (sIoQueued - sIoDone >= IO_JOBS) {
+        plat_sleep_ns(1000000);
+    }
+    copy = plat_malloc(length + 1);
+    if (copy == NULL) {
         return;
     }
-    if (old != NULL) {
-        bcopy(old, buffer, size);
-        plat_free(old);
-    } else {
-        size = 0;
+    bcopy(text, copy, length + 1);
+    if (header != NULL) {
+        headerCopy = plat_malloc(strlen(header) + 1);
+        if (headerCopy != NULL) {
+            bcopy(header, headerCopy, strlen(header) + 1);
+        }
     }
-    bcopy(text, buffer + size, length);
-    plat_save_file(path, buffer, size + length);
-    plat_free(buffer);
+    job = &sIoJobs[sIoQueued % IO_JOBS];
+    make_path(job->path, sizeof(job->path), name);
+    job->text = copy;
+    job->header = headerCopy;
+    job->append = append;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    sIoQueued++;
+    plat_sem_post(sIoWake);
+}
+
+/* Appends text to a file in the data directory, first writing header (if not NULL) when the file is new. */
+static void append_file(const char *name, const char *text, const char *header) {
+    io_queue(name, text, header, TRUE);
 }
 
 static void hash_text(const char *text) {
@@ -493,13 +565,11 @@ static void build_race_list(void) {
 /* running: the race under way (-1: none). recorded: its result is already in the results file. */
 static void save_state_recorded(s32 running, s32 recorded) {
     char text[176];
-    char path[256];
     plat_snprintf(text, sizeof(text),
                   "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nrecorded=%d\nfinished=%d\nproblems=%d\n",
                   (int) (sEnabled > 0), (unsigned int) sConfigHash, (int) sRun, (int) sNext, (int) running,
                   (int) recorded, (int) sFinished, (int) sProblems);
-    make_path(path, sizeof(path), state_file());
-    plat_save_file(path, text, strlen(text));
+    io_queue(state_file(), text, NULL, FALSE);
 }
 
 static void save_state(s32 running) {
@@ -542,7 +612,7 @@ static void record_problem(const char *what) {
     plat_snprintf(text, sizeof(text), "run %d race %d/%d: %s, %s, %s: %s\n", (int) sRun, (int) sNext + 1,
                   (int) sNumRaces, track_name(race->track), sCharacterNames[(s32) race->character],
                   sVehicleNames[(s32) race->vehicle], what);
-    append_file(PROBLEMS_FILE, text);
+    append_file(PROBLEMS_FILE, text, NULL);
     port_log("autorun: %s", text);
 }
 
@@ -575,30 +645,21 @@ static const char *graphics_setup(void) {
 
 /* Writes the results line of the race that just ended. stats may be NULL (the race never got going). */
 static void record_result(const char *outcome, s32 position, const ProfStats *stats) {
-    char path[256];
+    char header[640];
     char line[640];
-    unsigned int size;
-    void *existing;
     Race *race = &sRaces[sNext];
     ProfStats empty;
     u32 slow, i;
     s32 length;
 
-    make_path(path, sizeof(path), results_file());
-    existing = plat_load_file(path, &size);
-    if (existing == NULL) {
-        char header[512];
-        plat_snprintf(header, sizeof(header),
-                      "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
-                      "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
-                      "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
-                      "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
-                      "audio_gaps,audio_drops,sound,graphics\n",
-                      sModes[sMode].extraColumn ? "," : "",
-                      sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
-        append_file(results_file(), header);
-    }
-    plat_free(existing);
+    plat_snprintf(header, sizeof(header),
+                  "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
+                  "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
+                  "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
+                  "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
+                  "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
+                  "paced_20fps_pct,paced_slower_pct\n",
+                  sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
         stats = &empty;
@@ -635,11 +696,15 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     }
     length = strlen(line);
     // After the mode's own column, so the columns before keep their places in older results files.
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s\n",
+    // Then the frame pacing: the 1% low, and the share of game frames that took one retrace, two, three or more (measured
+    // between frames, so unlike pct_30fps it counts the frames the game meant to show at 60 but couldn't).
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
-                  plat_audio_setup(), graphics_setup());
-    append_file(results_file(), line);
+                  plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
+                  (int) pct(stats->pacedFrames[0], stats->gameFrames), (int) pct(stats->pacedFrames[1], stats->gameFrames),
+                  (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames));
+    append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (str_equal(outcome, "finished")) {
         sFinished++;
@@ -743,6 +808,7 @@ static void init(void) {
     sFpsSum = 0.0;
     sFpsCount = 0;
 
+    io_flush(); // A run that just ended may still be writing its state.
     make_path(path, sizeof(path), state_file());
     state = plat_load_file(path, &size);
     if (state != NULL && plat_getenv("DKR_AUTORUN_RESTART") == NULL) {
@@ -1011,8 +1077,9 @@ enum BenchColumn {
     COL_AUDIO_GAPS = COL_COUNT, // Only in results written since the sound columns were added (the benchmark: one on).
     COL_PCT_60FPS = COL_COUNT,  // The benchmark's second column of its own.
 };
-/* The most columns a line has: the benchmark's two, the sound's three and the graphics settings. */
-#define MAX_FIELDS (COL_COUNT + 6)
+/* The most columns a line has: the benchmark's two, the sound's three, the graphics settings and the frame pacing's
+ * four. */
+#define MAX_FIELDS (COL_COUNT + 10)
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 3
@@ -1023,6 +1090,8 @@ typedef struct BenchGroup {
     s32 races;
     double fps, pct30, pct60, rdp, gpu, audio, gaps;
     s32 worstFrame, worstGpu;
+    s32 pacedRaces; // Races with the frame pacing columns (results written before they were added have none).
+    double low1, paced[4];
     s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
 } BenchGroup;
 
@@ -1030,6 +1099,18 @@ static const char *const sLimitNames[BENCH_LIMITS] = { "GPU", "renderer CPU", "g
 
 static double bench_avg(double sum, s32 count) {
     return count ? sum / count : 0.0;
+}
+
+/* A group's frame pacing cells: the 1% low and the share of frames that took one retrace, two, three or more. */
+static const char *pacing_cells(const BenchGroup *g) {
+    static char text[48];
+    if (g->pacedRaces == 0) {
+        return "- | -";
+    }
+    plat_snprintf(text, sizeof(text), "%.1f | %.0f/%.0f/%.0f/%.0f", bench_avg(g->low1, g->pacedRaces),
+                  bench_avg(g->paced[0], g->pacedRaces), bench_avg(g->paced[1], g->pacedRaces),
+                  bench_avg(g->paced[2], g->pacedRaces), bench_avg(g->paced[3], g->pacedRaces));
+    return text;
 }
 
 /* Splits a results line into fields in place. Returns the number of fields. */
@@ -1148,6 +1229,14 @@ static void bench_summary(char *out, s32 size) {
         g->audio += parse_decimal(fields[COL_AUDIO]);
         gapsColumn = quick ? COL_AUDIO_GAPS : COL_AUDIO_GAPS + 1;
         g->gaps += numFields > gapsColumn ? port_atoi(fields[gapsColumn]) : 0;
+        // The frame pacing, after the sound's columns and the graphics settings.
+        if (numFields > gapsColumn + 8) {
+            g->pacedRaces++;
+            g->low1 += parse_decimal(fields[gapsColumn + 4]);
+            for (i = 0; i < 4; i++) {
+                g->paced[i] += parse_decimal(fields[gapsColumn + 5 + i]);
+            }
+        }
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -1167,13 +1256,15 @@ static void bench_summary(char *out, s32 size) {
             length = plat_snprintf(out, size,
                                    "\n### Quick test (averages of the finished races)\n\n"
                                    "No earlier quick test on this console to compare with; the next one will be.\n\n"
-                                   "| track | run, build | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame "
-                                   "| limit | audio ms | sound gaps |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n");
+                                   "| track | run, build | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | GPU ms "
+                                   "| worst GPU | rdp ms | worst frame | limit | audio ms | sound gaps |\n"
+                                   "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n");
         } else {
             length = plat_snprintf(out, size,
                                    "\n### Quick test: run %d against run %d (averages of the finished races)\n\n"
-                                   "| track | run, build | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame "
-                                   "| limit | audio ms | sound gaps |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
+                                   "| track | run, build | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | GPU ms "
+                                   "| worst GPU | rdp ms | worst frame | limit | audio ms | sound gaps |\n"
+                                   "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
                                    (int) sRun, (int) previousRun);
         }
     } else if (sMode == MODE_SWITCH) {
@@ -1182,16 +1273,16 @@ static void bench_summary(char *out, s32 size) {
                                "Each switch is flipped by itself; saved is against the usual settings' races. "
                                "Render settings, the bench's own in every race (see apply_config): 60 fps cap, "
                                "anti-aliasing 2x, Balanced widescreen, 400 pixels, 3D off.\n\n"
-                               "| track | switch | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | rdp ms | rdp saved "
-                               "| worst GPU | worst frame | limit |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n");
+                               "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
+                               "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | limit |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n");
     } else {
         length = plat_snprintf(out, size,
                                "\n### Render settings (averages of the finished races)\n\n"
                                "GPU saved is against the first setting, %s.\n\n"
-                               "| track | settings | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | worst GPU | "
-                               "rdp ms | worst frame | limit | audio ms | sound gaps |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
+                               "| track | settings | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
+                               "| GPU saved | worst GPU | rdp ms | worst frame | limit | audio ms | sound gaps |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
                                sBenchConfigs[0].name);
     }
     if (!quick) {
@@ -1213,9 +1304,9 @@ static void bench_summary(char *out, s32 size) {
                 if (sMode == MODE_SWITCH) {
                     length += plat_snprintf(
                         out + length, size - length,
-                        "| %s | %s | %d | %.1f | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s |\n",
+                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s |\n",
                         groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
-                        bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
+                        pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                         base->races ? "" : "?",
                         base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
                         bench_avg(g->rdp, g->races), base->races ? "" : "?",
@@ -1225,9 +1316,9 @@ static void bench_summary(char *out, s32 size) {
                 }
                 length += plat_snprintf(
                     out + length, size - length,
-                    "| %s | %s | %d | %.1f | %.0f%% | %.0f%% | %.1f | %s%.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
+                    "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
                     groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
-                    bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
+                    pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                     base->races ? "" : "?",
                     base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
                     (int) g->worstGpu, bench_avg(g->rdp, g->races), (int) g->worstFrame, sLimitNames[limit],
@@ -1252,9 +1343,9 @@ static void bench_summary(char *out, s32 size) {
                 return;
             }
             length += plat_snprintf(out + length, size - length,
-                                    "| %s | %s | %d | %.1f | %.0f%% | %.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
+                                    "| %s | %s | %d | %.1f | %s | %.0f%% | %.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
                                     groups[t][0].track, g->build, (int) g->races,
-                                    bench_avg(g->fps, g->races), bench_avg(g->pct30, g->races),
+                                    bench_avg(g->fps, g->races), pacing_cells(g), bench_avg(g->pct30, g->races),
                                     bench_avg(g->gpu, g->races), (int) g->worstGpu, bench_avg(g->rdp, g->races),
                                     (int) g->worstFrame, sLimitNames[limit], bench_avg(g->audio, g->races),
                                     g->gaps);
@@ -1267,7 +1358,7 @@ static void bench_summary(char *out, s32 size) {
         }
         length += plat_snprintf(out + length, size - length,
                                 "%s%s: %+.1f fps, 30 fps on %+.0f%% of frames, GPU %+.1f ms, rdp %+.1f ms, worst "
-                                "frame %+d ms, audio %+.2f ms.\n",
+                                "frame %+d ms, audio %+.2f ms",
                                 t == 0 ? "\n" : "", groups[t][0].track,
                                 bench_avg(on->fps, on->races) - bench_avg(off->fps, off->races),
                                 bench_avg(on->pct30, on->races) - bench_avg(off->pct30, off->races),
@@ -1275,6 +1366,15 @@ static void bench_summary(char *out, s32 size) {
                                 bench_avg(on->rdp, on->races) - bench_avg(off->rdp, off->races),
                                 (int) (on->worstFrame - off->worstFrame),
                                 bench_avg(on->audio, on->races) - bench_avg(off->audio, off->races));
+        if (length < size && off->pacedRaces > 0 && on->pacedRaces > 0) {
+            length += plat_snprintf(out + length, size - length, ", 1%% low %+.1f fps, frames slower than 30 fps %+.0f%%",
+                                    bench_avg(on->low1, on->pacedRaces) - bench_avg(off->low1, off->pacedRaces),
+                                    bench_avg(on->paced[2] + on->paced[3], on->pacedRaces) -
+                                        bench_avg(off->paced[2] + off->paced[3], off->pacedRaces));
+        }
+        if (length < size) {
+            length += plat_snprintf(out + length, size - length, ".\n");
+        }
     }
 }
 
@@ -1323,6 +1423,7 @@ static void send_results(const char *why) {
     char title[128];
     static char summary[6144];
     s32 length;
+    io_flush(); // The summaries and the attached files read the results back.
     plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
                   sMode == MODE_BENCH    ? "GPU benchmark "
                   : sMode == MODE_SWITCH ? "switch bench "
@@ -1354,7 +1455,7 @@ static void send_results(const char *why) {
     } else if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
         bench_summary(summary + length, sizeof(summary) - length);
     }
-    plat_status("%s %s: %d races, %d problems", sModes[sMode].name, why, (int) (sFinished + sProblems), (int) sProblems);
+    plat_status("%s %s: %d races, %d problems", port_text(sModes[sMode].name), port_text(why), (int) (sFinished + sProblems), (int) sProblems);
     plat_send_test_results(title, summary);
 }
 
@@ -1445,7 +1546,7 @@ static void handle_request(void) {
             return; // Nothing to race.
         }
         prof_window_start(PROF_WINDOW_OVERLAY);
-        plat_status("%s started: race %d of %d", sModes[sMode].name, (int) sNext + 1,
+        plat_status("%s started: race %d of %d", port_text(sModes[sMode].name), (int) sNext + 1,
                     (int) sNumRaces);
         if (get_game_mode() == GAMEMODE_INGAME) {
             sQuitPending = TRUE; // Out of the game, to the title screen where the races start.

@@ -155,13 +155,13 @@ static void row_value(int i, char *out, int size) {
     if (i == MAIN_AA) {
         snprintf(out, size, "%s", sAaNames[plat_3ds_antialias_setting()]);
     } else if (i == MAIN_FPS) {
-        snprintf(out, size, "%d fps", plat_frame_rate_setting());
+        snprintf(out, size, port_text("%d fps"), plat_frame_rate_setting());
     } else if (i == MAIN_MIPMAPS) {
         snprintf(out, size, "%s", sMipmapModes[plat_3ds_mipmap_setting()]);
     } else if (i == MAIN_COLOUR) {
         snprintf(out, size, "%s", sColourLevels[plat_3ds_colour_setting()]);
     } else if (i == MAIN_AHEAD) {
-        snprintf(out, size, "%d frame%s", plat_render_ahead(), plat_render_ahead() == 1 ? "" : "s");
+        snprintf(out, size, port_text("%d frame%s"), plat_render_ahead(), plat_render_ahead() == 1 ? "" : "s");
     } else if (i == MAIN_GPU_MATHS) {
         static const char *const sLevels[4] = { "Off", "On", "+ track", "+ track, models" };
         snprintf(out, size, "%s", sLevels[plat_gpu_maths_setting()]);
@@ -326,7 +326,7 @@ static void screen_row_value(int i, char *out, int size) {
     } else if (SCREEN_STEREO_ROW(i)) {
         int which = i - SCREEN_STEREO_FIRST, v = plat_3ds_stereo_tuning(which);
         if (which == 2) {
-            snprintf(out, size, v == 0 ? "On screen" : v > 0 ? "%d out" : "%d in", v > 0 ? v : -v);
+            snprintf(out, size, port_text(v == 0 ? "On screen" : v > 0 ? "%d out" : "%d in"), v > 0 ? v : -v);
         } else if (which == 3) {
             snprintf(out, size, "%s", v ? "On" : "Off");
         } else {
@@ -420,7 +420,7 @@ static const char *test_hint(int i) {
     static const char *const sStart[5] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
                                            "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
                                            NULL };
-    static char sSwitchHint[48];
+    static char sSwitchHint[64];
     if (port_autorun_enabled()) {
         return "The results so far go out as a report";
     }
@@ -429,7 +429,7 @@ static const char *test_hint(int i) {
         if (sets < 2) {
             return "No switches to test right now";
         }
-        snprintf(sSwitchHint, sizeof(sSwitchHint), "3 heavy tracks x %ld switch sets, ~%ld min", sets,
+        snprintf(sSwitchHint, sizeof(sSwitchHint), port_text("3 heavy tracks x %ld switch sets, ~%ld min"), sets,
                  (sets * 13 + 1) / 2);
         return sSwitchHint;
     }
@@ -529,7 +529,7 @@ static void draw(void) {
     if (sPage->note != NULL) {
         snprintf(menu.note, sizeof(menu.note), "%s", sPage->note);
     } else if (sPage == &sToolsPage) {
-        snprintf(menu.note, sizeof(menu.note), "Build %.32s", plat_build_version());
+        snprintf(menu.note, sizeof(menu.note), port_text("Build %.32s"), plat_build_version());
     } else {
         snprintf(menu.note, sizeof(menu.note), "Tap a value's arrows to change it");
     }

@@ -374,7 +374,7 @@ static void (*sShow)(const char *text);
 
 static void show_progress(const char *text) {
     char line[160];
-    snprintf(line, sizeof(line), "Bug report: %s", text);
+    snprintf(line, sizeof(line), port_text("Bug report: %s"), port_text(text));
     sShow(line);
 }
 
@@ -421,12 +421,13 @@ static int send_and_show(const ReportConfig *config, Report *report) {
     if (status == 0) {
         char line[360];
         const char *number = strrchr(result, '/');
-        snprintf(line, sizeof(line), "Bug report sent: issue #%s", number != NULL ? number + 1 : result);
+        snprintf(line, sizeof(line), port_text("Bug report sent: issue #%s"), number != NULL ? number + 1 : result);
         sShow(line);
         plat_log("bug report sent: %s", result);
     } else {
         char line[360];
-        snprintf(line, sizeof(line), "Bug report %s: %s", status > 0 ? "partly sent" : "not sent", result);
+        snprintf(line, sizeof(line), port_text("Bug report %s: %s"), port_text(status > 0 ? "partly sent" : "not sent"),
+                 result);
         sShow(line);
         plat_log("%s", line);
         if (status < 0) {

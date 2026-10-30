@@ -132,7 +132,8 @@ const char *saves_option_hint(int i) {
         if (save_backups_count(&sList) == 0) {
             return "Folders in sdmc:/3ds/dkr/backup";
         }
-        snprintf(sHint, sizeof(sHint), "%d of %d in sdmc:/3ds/dkr/backup", sPicked + 1, save_backups_count(&sList));
+        snprintf(sHint, sizeof(sHint), port_text("%d of %d in sdmc:/3ds/dkr/backup"), sPicked + 1,
+                 save_backups_count(&sList));
         return sHint;
     }
     return armed() ? "Overwrites your save, then quits" : "Your save is backed up first";

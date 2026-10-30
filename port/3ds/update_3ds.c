@@ -172,7 +172,7 @@ static void show_busy(const char *fmt, ...) {
     char text[64];
     va_list args;
     va_start(args, fmt);
-    vsnprintf(text, sizeof(text), fmt, args);
+    vsnprintf(text, sizeof(text), port_text(fmt), args);
     va_end(args);
     plat_3ds_panel_text(text);
 }
@@ -523,7 +523,7 @@ static int check(void) {
     }
     net_3ds_end();
     if (!found) {
-        plat_status("Update: no builds found%s", config.token[0] == '\0' ? " (a private repo needs the token)" : "");
+        plat_status("Update: no builds found%s", config.token[0] == '\0' ? port_text(" (a private repo needs the token)") : "");
         return 0;
     }
 
@@ -532,7 +532,7 @@ static int check(void) {
         const Channel *channel = &sChannels[i];
         if (channel->found) {
             plat_status("%-6s %.7s %.16s %.10s%s", channel->label, channel->commit, channel->branch, channel->date,
-                        is_installed(channel) ? " (this)" : "");
+                        is_installed(channel) ? port_text(" (this)") : "");
         } else {
             plat_status("%-6s none", channel->label);
         }
@@ -713,9 +713,14 @@ static int install(Channel *channel) {
 }
 #endif
 
+int plat_3ds_setup_touch(int x, int y);
+
 /* The touch screen, from the game's controller polling (input_3ds.c). Returns nonzero if the touch was a button. */
 int update_3ds_touch(int x, int y) {
     int button, count = sButtonCount, cell = count > 1 ? 40 / count : 40;
+    if (plat_3ds_setup_touch(x, y)) {
+        return 1; // The first-run setup's tiles and buttons take every tap while they show.
+    }
     if (!sStarted || y >= BUTTON_BOTTOM) {
         return 0;
     }

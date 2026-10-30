@@ -178,6 +178,18 @@ int plat_save_file(const char *path, const void *data, unsigned int size) {
     return 1;
 }
 
+int plat_append_file(const char *path, const void *data, unsigned int size) {
+    FILE *f = fopen(path, "ab");
+    int ok;
+
+    if (f == NULL) {
+        return 0;
+    }
+    ok = fwrite(data, 1, size, f) == size;
+    ok = fclose(f) == 0 && ok;
+    return ok;
+}
+
 void *plat_malloc(size_t size) {
     return malloc(size);
 }

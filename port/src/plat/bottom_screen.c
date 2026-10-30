@@ -14,6 +14,7 @@
 #include <math.h>
 
 #include "bottom_screen.h"
+#include "setup_screen.h"
 #include "plat.h"
 #include "controls.h"
 #include "../../../include/asset_enums.h"
@@ -24,6 +25,11 @@ unsigned long port_rom_size(void);
 unsigned long port_assets_lut_start(void);
 unsigned long port_assets_lut_end(void);
 long port_inflate(const unsigned char *in, unsigned char *out);
+
+/*
+ * The screen is written in English; everything drawn with text() and the others below goes through port_text
+ * (plat.h), so it shows in French when the game is set to FRANCAIS.
+ */
 
 /******************************** Pictures and fonts from the ROM ********************************/
 
@@ -335,6 +341,7 @@ static void load_logo(void) {
 
 static unsigned sChanges;
 static void load_race_art(void);
+static void load_setup_art(void);
 
 void bs_load_assets(void) {
     static const int sFontAssets[3] = { ASSET_FONTS_SMALLFONT, ASSET_FONTS_BIGFONT, ASSET_FONTS_FUNFONT };
@@ -356,6 +363,7 @@ void bs_load_assets(void) {
     load_texture(ASSET_TEX2D_MENU_LABELOFFOPTIONNONSELECTED, &sOnOff[1][0]);
     load_texture(ASSET_TEX2D_MENU_LABELOFFOPTIONSELECTED, &sOnOff[1][1]);
     load_race_art();
+    load_setup_art();
     sChanges = (1 << BS_AREA_COUNT) - 1;
 }
 
@@ -409,7 +417,7 @@ static void fill(int x0, int y0, int x1, int y1, Colour c) {
 }
 
 /* A box with rounded corners and a one pixel edge, like the game's dialogue boxes. */
-static void box(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
+static void box_classic(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
     int y;
     fill(x0 + 1, y0 + 1, x1 - 1, y1 - 1, inside);
     fill(x0 + 2, y0, x1 - 2, y0 + 1, edge);
@@ -422,6 +430,157 @@ static void box(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
     plot(x1 - 2, y0 + 1, edge.r, edge.g, edge.b, edge.a);
     plot(x0 + 1, y1 - 2, edge.r, edge.g, edge.b, edge.a);
     plot(x1 - 2, y1 - 2, edge.r, edge.g, edge.b, edge.a);
+}
+
+/******************************** Looks ********************************/
+
+/*
+ * The bottom screen's look (a setting, port_race_hud.c): the game's own boxes (Classic), or one of three newer
+ * styles from the mockups, which draw every box, button and tab with smooth shapes instead. They keep the Classic
+ * layout, so taps land in the same places.
+ */
+static int sStyle;
+static int sRaceBaseMade;
+
+static Colour mix(Colour a, Colour b, int t, int span) {
+    Colour c;
+    if (span < 1) {
+        return a;
+    }
+    c.r = (unsigned char) (a.r + (b.r - a.r) * t / span);
+    c.g = (unsigned char) (a.g + (b.g - a.g) * t / span);
+    c.b = (unsigned char) (a.b + (b.b - a.b) * t / span);
+    c.a = (unsigned char) (a.a + (b.a - a.a) * t / span);
+    return c;
+}
+
+static void plot_c(int x, int y, Colour c, int cover) {
+    int a = c.a * cover / 255;
+    if (a > 0) {
+        plot(x, y, c.r, c.g, c.b, a);
+    }
+}
+
+/* How much of the pixel (x, y) a rounded rectangle covers, 0 to 255 (one pixel anti-aliased edge). */
+static int round_cover(int x, int y, int x0, int y0, int x1, int y1, int r) {
+    float px = x + 0.5f, py = y + 0.5f, dx, dy, d;
+    if (x < x0 || x >= x1 || y < y0 || y >= y1) {
+        return 0;
+    }
+    dx = (float) (x0 + r) - px;
+    if (px > x1 - r) {
+        dx = px - (float) (x1 - r);
+    }
+    dy = (float) (y0 + r) - py;
+    if (py > y1 - r) {
+        dy = py - (float) (y1 - r);
+    }
+    if (dx <= 0 || dy <= 0) {
+        return 255;
+    }
+    d = sqrtf(dx * dx + dy * dy) - (float) r + 0.5f;
+    return d <= 0 ? 255 : d >= 1 ? 0 : (int) ((1 - d) * 255);
+}
+
+/* A smooth rounded rectangle filled from top to bottom, with an optional edge of the given width (1 or 2). */
+static void smooth_box(int x0, int y0, int x1, int y1, int r, Colour top, Colour bottom, Colour edge, int edgeWidth) {
+    int x, y;
+    if (r > (x1 - x0) / 2) {
+        r = (x1 - x0) / 2;
+    }
+    if (r > (y1 - y0) / 2) {
+        r = (y1 - y0) / 2;
+    }
+    for (y = y0 < sClipTop ? sClipTop : y0; y < y1 && y < sClipEnd; y++) {
+        Colour c = mix(top, bottom, y - y0, y1 - y0 - 1);
+        for (x = x0; x < x1; x++) {
+            int outer = round_cover(x, y, x0, y0, x1, y1, r);
+            if (outer == 0) {
+                continue;
+            }
+            if (c.a > 0) {
+                plot_c(x, y, c, outer);
+            }
+            if (edge.a > 0) {
+                int inner = round_cover(x, y, x0 + edgeWidth, y0 + edgeWidth, x1 - edgeWidth, y1 - edgeWidth,
+                                        r > edgeWidth ? r - edgeWidth : 0);
+                plot_c(x, y, edge, outer * (255 - inner) / 255);
+            }
+        }
+    }
+}
+
+static void round_disc(int cx, int cy, int r, Colour c) {
+    smooth_box(cx - r, cy - r, cx + r, cy + r, r, c, c, (Colour){ 0, 0, 0, 0 }, 1);
+}
+
+static void bar(int x0, int y0, int x1, int y1, Colour c) {
+    smooth_box(x0, y0, x1, y1, 1, c, c, (Colour){ 0, 0, 0, 0 }, 1);
+}
+
+/* A slanted slab (leaning right, like a broadcast graphic), filled top to bottom, edges anti-aliased. */
+static void slab(int x0, int y0, int x1, int y1, int slant, Colour top, Colour bottom) {
+    int x, y, h = y1 - y0;
+    for (y = y0 < sClipTop ? sClipTop : y0; y < y1 && y < sClipEnd; y++) {
+        float left = x0 + (float) slant * (y1 - 1 - y) / (h > 1 ? h - 1 : 1);
+        float right = x1 - (float) slant * (y - y0) / (h > 1 ? h - 1 : 1);
+        Colour c = mix(top, bottom, y - y0, h - 1);
+        int xl = (int) left, xr = (int) right;
+        for (x = xl; x <= xr; x++) {
+            float cover = 1.0f;
+            if (x == xl) {
+                cover = 1.0f - (left - (float) xl);
+            }
+            if (x == xr) {
+                cover *= right - (float) xr;
+            }
+            plot_c(x, y, c, (int) (cover * 255));
+        }
+    }
+}
+
+static int is_lit_edge(Colour edge) {
+    return edge.r > 200 && edge.g > 150 && edge.b < 100 && edge.a > 200;
+}
+
+/* A panel or highlight in the current style. Classic draws the game's own rounded box. */
+static void box(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
+    int lit = is_lit_edge(edge), frame = edge.a > 0 && inside.a > 0;
+    if (sStyle == 0 || (inside.a == 0 && !lit)) {
+        // Classic, or the outline pieces the buttons are made of.
+        if (sStyle == 0 || edge.a != 0) {
+            box_classic(x0, y0, x1, y1, inside, edge);
+        }
+        return;
+    }
+    switch (sStyle) {
+        case 1: // Glass: frosted, smooth, softly edged.
+            if (lit) {
+                smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 8 : (y1 - y0) / 2, (Colour){ 255, 230, 100, 230 },
+                           (Colour){ 235, 150, 20, 230 }, (Colour){ 255, 250, 200, 200 }, 1);
+            } else if (frame) {
+                smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 7 : (y1 - y0) / 2, (Colour){ 40, 60, 140, 150 },
+                           (Colour){ 8, 20, 70, 160 }, (Colour){ 190, 215, 255, 80 }, 1);
+                fill(x0 + 6, y0 + 1, x1 - 6, y0 + 2, (Colour){ 255, 255, 255, 70 });
+            }
+            break;
+        case 2: // Broadcast: flat slanted slabs, the lit one in the logo's red-to-yellow.
+            if (lit) {
+                slab(x0, y0, x1, y1, 5, (Colour){ 235, 40, 40, 255 }, (Colour){ 255, 150, 20, 255 });
+            } else {
+                slab(x0, y0, x1, y1, 5, (Colour){ 30, 44, 110, 235 }, (Colour){ 22, 32, 92, 235 });
+            }
+            break;
+        default: // Dock: few boxes; panels are a whisper, the lit one a gold ring.
+            if (lit) {
+                smooth_box(x0, y0, x1, y1, (y1 - y0) / 2 < 14 ? (y1 - y0) / 2 : 14, (Colour){ 255, 255, 255, 40 },
+                           (Colour){ 255, 255, 255, 40 }, (Colour){ 255, 214, 40, 255 }, 1);
+            } else if (frame) {
+                smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 9 : (y1 - y0) / 2, (Colour){ 0, 20, 80, 70 },
+                           (Colour){ 0, 20, 80, 70 }, (Colour){ 0, 0, 0, 0 }, 1);
+            }
+            break;
+    }
 }
 
 /* Part of a picture, tinted (255 each: as it is); a black tint with alpha draws its shadow. */
@@ -477,7 +636,7 @@ static int advance(const Font *f, unsigned char c) {
     return f->fixedAdvance ? f->fixedAdvance : f->glyphs[c - 0x20].advance;
 }
 
-static int text_width(int font, const char *text) {
+static int text_width_as_is(int font, const char *text) {
     int width = 0;
     if (!font_ready(font)) {
         return (int) strlen(text) * 8;
@@ -488,8 +647,8 @@ static int text_width(int font, const char *text) {
     return width;
 }
 
-/* Draws text from x (until right, if text would go further) with its top at y. Returns where it ended. */
-static int text_clipped(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
+/* Draws text from x (until right, if text would go further) with its top at y, as it is. Returns where it ended. */
+static int text_clipped_as_is(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
     const Font *f = &sFonts[font];
     if (!font_ready(font)) {
         // Before the ROM's fonts are loaded: the 8x8 font, a little lower so it sits like the small font.
@@ -520,13 +679,36 @@ static int text_clipped(int font, int x, int y, const char *text, Colour colour,
     return x;
 }
 
+/* The same in the game's language (port_text). */
+static int text_width(int font, const char *text) {
+    return text_width_as_is(font, port_text(text));
+}
+
+static int text_clipped(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
+    return text_clipped_as_is(font, x, y, port_text(text), colour, shadow, right);
+}
+
 static int text(int font, int x, int y, const char *s, Colour colour, int shadow) {
     return text_clipped(font, x, y, s, colour, shadow, BS_WIDTH);
 }
 
+static void text_centred_as_is(int font, int x0, int x1, int y, const char *s, Colour colour, int shadow) {
+    int width = text_width_as_is(font, s);
+    text_clipped_as_is(font, x0 + (x1 - x0 - width) / 2, y, s, colour, shadow, x1);
+}
+
 static void text_centred(int font, int x0, int x1, int y, const char *s, Colour colour, int shadow) {
-    int width = text_width(font, s);
-    text_clipped(font, x0 + (x1 - x0 - width) / 2, y, s, colour, shadow, x1);
+    text_centred_as_is(font, x0, x1, y, port_text(s), colour, shadow);
+}
+
+/* Capitals of the text in the game's language, for the fun font's headings. */
+static void upper_text(char *out, int size, const char *s) {
+    int i;
+    s = port_text(s);
+    for (i = 0; s[i] != '\0' && i < size - 1; i++) {
+        out[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
+    }
+    out[i] = '\0';
 }
 
 /* Dense text (the profiler and the watchdog) in 8 pixel columns: the 8x8 font, or the small font centred. */
@@ -536,7 +718,7 @@ static void mono_text(int x, int y, const char *s, Colour colour) {
             mono_char(x, y, (unsigned char) *s, colour);
         } else {
             char one[2] = { *s, '\0' };
-            text_centred(FONT_SMALL, x, x + 8, y - 2, one, colour, 0);
+            text_centred_as_is(FONT_SMALL, x, x + 8, y - 2, one, colour, 0);
         }
     }
 }
@@ -549,14 +731,42 @@ static void make_background(void) {
     int x, y;
     for (y = 0; y < BS_HEIGHT; y++) {
         int r = 26 - y * 18 / BS_HEIGHT, g = 58 - y * 40 / BS_HEIGHT, b = 160 - y * 92 / BS_HEIGHT;
+        if (sStyle == 1 || sStyle == 3) {
+            r = 28 - y * 18 / BS_HEIGHT;
+            g = 76 - y * 48 / BS_HEIGHT;
+            b = 200 - y * 100 / BS_HEIGHT;
+        } else if (sStyle == 2) {
+            r = 20 - y * 12 / BS_HEIGHT;
+            g = 30 - y * 18 / BS_HEIGHT;
+            b = 84 - y * 44 / BS_HEIGHT;
+        }
         if (y >= BS_STATUS_Y) {
             r = 4;
             g = 8;
             b = 34;
         }
         for (x = 0; x < BS_WIDTH; x++) {
-            int light = (y < BS_STATUS_Y && ((x / 20) + (y / 20)) % 2 == 0) ? 7 : 0;
-            sBackground[y * BS_WIDTH + x] = rgb565(r + light, g + light, b + light);
+            int light = 0;
+            if (y < BS_STATUS_Y) {
+                if (sStyle == 0) {
+                    light = ((x / 20) + (y / 20)) % 2 == 0 ? 7 : 0;
+                } else if (sStyle == 1) {
+                    light = ((x / 20) + (y / 20)) % 2 == 0 ? 3 : 0;
+                    light += (60 - (x - 60) * (x - 60) / 80 - (y + 20) * (y + 20) / 90) > 0 ? 8 : 0;
+                } else if (sStyle == 2) {
+                    light = ((x + y) / 6) % 2 == 0 ? 3 : 0; // Faint diagonal stripes.
+                    if (y < 3) {
+                        r = 235 - x * 20 / BS_WIDTH;
+                        g = 40 + x * 100 / BS_WIDTH;
+                        b = 30;
+                    }
+                } else {
+                    // Dock: calm, with a soft darker swell near the bottom like the title's sea.
+                    light = y > 170 + (int) (4 * sinf(x / 24.0f)) ? -10 : 0;
+                }
+            }
+            sBackground[y * BS_WIDTH + x] = rgb565(r + light < 0 ? 0 : r + light, g + light < 0 ? 0 : g + light,
+                                                   b + light < 0 ? 0 : b + light);
         }
     }
     // A thin light line above the status strip.
@@ -564,6 +774,17 @@ static void make_background(void) {
         sBackground[(BS_STATUS_Y - 1) * BS_WIDTH + x] = rgb565(60, 90, 170);
     }
     sBackgroundMade = 1;
+}
+
+/* The look to draw in: 0 Classic, 1 Glass, 2 Broadcast, 3 Dock. Redraws everything. */
+void bs_set_style(int style) {
+    if (style < 0 || style > 3 || style == sStyle) {
+        return;
+    }
+    sStyle = style;
+    make_background();
+    sRaceBaseMade = 0;
+    sChanges = (1 << BS_AREA_COUNT) - 1;
 }
 
 /******************************** State ********************************/
@@ -584,6 +805,8 @@ typedef struct State {
     char status[2][48];
     int raceShown;
     RaceHud race;
+    int setupShown;
+    SetupScreen setup;
 } State;
 
 static State sState, sDrawn;
@@ -628,7 +851,15 @@ void bs_show_menu(const BsMenu *menu) {
 }
 
 int bs_race_hud_covered(void) {
-    return sState.menuShown || sState.overlayLines > 0;
+    return sState.menuShown || sState.overlayLines > 0 || sState.setupShown;
+}
+
+void bs_set_setup(const SetupScreen *setup) {
+    sState.setupShown = setup != NULL;
+    if (setup != NULL) {
+        sState.setup = *setup;
+    }
+    sChanges |= (1 << BS_AREA_TOP) | (1 << BS_AREA_BUTTONS);
 }
 
 void bs_set_buttons(const char *const *labels, int count) {
@@ -662,7 +893,14 @@ void bs_set_race_hud(const RaceHud *hud) {
 }
 
 unsigned bs_take_changes(void) {
-    unsigned changes = sChanges;
+    static int sFrench = -1;
+    unsigned changes;
+    if (port_text_french() != sFrench) {
+        // The game's language changed: everything is redrawn in it.
+        sFrench = port_text_french();
+        sChanges = (1 << BS_AREA_COUNT) - 1;
+    }
+    changes = sChanges;
     sChanges = 0;
     if (changes != 0) {
         sDrawn = sState;
@@ -784,9 +1022,9 @@ static void draw_controls(int y0, int y1) {
         char build[48];
         // Players see the version; debug builds the git describe, which names the commit too.
         if (PLAT_DEBUG_TOOLS) {
-            snprintf(build, sizeof(build), "Build %.24s", plat_build_version());
+            snprintf(build, sizeof(build), port_text("Build %.24s"), plat_build_version());
         } else {
-            snprintf(build, sizeof(build), "Version %.20s", plat_version());
+            snprintf(build, sizeof(build), port_text("Version %.20s"), plat_version());
         }
         text(FONT_SMALL, BS_WIDTH - 12 - text_width(FONT_SMALL, build), y0 + 6, build, DIM, 1);
     }
@@ -845,11 +1083,21 @@ static void draw_home(const State *s) {
  */
 static int draw_on_off(const char *value, int x, int y) {
     int on = strcmp(value, "On") == 0;
+    if (port_text_french()) {
+        return 0; // The labels say ON and OFF: the value is written out (OUI, NON) instead.
+    }
     // Of the game's two versions of each label, the one with white letters is the brighter one; OFF gets the other,
     // greyed.
     const Picture *label = on ? &sOnOff[0][0] : &sOnOff[1][1];
     if ((!on && strcmp(value, "Off") != 0) || label->rgba == NULL) {
         return 0;
+    }
+    if (sStyle == 1 || sStyle == 3) {
+        // A switch: gold with the knob right when on, dim with the knob left when off.
+        Colour track = on ? (Colour){ 245, 170, 30, 255 } : (Colour){ 20, 30, 80, 200 };
+        smooth_box(x, y + 2, x + 38, y + 18, 8, track, track, (Colour){ 255, 255, 255, on ? 120 : 70 }, 1);
+        round_disc(on ? x + 30 : x + 8, y + 10, 6, on ? WHITE : (Colour){ 150, 160, 195, 255 });
+        return 1;
     }
     picture_part(label, 0, 0, label->width, label->height, x, y, on ? WHITE : (Colour){ 150, 150, 160, 255 });
     return 1;
@@ -867,15 +1115,11 @@ static void arrow(int left, int x, int y) {
 /* The fun font's capitals (the game's headings, red edged in yellow), centred between x0 and x1 or from x0. */
 static void heading(int x0, int x1, int y, const char *s, int centred) {
     char upper[40];
-    int i;
-    for (i = 0; s[i] != '\0' && i < (int) sizeof(upper) - 1; i++) {
-        upper[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
-    }
-    upper[i] = '\0';
+    upper_text(upper, sizeof(upper), s);
     if (centred) {
-        text_centred(FONT_FUN, x0, x1, y, upper, WHITE, 1);
+        text_centred_as_is(FONT_FUN, x0, x1, y, upper, WHITE, 1);
     } else {
-        text_clipped(FONT_FUN, x0, y, upper, WHITE, 1, x1);
+        text_clipped_as_is(FONT_FUN, x0, y, upper, WHITE, 1, x1);
     }
 }
 
@@ -915,8 +1159,14 @@ static void draw_menu(const State *s) {
         } else {
             box(4, y, MENU_PANEL_X0 - 4, y + tabHeight - 2, (Colour){ 0, 8, 40, 70 }, (Colour){ 140, 180, 255, 80 });
         }
-        if (font_ready(FONT_FUN)) {
-            heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8, m->tabs[i], 1);
+        char upper[40];
+        upper_text(upper, sizeof(upper), m->tabs[i]);
+        /* A long name (French ones) that would touch the tab's edges drops to the small font. */
+        if (font_ready(FONT_FUN) && text_width_as_is(FONT_FUN, upper) <= MENU_PANEL_X0 - 16) {
+            heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8 + (sStyle != 0 ? 1 : 0), m->tabs[i], 1);
+        } else if (font_ready(FONT_FUN)) {
+            text_centred_as_is(FONT_SMALL, 4, MENU_PANEL_X0 - 4, y + tabHeight / 2 - 6 + (sStyle != 0 ? 1 : 0), upper,
+                               i == m->tab ? YELLOW : WHITE, 1);
         } else {
             text_clipped(FONT_SMALL, 10, y + tabHeight / 2 - 6, m->tabs[i], i == m->tab ? YELLOW : WHITE, 1,
                          MENU_PANEL_X0 - 4);
@@ -950,17 +1200,159 @@ static void draw_menu(const State *s) {
     text_clipped(FONT_SMALL, MENU_PANEL_X0 + 12, MENU_TIP_Y + 6, tip, HINT, 1, MENU_PANEL_X1 - 6);
 }
 
-/* Buttons in the style of the game's blue arrows: blue, edged in yellow; grey if they can't be tapped, green if on. */
-static void draw_buttons(const State *s) {
-    int i, count = s->buttonCount, cell = count > 1 ? 40 / count : 40;
+/* Small icons for the new styles' buttons, drawn smooth in a 14 pixel square around (cx, cy). */
+static void line_px(int x0, int y0, int x1, int y1, Colour c) {
+    int i, n = abs(x1 - x0) > abs(y1 - y0) ? abs(x1 - x0) : abs(y1 - y0);
+    for (i = 0; i <= n; i++) {
+        int x = x0 + (x1 - x0) * i / (n ? n : 1), y = y0 + (y1 - y0) * i / (n ? n : 1);
+        fill(x, y, x + 2, y + 2, c);
+    }
+}
 
-    if (count == 0) {
-        box(4, BS_BUTTONS_Y + 2, BS_WIDTH - 4, BS_STATUS_Y - 3, BOX_FILL, BOX_EDGE);
-        text_centred(FONT_SMALL, 8, BS_WIDTH - 8, BS_BUTTONS_Y + 6, s->panelText, YELLOW, 1);
+/* Returns 1 if the label has an icon. */
+static int draw_icon(const char *label, int cx, int cy, Colour c, Colour hole) {
+    int i;
+    if (strcmp(label, "Pause") == 0) {
+        bar(cx - 5, cy - 6, cx - 1, cy + 6, c);
+        bar(cx + 2, cy - 6, cx + 6, cy + 6, c);
+    } else if (strcmp(label, "Settings") == 0) {
+        static const signed char sTeeth[8][2] = { { 0, -6 }, { 4, -4 }, { 6, 0 }, { 4, 4 }, { 0, 6 }, { -4, 4 }, { -6, 0 }, { -4, -4 } };
+        for (i = 0; i < 8; i++) {
+            round_disc(cx + sTeeth[i][0], cy + sTeeth[i][1], 2, c);
+        }
+        round_disc(cx, cy, 5, c);
+        round_disc(cx, cy, 2, hole);
+    } else if (strcmp(label, "Controls") == 0) {
+        smooth_box(cx - 9, cy - 5, cx + 9, cy + 5, 5, c, c, (Colour){ 0, 0, 0, 0 }, 1);
+        bar(cx - 6, cy - 1, cx - 2, cy + 1, hole);
+        bar(cx - 5, cy - 2, cx - 3, cy + 2, hole);
+        round_disc(cx + 4, cy - 1, 1, hole);
+        round_disc(cx + 6, cy + 1, 1, hole);
+    } else if (strcmp(label, "Updates") == 0) {
+        bar(cx - 1, cy - 7, cx + 2, cy + 1, c);
+        line_px(cx - 5, cy - 1, cx, cy + 5, c);
+        line_px(cx + 5, cy - 1, cx, cy + 5, c);
+        bar(cx - 7, cy + 6, cx + 8, cy + 8, c);
+    } else if (strcmp(label, "Close") == 0) {
+        line_px(cx - 5, cy - 5, cx + 5, cy + 5, c);
+        line_px(cx + 5, cy - 5, cx - 5, cy + 5, c);
+    } else if (strcmp(label, "Prev") == 0) {
+        line_px(cx + 3, cy - 6, cx - 3, cy, c);
+        line_px(cx - 3, cy, cx + 3, cy + 6, c);
+    } else if (strcmp(label, "Next") == 0) {
+        line_px(cx - 3, cy - 6, cx + 3, cy, c);
+        line_px(cx + 3, cy, cx - 3, cy + 6, c);
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
+static void upper_case(const char *in, char *out, int size) {
+    int j;
+    for (j = 0; in[j] != '\0' && j < size - 1; j++) {
+        out[j] = (in[j] >= 'a' && in[j] <= 'z') ? in[j] - 32 : in[j];
+    }
+    out[j] = '\0';
+}
+
+/* The buttons in one of the newer styles: pills (Glass), slanted slabs (Broadcast), a dock of icons (Dock). */
+static void draw_buttons_styled(const char (*buttons)[40], int count) {
+    int i, cell = count > 1 ? 40 / count : 40;
+    int y0 = BS_BUTTONS_Y + 2, y1 = BS_STATUS_Y - 3;
+
+    if (sStyle == 3) {
+        fill(0, BS_BUTTONS_Y, BS_WIDTH, BS_STATUS_Y, (Colour){ 8, 16, 60, 235 });
+        fill(0, BS_BUTTONS_Y, BS_WIDTH, BS_BUTTONS_Y + 1, (Colour){ 255, 255, 255, 60 });
+    } else if (sStyle == 2) {
+        fill(0, BS_BUTTONS_Y, BS_WIDTH, BS_STATUS_Y, (Colour){ 6, 9, 30, 255 });
+    }
+    for (i = 0; i < count; i++) {
+        const char *label = buttons[i];
+        int grey = label[0] == '-', on = label[0] == '+', x0 = (i * cell + 1) * 8, x1 = (i + 1) * cell * 8;
+        const char *t = label + (grey || on);
+        char upper[40];
+        Colour ink = grey ? (Colour){ 130, 135, 160, 255 } : WHITE;
+        if (count == 1 || x1 > BS_WIDTH - 8) {
+            x1 = BS_WIDTH - 8;
+        }
+        if (grey && label[1] == '\0') {
+            continue;
+        }
+        if (sStyle == 1) {
+            Colour top = on ? (Colour){ 110, 230, 110, 255 } : (Colour){ 90, 160, 255, 255 };
+            Colour bottom = on ? (Colour){ 30, 150, 40, 255 } : (Colour){ 30, 80, 220, 255 };
+            if (grey) {
+                top = (Colour){ 130, 135, 155, 255 };
+                bottom = (Colour){ 80, 85, 105, 255 };
+            }
+            smooth_box(x0 - 1, y0, x1 + 1, y1 + 1, 11, (Colour){ 0, 0, 30, 90 }, (Colour){ 0, 0, 30, 90 },
+                       (Colour){ 0, 0, 0, 0 }, 1);
+            smooth_box(x0, y0, x1, y1, 11, top, bottom, (Colour){ 255, 255, 255, grey ? 80 : 150 }, 1);
+            fill(x0 + 8, y0 + 2, x1 - 8, y0 + 4, (Colour){ 255, 255, 255, 60 });
+        } else if (sStyle == 2) {
+            Colour top = i == 0 && !grey ? (Colour){ 235, 40, 40, 255 } : (Colour){ 52, 74, 168, 255 };
+            Colour bottom = i == 0 && !grey ? (Colour){ 255, 150, 20, 255 } : (Colour){ 36, 54, 134, 255 };
+            if (on) {
+                top = (Colour){ 60, 200, 90, 255 };
+                bottom = (Colour){ 40, 160, 70, 255 };
+            } else if (grey) {
+                top = (Colour){ 70, 74, 100, 255 };
+                bottom = (Colour){ 54, 58, 84, 255 };
+            }
+            slab(x0, y0 + 1, x1, y1, 8, top, bottom);
+        } else if (on) {
+            smooth_box(x0 + 8, y0 + 1, x1 - 8, y0 + 3, 1, (Colour){ 90, 220, 90, 255 }, (Colour){ 90, 220, 90, 255 },
+                       (Colour){ 0, 0, 0, 0 }, 1);
+        }
+        {
+            int cy = (y0 + y1) / 2;
+            int w;
+            // The language first, then capitals: port_text only knows the words as the menus write them.
+            upper_case(port_text(t), upper, sizeof(upper));
+            w = text_width(FONT_FUN, upper);
+            if (sStyle == 3) {
+                Colour dockInk = grey ? ink : (on ? (Colour){ 120, 235, 120, 255 } : WHITE);
+                int w2 = text_width(FONT_SMALL, t), iconW = 18;
+                int tx = x0 + (x1 - x0 - w2 - iconW) / 2;
+                if (!draw_icon(t, tx + 7, cy, dockInk, (Colour){ 8, 16, 60, 255 })) {
+                    iconW = 0;
+                    tx = x0 + (x1 - x0 - w2) / 2;
+                }
+                text_clipped(FONT_SMALL, tx + iconW, cy - 5, t, dockInk, 0, x1);
+            } else {
+                int iconW = 0;
+                Colour hole = sStyle == 1 ? (Colour){ 40, 100, 235, 255 } : (Colour){ 245, 90, 30, 255 };
+                if (strcmp(t, "Pause") == 0 || strcmp(t, "Settings") == 0 || strcmp(t, "Controls") == 0 ||
+                    strcmp(t, "Updates") == 0 || strcmp(t, "Close") == 0 || strcmp(t, "Prev") == 0 ||
+                    strcmp(t, "Next") == 0) {
+                    iconW = 20;
+                }
+                if (sStyle == 2 && !(i == 0 && !grey)) {
+                    hole = (Colour){ 40, 60, 140, 255 };
+                }
+                if (iconW) {
+                    int tx = x0 + (x1 - x0 - w - iconW) / 2;
+                    draw_icon(t, tx + 7, cy, ink, hole);
+                    text_clipped(FONT_FUN, tx + iconW, y0 + 5, upper, ink, !grey, x1);
+                } else {
+                    text_centred(FONT_FUN, x0, x1, y0 + 5, upper, ink, !grey);
+                }
+            }
+        }
+    }
+}
+
+/* Buttons in the style of the game's blue arrows: blue, edged in yellow; grey if they can't be tapped, green if on. */
+static void draw_button_row(const char (*buttons)[40], int count) {
+    int i, cell = count > 1 ? 40 / count : 40;
+
+    if (sStyle != 0) {
+        draw_buttons_styled(buttons, count);
         return;
     }
     for (i = 0; i < count; i++) {
-        const char *label = s->buttons[i];
+        const char *label = buttons[i];
         int grey = label[0] == '-', on = label[0] == '+', x0 = (i * cell + 1) * 8, x1 = (i + 1) * cell * 8, y, row;
         Colour top = { 70, 130, 255, 255 }, bottom = { 20, 50, 170, 255 }, edge = { 255, 214, 40, 255 };
         if (count == 1 || x1 > BS_WIDTH - 8) {
@@ -990,17 +1382,29 @@ static void draw_buttons(const State *s) {
         fill(x0 + 2, BS_BUTTONS_Y + 3, x1 - 2, BS_BUTTONS_Y + 4, (Colour){ 255, 255, 255, 90 });
         if (font_ready(FONT_FUN)) {
             char upper[40];
-            int j;
-            const char *t = label + (grey || on);
-            for (j = 0; t[j] != '\0' && j < (int) sizeof(upper) - 1; j++) {
-                upper[j] = (t[j] >= 'a' && t[j] <= 'z') ? t[j] - 32 : t[j];
-            }
-            upper[j] = '\0';
-            text_centred(FONT_FUN, x0, x1, BS_BUTTONS_Y + 6, upper, grey ? (Colour){ 120, 120, 130, 255 } : WHITE,
-                         !grey);
+            upper_text(upper, sizeof(upper), label + (grey || on));
+            text_centred_as_is(FONT_FUN, x0, x1, BS_BUTTONS_Y + 6, upper, grey ? (Colour){ 120, 120, 130, 255 } : WHITE,
+                               !grey);
         } else {
             text_centred(FONT_SMALL, x0, x1, BS_BUTTONS_Y + 6, label + (grey || on), grey ? DIM : WHITE, !grey);
         }
+    }
+}
+
+static void draw_buttons(const State *s) {
+    if (s->setupShown) {
+        // The setup's own: Back, the middle one and Next, a gap where one is left out.
+        char labels[3][40];
+        int i;
+        for (i = 0; i < 3; i++) {
+            snprintf(labels[i], sizeof(labels[i]), "%s", s->setup.buttons[i][0] != '\0' ? s->setup.buttons[i] : "-");
+        }
+        draw_button_row(labels, 3);
+    } else if (s->buttonCount == 0) {
+        box(4, BS_BUTTONS_Y + 2, BS_WIDTH - 4, BS_STATUS_Y - 3, BOX_FILL, BOX_EDGE);
+        text_centred(FONT_SMALL, 8, BS_WIDTH - 8, BS_BUTTONS_Y + 6, s->panelText, YELLOW, 1);
+    } else {
+        draw_button_row(s->buttons, s->buttonCount);
     }
 }
 
@@ -1372,7 +1776,7 @@ static void format_gap(int gap, char *out, int size) {
     }
     if (gap >= RACE_HUD_LAPPED || gap <= -RACE_HUD_LAPPED) {
         int laps = gap > 0 ? gap - RACE_HUD_LAPPED : -gap - RACE_HUD_LAPPED;
-        snprintf(out, size, "%c%d lap%s", gap > 0 ? '+' : '-', laps, laps == 1 ? "" : "s");
+        snprintf(out, size, port_text("%c%d lap%s"), gap > 0 ? '+' : '-', laps, laps == 1 ? "" : "s");
         return;
     }
     value = (gap < 0 ? -gap : gap) * 100 / 60;
@@ -1781,7 +2185,7 @@ static void draw_standing(const RaceHud *hud) {
     }
     if (hud->racerCount > 0) {
         char of[8];
-        snprintf(of, sizeof(of), "of %d", hud->racerCount);
+        snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
         text(FONT_SMALL, RIGHT_X1 - 8 - text_width(FONT_SMALL, of), 22, of, DIM, 1);
     }
     y = 44;
@@ -1825,11 +2229,11 @@ static void draw_bananas_and_laps(const RaceHud *hud) {
         }
     }
     if (done > 0) {
-        snprintf(label, sizeof(label), "Lap %d", done);
+        snprintf(label, sizeof(label), port_text("Lap %d"), done);
         text(FONT_SMALL, MIDDLE_X0 + 44, LOWER_Y0 + 42, label, HINT, 1);
         race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[done - 1], 1);
     } else if (timed > 0) {
-        snprintf(label, sizeof(label), "Lap %d", timed);
+        snprintf(label, sizeof(label), port_text("Lap %d"), timed);
         text(FONT_SMALL, MIDDLE_X0 + 44, LOWER_Y0 + 42, label, HINT, 1);
         race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[timed - 1], 1);
     }
@@ -1971,7 +2375,7 @@ static void draw_lap_list(const RaceHud *hud, int x0, int y0) {
     timed_laps(hud, &timed, &done);
     // The last two laps: the one being driven and the one before.
     for (i = timed > 2 ? timed - 2 : 0; i < timed; i++) {
-        snprintf(label, sizeof(label), "Lap %d", i + 1);
+        snprintf(label, sizeof(label), port_text("Lap %d"), i + 1);
         text(FONT_SMALL, x0 + 8, y, label, HINT, 1);
         race_time(x0 + 8, y + 11, hud->lapTimes[i], 1);
         y += 27;
@@ -2021,7 +2425,7 @@ static void draw_time_trial(const RaceHud *hud) {
     text(FONT_FUN, TOWER_X0 + 8, 9, "SPLITS", WHITE, 1);
     for (i = 0; i < hud->lapsTimed && i < RACE_HUD_LAPS && i < 4; i++) {
         int finished = i < hud->lapsTimed - 1 || hud->finished;
-        snprintf(label, sizeof(label), "Lap %d", i + 1);
+        snprintf(label, sizeof(label), port_text("Lap %d"), i + 1);
         text(FONT_SMALL, TOWER_X0 + 8, y, label, finished ? HINT : YELLOW, 1);
         if (finished && i < hud->bestLapCount && hud->bestLaps[i] > 0) {
             int d = hud->lapTimes[i] - hud->bestLaps[i];
@@ -2117,7 +2521,7 @@ static void draw_versus(const RaceHud *hud) {
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, 52, "Taj's challenge", YELLOW, 1);
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, 66, "Win: a new balloon", DIM, 1);
     } else {
-        snprintf(subtitle, sizeof(subtitle), "Round %d", hud->round > 0 ? hud->round : 1);
+        snprintf(subtitle, sizeof(subtitle), port_text("Round %d"), hud->round > 0 ? hud->round : 1);
         draw_head_to_head(hud, subtitle);
         draw_item(hud);
     }
@@ -2260,8 +2664,8 @@ static void draw_challenge(const RaceHud *hud) {
             }
         }
         text(FONT_FUN, RIGHT_X0 + 8, 9, hud->mode == RACE_HUD_MODE_EGGS ? "EGG COLLECTOR" : "BANANAS", WHITE, 1);
-        snprintf(line, sizeof(line), "First to %d %s", hud->goal,
-                 hud->mode == RACE_HUD_MODE_EGGS ? "eggs wins" : "wins");
+        snprintf(line, sizeof(line), port_text("First to %d %s"), hud->goal,
+                 port_text(hud->mode == RACE_HUD_MODE_EGGS ? "eggs wins" : "wins"));
         text(FONT_SMALL, RIGHT_X0 + 8, 32, line, HINT, 1);
         if (place >= 1 && place <= 8) {
             x = piece(&sPlaces[place - 1], RIGHT_X0 + 8, 48, 1);
@@ -2269,7 +2673,7 @@ static void draw_challenge(const RaceHud *hud) {
         }
         togo = me != NULL ? hud->goal - me->score : 0;
         if (togo > 0) {
-            snprintf(line, sizeof(line), "%d to go", togo);
+            snprintf(line, sizeof(line), port_text("%d to go"), togo);
             text(FONT_SMALL, RIGHT_X0 + 60, 62, line, DIM, 1);
         }
     }
@@ -2351,7 +2755,7 @@ static void draw_menu_save(const RaceHud *hud) {
     int i, k, x, y = 98;
     char line[48];
     text(FONT_FUN, 96, 9, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE", WHITE, 1);
-    snprintf(line, sizeof(line), "Save file %s", hud->name);
+    snprintf(line, sizeof(line), port_text("Save file %s"), hud->name);
     text(FONT_SMALL, 96, 26, line, DIM, 1);
     picture_scaled(&sBalloon, 14, SAVE_PANEL_Y0 + 7, 1, 1);
     text(FONT_SMALL, 48, SAVE_PANEL_Y0 + 6, "Balloons", HINT, 1);
@@ -2366,12 +2770,12 @@ static void draw_menu_save(const RaceHud *hud) {
         picture(&sTTAmulet[hud->ttAmulet], 170, SAVE_PANEL_Y0 + 6);
     }
     text(FONT_SMALL, 198, SAVE_PANEL_Y0 + 6, "T.T. amulet", HINT, 1);
-    snprintf(line, sizeof(line), "%d of 4 pieces", hud->ttAmulet);
+    snprintf(line, sizeof(line), port_text("%d of 4 pieces"), hud->ttAmulet);
     text(FONT_SMALL, 198, SAVE_PANEL_Y0 + 17, line, YELLOW, 1);
     if (hud->wizpigAmulet > 0 && hud->wizpigAmulet <= 4) {
         picture(&sWizpigAmulet[hud->wizpigAmulet], 170, SAVE_PANEL_Y0 + 30);
         text(FONT_SMALL, 198, SAVE_PANEL_Y0 + 30, "Wizpig amulet", HINT, 1);
-        snprintf(line, sizeof(line), "%d of 4 pieces", hud->wizpigAmulet);
+        snprintf(line, sizeof(line), port_text("%d of 4 pieces"), hud->wizpigAmulet);
         text(FONT_SMALL, 198, SAVE_PANEL_Y0 + 41, line, YELLOW, 1);
     }
     // Each world: its eight balloons (four races, four silver coin races), trophy, key and boss.
@@ -2474,6 +2878,402 @@ static void draw_race(const State *s) {
     draw_map_markers(hud);
 }
 
+/******** The first-run setup (setup_screen.h, port_setup.c): its pages of tiles, each with a little picture. ********/
+
+static Picture sSetupFace; /* Diddy's portrait at its own size: the kart in the tiles' pictures. */
+
+static void load_setup_art(void) {
+    load_texture(ASSET_TEX2D_HUD_KRUNCHICON + 9, &sSetupFace); // Diddy's (load_race_art's portrait order).
+}
+
+typedef struct Rect {
+    int x0, y0, x1, y1;
+} Rect;
+
+#define SETUP_TILES_Y 24
+#define SETUP_DOTS_Y 158
+#define SETUP_HELP_Y 186
+
+/* Where tile i of the page is. */
+static Rect setup_tile(const SetupScreen *s, int i) {
+    Rect r;
+    int n = s->tileCount, width;
+    if (s->page == SETUP_PAGE_SCREEN) {
+        // Four, two by two: a picture on the left of each, the words on the right.
+        r.x0 = 8 + (i % 2) * 154;
+        r.y0 = SETUP_TILES_Y + (i / 2) * 66;
+        r.x1 = r.x0 + 150;
+        r.y1 = r.y0 + 62;
+        return r;
+    }
+    width = (BS_WIDTH - 16 - (n - 1) * 6) / n;
+    r.x0 = 8 + i * (width + 6);
+    r.x1 = r.x0 + width;
+    r.y0 = SETUP_TILES_Y;
+    r.y1 = s->page == SETUP_PAGE_STYLE ? 178 : 152;
+    return r;
+}
+
+/* A picture scaled to w by h at x, y (nearest pixel), only inside the clip rectangle, at alpha (255: as it is). */
+static void picture_stretched(const Picture *p, int x, int y, int w, int h, Rect clip, int alpha) {
+    int i, j;
+    if (p->rgba == NULL || w <= 0 || h <= 0) {
+        return;
+    }
+    for (j = 0; j < h; j++) {
+        if (y + j < clip.y0 || y + j >= clip.y1) {
+            continue;
+        }
+        for (i = 0; i < w; i++) {
+            const unsigned char *t;
+            if (x + i < clip.x0 || x + i >= clip.x1) {
+                continue;
+            }
+            t = p->rgba + ((j * p->height / h) * p->width + i * p->width / w) * 4;
+            if (t[3] != 0) {
+                plot(x + i, y + j, t[0], t[1], t[2], t[3] * alpha / 255);
+            }
+        }
+    }
+}
+
+static void fill_clipped(int x0, int y0, int x1, int y1, Rect clip, Colour c) {
+    fill(x0 < clip.x0 ? clip.x0 : x0, y0 < clip.y0 ? clip.y0 : y0, x1 > clip.x1 ? clip.x1 : x1,
+         y1 > clip.y1 ? clip.y1 : y1, c);
+}
+
+/*
+ * A little race seen from behind the kart, in r: sky, grass, the road to the horizon, bananas on each side and Diddy
+ * in his kart. zoom scales it (1: a 4:3 picture's height fills r), edge stretches what is out beyond the 4:3 picture's
+ * sides, as a wide view does, tilt leans the horizon (pixels across r), ghosts trails the kart as motion does, and
+ * hud adds the N64's race info along the top.
+ */
+typedef struct Scene {
+    float zoom, edge;
+    int tilt, ghosts, hud, kartOffset;
+} Scene;
+
+static void draw_scene(Rect r, Scene sc) {
+    int w = r.x1 - r.x0, h = r.y1 - r.y0, cx = (r.x0 + r.x1) / 2, cy = (r.y0 + r.y1) / 2, x, y, i;
+    float unit = h / 36.0f * sc.zoom; // The scene is 48 by 36 units, a 4:3 picture.
+    int horizon = cy - (int) (3 * unit);
+    static const int sBananas[4] = { -15, 15, -27, 27 };
+
+    for (y = r.y0; y < r.y1; y++) {
+        for (x = r.x0; x < r.x1; x++) {
+            int line = horizon + sc.tilt * (x - cx) / (w > 0 ? w : 1), t;
+            if (y < line) {
+                t = (y - r.y0) * 255 / (h > 0 ? h : 1);
+                plot(x, y, 90 + t / 4, 150 + t / 5, 250, 255);
+            } else {
+                // The road narrows to the horizon; grass either side.
+                float depth = (float) (y - line) / (float) (r.y1 - line > 0 ? r.y1 - line : 1);
+                float half = (1.5f + 13.0f * depth) * unit;
+                int road = x > cx - half && x < cx + half;
+                if (road) {
+                    plot(x, y, 210, 175, 110, 255);
+                } else {
+                    plot(x, y, 70 + (int) (40 * depth), 160, 60, 255);
+                }
+            }
+        }
+    }
+    // Bananas: the near ones inside the 4:3 picture, the far ones only in a wide one.
+    for (i = 0; i < 4 && sBanana.rgba != NULL; i++) {
+        float u = sBananas[i], size = 5.0f * unit, stretch = (u < -24 || u > 24) || i >= 2 ? sc.edge : 1.0f;
+        int bw = (int) (size * stretch), bh = (int) size;
+        int bx = cx + (int) (u * unit * (i >= 2 ? (sc.edge + 1.0f) / 2.0f : 1.0f)) - bw / 2;
+        picture_stretched(&sBanana, bx, horizon + (int) (2 * unit), bw, bh, r, 255);
+    }
+    // The kart, with fading copies behind it for motion.
+    if (sSetupFace.rgba != NULL) {
+        int size = (int) (13 * unit), kx = cx - size / 2 + (int) (sc.kartOffset * unit), ky = cy + (int) (2 * unit);
+        for (i = sc.ghosts; i > 0; i--) {
+            picture_stretched(&sSetupFace, kx - i * size / 3, ky, size, size, r, 70 / i);
+        }
+        picture_stretched(&sSetupFace, kx, ky, size, size, r, 255);
+    }
+    if (sc.hud) {
+        // The N64's race info: the place on the left, laps and bananas in the middle, the time on the right.
+        int bar = (int) (2 * unit) + 1;
+        fill_clipped(cx - (int) (21 * unit), r.y0 + bar, cx - (int) (17 * unit), r.y0 + 3 * bar, r, YELLOW);
+        fill_clipped(cx - (int) (6 * unit), r.y0 + bar, cx + (int) (3 * unit), r.y0 + 2 * bar, r, WHITE);
+        fill_clipped(cx + (int) (9 * unit), r.y0 + bar, cx + (int) (21 * unit), r.y0 + 2 * bar, r, YELLOW);
+    }
+}
+
+/* A frame in the colour of a tile's border round a picture. */
+static void picture_frame(Rect r, int lit) {
+    Colour c = lit ? PICKED_EDGE : (Colour){ 140, 180, 255, 200 };
+    fill(r.x0 - 1, r.y0 - 1, r.x1 + 1, r.y0, c);
+    fill(r.x0 - 1, r.y1, r.x1 + 1, r.y1 + 1, c);
+    fill(r.x0 - 1, r.y0, r.x0, r.y1, c);
+    fill(r.x1, r.y0, r.x1 + 1, r.y1, c);
+}
+
+/* A 5:3 screen, as tall as fits in r and centred in it. */
+static Rect wide_screen_in(Rect r, int maxHeight) {
+    Rect s;
+    int h = r.y1 - r.y0 < maxHeight ? r.y1 - r.y0 : maxHeight, w = h * 5 / 3;
+    if (w > r.x1 - r.x0) {
+        w = r.x1 - r.x0;
+        h = w * 3 / 5;
+    }
+    s.x0 = (r.x0 + r.x1 - w) / 2;
+    s.x1 = s.x0 + w;
+    s.y0 = r.y0;
+    s.y1 = s.y0 + h;
+    return s;
+}
+
+/* The widescreen styles' pictures (0 4:3, 1 Wide, 2 Balanced, 3 Zoomed). */
+static void draw_screen_style(Rect r, int style, Scene sc) {
+    static const float sZoom[4] = { 1.0f, 1.0f, 1.1f, 1.25f };
+    static const float sEdge[4] = { 1.0f, 1.6f, 1.3f, 1.0f };
+    if (style == 0) {
+        int inner = (r.y1 - r.y0) * 4 / 3;
+        Rect middle = { (r.x0 + r.x1 - inner) / 2, r.y0, (r.x0 + r.x1 + inner) / 2, r.y1 };
+        fill(r.x0, r.y0, r.x1, r.y1, (Colour){ 0, 0, 0, 255 });
+        draw_scene(middle, sc);
+        return;
+    }
+    sc.zoom = sZoom[style];
+    sc.edge = sEdge[style];
+    draw_scene(r, sc);
+}
+
+/* The two screens of a 3DS, with the race info where the tile puts it (0 bottom, 1 top, 2 both). */
+static void draw_two_screens(Rect r, int where) {
+    int h = (r.y1 - r.y0 - 2) / 2, w = h * 5 / 3, i;
+    Rect top = { (r.x0 + r.x1 - w) / 2, r.y0, (r.x0 + r.x1 + w) / 2, r.y0 + h };
+    Rect bottom = { (r.x0 + r.x1) / 2 - h * 2 / 3, r.y0 + h + 2, (r.x0 + r.x1) / 2 + h * 2 / 3, r.y0 + 2 * h + 2 };
+    Scene sc = { 1.1f, 1.3f, 0, 0, where != 0, 0 };
+    draw_scene(top, sc);
+    picture_frame(top, 0);
+    fill(bottom.x0, bottom.y0, bottom.x1, bottom.y1, (Colour){ 20, 40, 120, 255 });
+    picture_frame(bottom, 0);
+    if (where == 1) {
+        return; // Nothing on the bottom screen.
+    }
+    // The standings tower down the left, a track map on the right.
+    for (i = 0; i < 4; i++) {
+        int y = bottom.y0 + 2 + i * (bottom.y1 - bottom.y0 - 4) / 4, rowHeight = (bottom.y1 - bottom.y0 - 4) / 4 - 1;
+        Rect row = { bottom.x0 + 2, y, bottom.x0 + (bottom.x1 - bottom.x0) / 2, y + rowHeight };
+        fill(row.x0, row.y0, row.x1, row.y1, i == 1 ? (Colour){ 255, 200, 40, 200 } : (Colour){ 60, 90, 190, 255 });
+        picture_stretched(&sPortraits[(i * 3 + 2) % 10], row.x0 + 1, row.y0, rowHeight, rowHeight, row, 255);
+    }
+    {
+        int mx = (bottom.x0 + bottom.x1) * 3 / 4 - 2, my = (bottom.y0 + bottom.y1) / 2;
+        int rx = (bottom.x1 - bottom.x0) / 6, ry = (bottom.y1 - bottom.y0) / 3, a;
+        for (a = 0; a < 64; a++) {
+            float t = a * (6.2831853f / 64);
+            plot(mx + (int) (rx * cosf(t)), my + (int) (ry * sinf(t)), 255, 255, 255, 255);
+        }
+    }
+}
+
+/* Whether x, y is inside a polygon of count points (even-odd rule). */
+static int inside(const float (*points)[2], int count, float x, float y) {
+    int i, j, in = 0;
+    for (i = 0, j = count - 1; i < count; j = i++) {
+        if ((points[i][1] > y) != (points[j][1] > y) &&
+            x < (points[j][0] - points[i][0]) * (y - points[i][1]) / (points[j][1] - points[i][1]) + points[i][0]) {
+            in = !in;
+        }
+    }
+    return in;
+}
+
+/* The flags on the language page, for the North American game: the United States for English, Canada for French. */
+static void draw_flag(Rect r, int french) {
+    // The maple leaf, in a square of 1 across (y down).
+    static const float sLeaf[][2] = {
+        { 0.50f, 0.05f }, { 0.43f, 0.20f }, { 0.36f, 0.17f }, { 0.40f, 0.38f }, { 0.30f, 0.28f }, { 0.27f, 0.34f },
+        { 0.15f, 0.31f }, { 0.20f, 0.44f }, { 0.13f, 0.48f }, { 0.30f, 0.62f }, { 0.27f, 0.70f }, { 0.47f, 0.67f },
+        { 0.47f, 0.88f }, { 0.53f, 0.88f }, { 0.53f, 0.67f }, { 0.73f, 0.70f }, { 0.70f, 0.62f }, { 0.87f, 0.48f },
+        { 0.80f, 0.44f }, { 0.85f, 0.31f }, { 0.73f, 0.34f }, { 0.70f, 0.28f }, { 0.60f, 0.38f }, { 0.64f, 0.17f },
+        { 0.57f, 0.20f },
+    };
+    static const Colour RED = { 210, 20, 40, 255 }, NAVY = { 20, 40, 120, 255 };
+    int w = r.x1 - r.x0, h = r.y1 - r.y0, x, y;
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            Colour c;
+            if (french) {
+                // Red quarters at the sides, white square in the middle with the red maple leaf.
+                if (x < w / 4 || x >= w - w / 4) {
+                    c = RED;
+                } else {
+                    float side = (float) (w - 2 * (w / 4));
+                    float u = (x - w / 4 + 0.5f) / side, v = (y + 0.5f) / h * 1.0f;
+                    // The leaf fills the middle square's height.
+                    u = 0.5f + (u - 0.5f) * side / h;
+                    c = inside(sLeaf, sizeof(sLeaf) / sizeof(sLeaf[0]), u, v) ? RED : WHITE;
+                }
+            } else {
+                // Thirteen stripes, red first, and the blue canton over the top seven with rows of white stars.
+                int stripe = y * 13 / h, cantonW = w * 2 / 5, cantonH = h * 7 / 13;
+                c = stripe % 2 == 0 ? RED : WHITE;
+                if (x < cantonW && y < cantonH) {
+                    int sx = x * 6 * 2 / cantonW, sy = y * 5 * 2 / cantonH;
+                    c = NAVY;
+                    if (sx % 2 == 1 && sy % 2 == 1 && w >= 40) {
+                        c = WHITE;
+                    }
+                }
+            }
+            plot(r.x0 + x, r.y0 + y, c.r, c.g, c.b, 255);
+        }
+    }
+}
+
+/* Draws a tile's picture in r. */
+static void draw_tile_art(const SetupScreen *s, int i, Rect r) {
+    Scene plain = { 1.1f, 1.3f, 0, 0, 0, 0 };
+    switch (s->page) {
+        case SETUP_PAGE_LANGUAGE:
+            draw_flag(r, i == 1);
+            break;
+        case SETUP_PAGE_STYLE:
+            if (i == SETUP_STYLE_CLASSIC) {
+                plain.hud = 1;
+                draw_screen_style(r, 0, plain);
+            } else {
+                plain.ghosts = i == SETUP_STYLE_SPEEDY ? 2 : 0;
+                draw_screen_style(r, 2, plain);
+            }
+            break;
+        case SETUP_PAGE_PICTURE: {
+            int d;
+            plain.ghosts = i == 1 ? 2 : 0;
+            draw_screen_style(r, 2, plain);
+            // The frame rate in the HUD's digits, top left.
+            for (d = 0; d < 2; d++) {
+                const Picture *digit = &sDigits[d == 0 ? (i == 1 ? 6 : 3) : 0];
+                picture_stretched(digit, r.x0 + 3 + d * (digit->width - 1), r.y0 + 3, digit->width, digit->height, r,
+                                  255);
+            }
+            break;
+        }
+        case SETUP_PAGE_SCREEN:
+            draw_screen_style(r, i, plain);
+            break;
+        case SETUP_PAGE_CAMERA:
+            // The N64's camera swings out and leans; the Modern one stays behind the kart, level.
+            if (i == 1) {
+                plain.tilt = (r.y1 - r.y0) / 3;
+                plain.kartOffset = 6;
+            }
+            draw_scene(r, plain);
+            break;
+        default:
+            draw_two_screens(r, i == 0 ? 0 : i == 1 ? 1 : 2);
+            return; // Its screens have their own frames.
+    }
+    picture_frame(r, i == s->chosen);
+}
+
+static void draw_setup_tile(const SetupScreen *s, int i) {
+    const SetupTile *t = &s->tiles[i];
+    Rect r = setup_tile(s, i), art;
+    int lit = i == s->chosen, y, l, textX0 = r.x0, textX1 = r.x1;
+    Colour lineColour = lit ? YELLOW : DIM;
+
+    if (lit) {
+        box(r.x0, r.y0, r.x1, r.y1, (Colour){ 255, 200, 40, 90 }, PICKED_EDGE);
+        box(r.x0 + 1, r.y0 + 1, r.x1 - 1, r.y1 - 1, (Colour){ 0, 0, 0, 0 }, PICKED_EDGE);
+    } else {
+        box(r.x0, r.y0, r.x1, r.y1, BOX_FILL, BOX_EDGE);
+    }
+    if (s->page == SETUP_PAGE_SCREEN) {
+        // The picture on the left, the words on the right.
+        art = (Rect){ r.x0 + 6, r.y0 + 13, r.x0 + 66, r.y0 + 49 };
+        draw_tile_art(s, i, art);
+        textX0 = r.x0 + 68;
+        heading(textX0, textX1, r.y0 + 5, t->name, 1);
+        for (l = 0; l < t->lineCount && l < 2; l++) {
+            text_centred(FONT_SMALL, textX0, textX1 - 2, r.y0 + 24 + l * 11, t->lines[l], lineColour, 1);
+        }
+        if (t->tag[0] != '\0') {
+            text_centred(FONT_SMALL, textX0, textX1 - 2, r.y0 + 47, t->tag, lit ? WHITE : HINT, 1);
+        }
+        return;
+    }
+    if (s->page == SETUP_PAGE_LANGUAGE) {
+        art = (Rect){ (r.x0 + r.x1) / 2 - 42, r.y0 + 8, (r.x0 + r.x1) / 2 + 42, r.y0 + 64 };
+    } else if (s->page == SETUP_PAGE_HUD) {
+        art = (Rect){ r.x0 + 4, r.y0 + 5, r.x1 - 4, r.y0 + 59 };
+    } else {
+        art = wide_screen_in((Rect){ r.x0 + 6, r.y0 + 6, r.x1 - 6, r.y1 }, s->page == SETUP_PAGE_STYLE ? 52 : 56);
+    }
+    draw_tile_art(s, i, art);
+    y = art.y1 + 6;
+    heading(textX0, textX1, y, t->name, 1);
+    y += 18;
+    if (s->page == SETUP_PAGE_STYLE && t->tag[0] != '\0') {
+        text_centred(FONT_SMALL, textX0, textX1, y, t->tag, lit ? WHITE : HINT, 1);
+        y += 15;
+    }
+    for (l = 0; l < t->lineCount; l++, y += 11) {
+        text_centred(FONT_SMALL, textX0 + 2, textX1 - 2, y, t->lines[l], lineColour, 1);
+    }
+    if (s->page != SETUP_PAGE_STYLE && t->tag[0] != '\0') {
+        text_centred(FONT_SMALL, textX0, textX1, y + 3, t->tag, lit ? WHITE : HINT, 1);
+    }
+}
+
+/* A filled dot of radius r. */
+static void disc(int cx, int cy, int r, Colour c) {
+    int x, y;
+    for (y = -r; y <= r; y++) {
+        for (x = -r; x <= r; x++) {
+            if (x * x + y * y <= r * r + r) {
+                plot(cx + x, cy + y, c.r, c.g, c.b, c.a);
+            }
+        }
+    }
+}
+
+static void draw_setup(const SetupScreen *s) {
+    int i;
+    heading(0, BS_WIDTH, 4, s->question, 1);
+    for (i = 0; i < s->tileCount && i < SETUP_TILES; i++) {
+        draw_setup_tile(s, i);
+    }
+    // The fine tuning's steps: done in white, this one in gold, the rest grey.
+    for (i = 0; i < s->stepCount && i < SETUP_STEPS; i++) {
+        int width = (BS_WIDTH - 16) / s->stepCount, x0 = 8 + i * width, cx = x0 + width / 2;
+        Colour c = i == s->step ? YELLOW : i < s->step ? WHITE : (Colour){ 150, 155, 175, 255 };
+        disc(cx, SETUP_DOTS_Y + 4, 4, i <= s->step ? c : (Colour){ 60, 70, 110, 255 });
+        text_centred(FONT_SMALL, x0, x0 + width, SETUP_DOTS_Y + 11, s->steps[i], c, 1);
+    }
+    text_centred(FONT_SMALL, 4, BS_WIDTH - 4, SETUP_HELP_Y, s->help, HINT, 1);
+}
+
+int bs_setup_hit(int x, int y) {
+    const SetupScreen *s = &sState.setup;
+    int i;
+    if (!sState.setupShown) {
+        return SETUP_HIT_NONE;
+    }
+    if (y >= BS_BUTTONS_Y && y < BS_STATUS_Y) {
+        // As draw_button_row lays out three: 13 columns of 8 pixels each, the first one a gap.
+        int column = x / 8;
+        i = column / 13;
+        if (i < 3 && column % 13 != 0 && s->buttons[i][0] != '\0') {
+            return SETUP_HIT_BACK + i;
+        }
+        return SETUP_HIT_NONE;
+    }
+    for (i = 0; i < s->tileCount && i < SETUP_TILES; i++) {
+        Rect r = setup_tile(s, i);
+        if (x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1) {
+            return i;
+        }
+    }
+    return SETUP_HIT_NONE;
+}
+
 void bs_area_rows(int area, int *first, int *end) {
     static const int sRows[BS_AREA_COUNT + 1] = { 0, BS_BUTTONS_Y, BS_STATUS_Y, BS_HEIGHT };
     *first = sRows[area];
@@ -2490,7 +3290,9 @@ void bs_draw(unsigned short *image, int area) {
            (sClipEnd - sClipTop) * BS_WIDTH * sizeof(unsigned short));
     switch (area) {
         case BS_AREA_TOP:
-            if (sDrawn.menuShown) {
+            if (sDrawn.setupShown) {
+                draw_setup(&sDrawn.setup);
+            } else if (sDrawn.menuShown) {
                 draw_menu(&sDrawn);
             } else if (sDrawn.raceShown && sDrawn.overlayLines == 0) {
                 draw_race(&sDrawn);

@@ -770,8 +770,9 @@ u8 gTitleCinematicTextColours[] = {
 UNUSED u8 unused_800DFA0C[] = { 0, 0, 15, 120 };
 
 #ifdef TARGET_PORT
-// The port's OPTIONS_GENERAL rows the Options menu has room for.
-#define PORT_OPT_GENERAL_ROWS 3
+// The port's OPTIONS_GENERAL rows the Options menu has room for: one, so the menu keeps its 11 rows at 16 pixels (the
+// first-run setup's row is on the Settings > Start-up page only).
+#define PORT_OPT_GENERAL_ROWS 1
 // Room for a row per port setting the Options menu shows (port_options_menu_strings): ENGLISH and SUBTITLES, the
 // general rows, AUDIO OPTIONS, the categories, SAVE OPTIONS, MAGIC CODES, RETURN and the closing NULL.
 char *gOptionMenuStrings[2 + PORT_OPT_GENERAL_ROWS + 1 + OPTIONS_CATEGORY_COUNT + 3 + 1] = { NULL };
@@ -3440,6 +3441,68 @@ void func_80083098(f32 updateRateF) {
 #endif
 }
 
+#ifdef TARGET_PORT
+static char sSetupCaptionLines[3][64];
+static char sSetupCaptionName[32], sSetupCaptionTag[32];
+
+/*
+ * The first-run setup's box on the title screen (port_setup.c), in place of START and OPTIONS: the name of the choice
+ * lit on the bottom screen, its tag, and what it does, wrapped to the box in the small font.
+ */
+static void port_setup_render_caption(void) {
+    const char *name, *tag, *about;
+    s32 lines = 0, top, i;
+
+    if (!port_setup_caption(&name, &tag, &about)) {
+        return;
+    }
+    sprintf(sSetupCaptionName, "%.31s", name);
+    sprintf(sSetupCaptionTag, "%.31s", tag);
+    while (*about != '\0' && lines < 3) {
+        s32 length = 0, cut;
+        while (about[length] != '\0') {
+            length++;
+        }
+        cut = length;
+        if (length > 48) {
+            for (cut = 48; cut > 0 && about[cut] != ' '; cut--) {}
+            if (cut == 0) {
+                cut = 48;
+            }
+        }
+        sprintf(sSetupCaptionLines[lines++], "%.*s", (int) cut, about);
+        about += cut;
+        while (*about == ' ') {
+            about++;
+        }
+    }
+    top = (osTvType == OS_TV_TYPE_PAL ? SCREEN_HEIGHT : SCREEN_HEIGHT - 12) - 30 - lines * 12;
+    clear_dialogue_box_open_flag(7);
+    dialogue_clear(7);
+    set_current_dialogue_box_coords(7, 16, top, SCREEN_WIDTH - 16, top + 28 + lines * 12);
+    set_current_dialogue_background_colour(7, 0, 8, 48, 190);
+    set_current_text_background_colour(7, 0, 0, 0, 0);
+    set_dialogue_font(7, ASSET_FONTS_FUNFONT);
+    set_current_text_colour(7, 255, 255, 255, 0, 255);
+    render_dialogue_text(7, 10, 12, sSetupCaptionName, 1, ALIGN_MIDDLE_LEFT);
+    set_dialogue_font(7, ASSET_FONTS_SMALLFONT);
+    if (sSetupCaptionTag[0] != '\0') {
+        set_current_text_colour(7, 150, 200, 255, 0, 255);
+        render_dialogue_text(7, SCREEN_WIDTH - 32 - 10, 12, sSetupCaptionTag, 1, ALIGN_MIDDLE_RIGHT);
+    }
+    set_current_text_colour(7, 255, 255, 255, 0, 255);
+    for (i = 0; i < lines; i++) {
+        render_dialogue_text(7, 10, 30 + i * 12, sSetupCaptionLines[i], 1, ALIGN_MIDDLE_LEFT);
+    }
+    open_dialogue_box(7);
+}
+
+static void port_setup_close_caption(void) {
+    dialogue_close(7);
+    dialogue_clear(7);
+}
+#endif
+
 /**
  * Initialise the title screen menu.
  * Load the title textures and reset player allocation.
@@ -3466,6 +3529,11 @@ void menu_title_screen_init(void) {
         gTitleRevealTimer = 1;
     }
     gTitleAudioCounter = 0;
+#ifdef TARGET_PORT
+    if (port_setup_active()) {
+        gTitleRevealTimer = 1; // The first-run setup waits under the logo: no intro scenes first.
+    }
+#endif
     gMenuStage = TITLESCREEN_START;
     menu_assetgroup_load(sGameTitleTileTextures);
     for (i = 0; i < ARRAY_COUNT(sGameTitleTileOffsets) - 1; i++) {
@@ -3527,6 +3595,11 @@ void render_title_screen(UNUSED s32 updateRate, f32 updateRateF) {
         } else {
             texrect_draw(&sMenuCurrDisplayList, sGameTitleTileOffsets, SCREEN_WIDTH_HALF, 52, 255, 255, 255, 255);
         }
+#ifdef TARGET_PORT
+        if (port_setup_active()) {
+            port_setup_render_caption();
+        } else
+#endif
         if (!is_controller_missing()) {
             i = 0;
             posY = (osTvType == OS_TV_TYPE_PAL) ? SCREEN_HEIGHT - 22 : SCREEN_HEIGHT - 48;
@@ -3682,6 +3755,17 @@ s32 menu_title_screen_loop(s32 updateRate) {
 #endif
         }
     }
+#ifdef TARGET_PORT
+    if (gTitleRevealTimer >= 32 && gMenuDelay == 0 && port_setup_active()) {
+        // The first-run setup has the controls until it is done (the title's own come back from the next frame).
+        port_setup_update(gMenuButtons[PLAYER_MENU], gMenuStickX[PLAYER_MENU], gMenuStickY[PLAYER_MENU]);
+        if (!port_setup_active()) {
+            port_setup_close_caption();
+        }
+    } else if (port_setup_active()) {
+        // The logo is still coming in.
+    } else
+#endif
     if (gTitleRevealTimer == 0) {
         if (gMenuButtons[PLAYER_MENU] & (A_BUTTON | START_BUTTON)) {
             gTitleRevealTimer = 1;

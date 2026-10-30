@@ -7824,10 +7824,12 @@ static void look_back(Object *obj) {
 /**
  * The camera wall check (port_camera.c): the N64's chase cameras never test for walls, so the camera swings into
  * cliffs, tunnel sides and scenery next to the track and the screen fills with the inside of the wall. This sweeps a
- * small sphere from just above the kart to where the camera wants to be, through the level's collision (as a kart's
- * own movement), and moves the camera to where the sphere stopped. The cameras take their height from the frame
- * before, so the position the game chose is put back at the start of the next update (unless something else has moved
- * the camera since), and the game carries on as if the wall had not been there.
+ * small sphere from just above the kart through the level's collision (as a kart's own movement) to a little past
+ * where the camera wants to be, so a wall is seen before the camera reaches it, and eases the camera in front of it
+ * (and back out once the wall has gone) instead of jumping. A second sweep to where the eased camera ends up keeps it
+ * out of the wall when the wall came too quickly for the ease. The cameras take their height from the frame before,
+ * so the position the game chose is put back at the start of the next update (unless something else has moved the
+ * camera since), and the game carries on as if the wall had not been there.
  */
 extern f32 gCollisionNormalX, gCollisionNormalY, gCollisionNormalZ;
 extern s32 gHitWall, gCollisionMode;
@@ -7835,9 +7837,16 @@ extern LevelModel *gCurrentLevelModel;
 
 #define CAMERA_WALL_RADIUS 14.0f
 #define CAMERA_WALL_LIFT 20.0f
+#define CAMERA_WALL_AHEAD 32.0f    // How far past the camera the first sweep looks, and the gap kept to a wall there.
+#define CAMERA_WALL_IN_TIME 0.12f  // Seconds the ease takes (roughly) to move the camera in front of a wall,
+#define CAMERA_WALL_OUT_TIME 0.4f  // and back out to where the game wants it.
+#define CAMERA_WALL_STOP 24.0f     // The most the camera is stopped short at a wall in one go, ahead of the ease.
+#define CAMERA_WALL_CUT 150.0f     // The game's camera moved this far in one update: a cut, so no easing.
 
 static Camera *sWallCamera;
 static Vec3f sWallWanted, sWallPlaced; // Where the game put the camera, and where the wall check moved it.
+static Camera *sWallEaseCamera;        // NULL when the ease starts afresh.
+static Vec3f sWallLastWanted, sWallOffset, sWallSpeed; // The eased move from where the game wants the camera.
 
 static void camera_wall_restore(void) {
     if (sWallCamera == gCameraObject && gCameraObject->trans.x_position == sWallPlaced.x &&
@@ -7849,18 +7858,15 @@ static void camera_wall_restore(void) {
     sWallCamera = NULL;
 }
 
-static void camera_wall_check(Object *obj, Object_Racer *racer) {
-    Vec3f origin, target;
+/**
+ * Sweeps the camera's sphere from origin to target through the level, leaving target where the sphere stopped.
+ * Returns whether it hit anything.
+ */
+static s32 camera_wall_sweep(Vec3f *origin, Vec3f *target, s32 vehicleID) {
     f32 radius = CAMERA_WALL_RADIUS, normalX, normalY, normalZ;
-    s32 hitWall, mode, numCollisions = 0, segmentIndex;
+    s32 hitWall, mode, numCollisions = 0;
     s8 surface = SURFACE_NONE;
 
-    origin.x = obj->trans.x_position;
-    origin.y = obj->trans.y_position + CAMERA_WALL_LIFT;
-    origin.z = obj->trans.z_position;
-    target.x = gCameraObject->trans.x_position;
-    target.y = gCameraObject->trans.y_position;
-    target.z = gCameraObject->trans.z_position;
     // The racers' collision results live in globals that the racer code reads later: keep them as they were.
     normalX = gCollisionNormalX;
     normalY = gCollisionNormalY;
@@ -7868,25 +7874,139 @@ static void camera_wall_check(Object *obj, Object_Racer *racer) {
     hitWall = gHitWall;
     mode = gCollisionMode;
     gCollisionMode = COLLISION_MODE_DEFAULT;
-    generate_collision_candidates(1, &origin, &target, racer->vehicleID);
-    resolve_collisions(&origin, &target, &radius, &surface, 1, &numCollisions);
+    generate_collision_candidates(1, origin, target, vehicleID);
+    resolve_collisions(origin, target, &radius, &surface, 1, &numCollisions);
     gCollisionMode = mode;
     gCollisionNormalX = normalX;
     gCollisionNormalY = normalY;
     gCollisionNormalZ = normalZ;
     gHitWall = hitWall;
-    if (numCollisions == 0) {
+    return numCollisions != 0;
+}
+
+/**
+ * One step of a critically damped spring from current towards goal (speed carries over between steps): it starts
+ * and stops gently, and takes about smoothTime seconds whatever the frame rate.
+ */
+static f32 camera_wall_ease(f32 current, f32 goal, f32 *speed, f32 smoothTime, f32 dt) {
+    f32 omega = 2.0f / smoothTime;
+    f32 x = omega * dt;
+    f32 decay = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
+    f32 change = current - goal;
+    f32 step = (*speed + omega * change) * dt;
+
+    *speed = (*speed - omega * step) * decay;
+    return goal + (change + step) * decay;
+}
+
+static void camera_wall_check(Object *obj, Object_Racer *racer, f32 updateRateF) {
+    Vec3f origin, wanted, probe, reverse, goal, placed, eased;
+    f32 length, dirX, dirY, dirZ, reach, back, smoothTime, dt, moved, pushX, pushY, pushZ;
+    s32 hit, segmentIndex;
+
+    origin.x = obj->trans.x_position;
+    origin.y = obj->trans.y_position + CAMERA_WALL_LIFT;
+    origin.z = obj->trans.z_position;
+    wanted.x = gCameraObject->trans.x_position;
+    wanted.y = gCameraObject->trans.y_position;
+    wanted.z = gCameraObject->trans.z_position;
+    dirX = wanted.x - origin.x;
+    dirY = wanted.y - origin.y;
+    dirZ = wanted.z - origin.z;
+    length = sqrtf(dirX * dirX + dirY * dirY + dirZ * dirZ);
+    if (length < 1.0f) {
+        sWallEaseCamera = NULL;
         return;
     }
+    dirX /= length;
+    dirY /= length;
+    dirZ /= length;
+
+    // Where the camera should go: in front of any wall up to a little past the camera, by that little.
+    goal.x = goal.y = goal.z = 0.0f;
+    probe.x = wanted.x + dirX * CAMERA_WALL_AHEAD;
+    probe.y = wanted.y + dirY * CAMERA_WALL_AHEAD;
+    probe.z = wanted.z + dirZ * CAMERA_WALL_AHEAD;
+    hit = camera_wall_sweep(&origin, &probe, racer->vehicleID);
+    if (hit) {
+        // A post, pillar or other kart-side face between the kart and a camera that is itself in the open hides the
+        // kart for a moment but is no wall to move the camera out of: a sweep from the camera back to the kart hits
+        // the side facing the camera. A camera in (or behind) a wall faces the wall's back, which the level's
+        // collision does not stop.
+        reverse = origin;
+        if (camera_wall_sweep(&wanted, &reverse, racer->vehicleID)) {
+            hit = FALSE;
+        }
+    }
+    if (hit) {
+        // Back from where the sweep stopped by the gap, but never past the kart.
+        reach = (probe.x - origin.x) * dirX + (probe.y - origin.y) * dirY + (probe.z - origin.z) * dirZ;
+        back = CAMERA_WALL_AHEAD;
+        if (reach < back) {
+            back = reach > 0.0f ? reach : 0.0f;
+        }
+        goal.x = probe.x - dirX * back - wanted.x;
+        goal.y = probe.y - dirY * back - wanted.y;
+        goal.z = probe.z - dirZ * back - wanted.z;
+    }
+
+    moved = (wanted.x - sWallLastWanted.x) * (wanted.x - sWallLastWanted.x) +
+            (wanted.y - sWallLastWanted.y) * (wanted.y - sWallLastWanted.y) +
+            (wanted.z - sWallLastWanted.z) * (wanted.z - sWallLastWanted.z);
+    sWallLastWanted = wanted;
+    if (sWallEaseCamera != gCameraObject || moved > CAMERA_WALL_CUT * CAMERA_WALL_CUT) {
+        // A new camera or a cut: start where the wall wants it.
+        sWallEaseCamera = gCameraObject;
+        sWallOffset = goal;
+        sWallSpeed.x = sWallSpeed.y = sWallSpeed.z = 0.0f;
+    } else {
+        // Quick to come in front of a wall, slower to go back out.
+        smoothTime = (goal.x * goal.x + goal.y * goal.y + goal.z * goal.z >=
+                      sWallOffset.x * sWallOffset.x + sWallOffset.y * sWallOffset.y + sWallOffset.z * sWallOffset.z)
+                         ? CAMERA_WALL_IN_TIME
+                         : CAMERA_WALL_OUT_TIME;
+        dt = updateRateF / 60.0f;
+        sWallOffset.x = camera_wall_ease(sWallOffset.x, goal.x, &sWallSpeed.x, smoothTime, dt);
+        sWallOffset.y = camera_wall_ease(sWallOffset.y, goal.y, &sWallSpeed.y, smoothTime, dt);
+        sWallOffset.z = camera_wall_ease(sWallOffset.z, goal.z, &sWallSpeed.z, smoothTime, dt);
+    }
+    if (!hit && sWallOffset.x * sWallOffset.x + sWallOffset.y * sWallOffset.y + sWallOffset.z * sWallOffset.z < 0.01f &&
+        sWallSpeed.x * sWallSpeed.x + sWallSpeed.y * sWallSpeed.y + sWallSpeed.z * sWallSpeed.z < 0.01f) {
+        // Eased all the way back out: the camera is the game's own again.
+        sWallOffset.x = sWallOffset.y = sWallOffset.z = 0.0f;
+        sWallSpeed = sWallOffset;
+        return;
+    }
+
+    placed.x = wanted.x + sWallOffset.x;
+    placed.y = wanted.y + sWallOffset.y;
+    placed.z = wanted.z + sWallOffset.z;
+    eased = placed;
+    if (hit && camera_wall_sweep(&origin, &placed, racer->vehicleID)) {
+        pushX = placed.x - eased.x;
+        pushY = placed.y - eased.y;
+        pushZ = placed.z - eased.z;
+        if (pushX * pushX + pushY * pushY + pushZ * pushZ <= CAMERA_WALL_STOP * CAMERA_WALL_STOP) {
+            // The camera is reaching the wall before the ease has it in front: it stops at the wall, and the ease
+            // carries on from there.
+            sWallOffset.x = placed.x - wanted.x;
+            sWallOffset.y = placed.y - wanted.y;
+            sWallOffset.z = placed.z - wanted.z;
+            sWallSpeed.x = sWallSpeed.y = sWallSpeed.z = 0.0f;
+        } else {
+            // A wall that cut across between the kart and the camera all at once (rounding a corner) and is well in
+            // front of the camera: stopping there would jump the camera most of the way to the kart, so the ease
+            // brings it in instead.
+            placed = eased;
+        }
+    }
     sWallCamera = gCameraObject;
-    sWallWanted.x = gCameraObject->trans.x_position;
-    sWallWanted.y = gCameraObject->trans.y_position;
-    sWallWanted.z = gCameraObject->trans.z_position;
-    gCameraObject->trans.x_position = target.x;
-    gCameraObject->trans.y_position = target.y;
-    gCameraObject->trans.z_position = target.z;
-    sWallPlaced = target;
-    segmentIndex = get_level_segment_index_from_position(target.x, target.y, target.z);
+    sWallWanted = wanted;
+    gCameraObject->trans.x_position = placed.x;
+    gCameraObject->trans.y_position = placed.y;
+    gCameraObject->trans.z_position = placed.z;
+    sWallPlaced = placed;
+    segmentIndex = get_level_segment_index_from_position(placed.x, placed.y, placed.z);
     if (segmentIndex != SEGMENT_NONE) {
         gCameraObject->cameraSegmentID = segmentIndex;
     }
@@ -8018,7 +8138,9 @@ void update_player_camera(Object *obj, Object_Racer *racer, f32 updateRateF) {
 #ifdef TARGET_PORT
     if (port_camera_wall_check() && racer->playerIndex == PLAYER_ONE && gDialogueCameraAngle == 0 &&
         gCurrentLevelModel != NULL) {
-        camera_wall_check(obj, racer);
+        camera_wall_check(obj, racer, updateRateF);
+    } else if (racer->playerIndex == PLAYER_ONE) {
+        sWallEaseCamera = NULL;
     }
 #endif
 }

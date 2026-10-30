@@ -45,6 +45,14 @@ static unsigned long long sLogicNs; // Logic time of the current frame.
 static unsigned long long sLastFrameEndNs;
 static u32 sGameFrames;
 
+/* The frame time histogram behind the 1% low, and where a frame stops counting as one, two, three or more retraces (half a
+ * retrace past each, so a late vblank doesn't move a frame up a group). */
+#define PERIOD_BIN_US 500
+#define PERIOD_BINS 256
+#define PACED_60_US 25000
+#define PACED_30_US 41667
+#define PACED_20_US 58333
+
 typedef struct Window {
     u32 startTotalUs[PROF_STAGE_COUNT];
     u32 startCounters[PROF_COUNTER_COUNT];
@@ -58,6 +66,8 @@ typedef struct Window {
     u32 worstFrameUs;
     u32 worstBuildUs;
     u32 hitches;
+    u32 pacedFrames[4];
+    u32 periodBins[PERIOD_BINS]; // Game frame periods in half milliseconds, the last bin taking all longer ones.
 } Window;
 
 static Window sWindows[PROF_WINDOW_COUNT];
@@ -212,6 +222,8 @@ void prof_window_start(int window) {
     for (i = 0; i < PROF_RATE_BUCKETS; i++) {
         w->rateFrames[i] = 0;
     }
+    bzero(w->pacedFrames, sizeof(w->pacedFrames));
+    bzero(w->periodBins, sizeof(w->periodBins));
     w->startRenderedFrames = sRenderedFrames;
     w->startGameFrames = sGameFrames;
     w->startNs = plat_time_ns();
@@ -221,6 +233,27 @@ void prof_window_start(int window) {
     w->worstBuildUs = 0;
     w->hitches = 0;
     sMaxClearRequest[window]++;
+}
+
+/* The frame time that the slowest 1% of a window's game frames took at least: the middle of the half-millisecond bin
+ * the 99th percentile lands in. */
+static u32 low1_frame_us(const Window *w) {
+    u32 total = 0, seen = 0, slowest;
+    s32 i;
+    for (i = 0; i < PERIOD_BINS; i++) {
+        total += w->periodBins[i];
+    }
+    if (total == 0) {
+        return 0;
+    }
+    slowest = (total + 99) / 100;
+    for (i = PERIOD_BINS - 1; i > 0; i--) {
+        seen += w->periodBins[i];
+        if (seen >= slowest) {
+            break;
+        }
+    }
+    return i * PERIOD_BIN_US + PERIOD_BIN_US / 2;
 }
 
 void prof_window_read(int window, ProfStats *out) {
@@ -243,6 +276,10 @@ void prof_window_read(int window, ProfStats *out) {
     out->worstFrameUs = w->worstFrameUs;
     out->worstBuildUs = w->worstBuildUs;
     out->hitches = w->hitches;
+    out->low1FrameUs = low1_frame_us(w);
+    for (i = 0; i < 4; i++) {
+        out->pacedFrames[i] = w->pacedFrames[i];
+    }
     if (sMaxCleared[window] == sMaxClearRequest[window]) {
         out->worstRenderUs = sRenderMaxUs[window];
         out->worstGpuUs = sGpuMaxUs[window];
@@ -435,6 +472,10 @@ void prof_game_mark(int mark, int updateRate) {
                 }
                 if (periodUs > 50000) {
                     win->hitches++;
+                }
+                if (periodUs != 0) {
+                    win->periodBins[periodUs / PERIOD_BIN_US < PERIOD_BINS ? periodUs / PERIOD_BIN_US : PERIOD_BINS - 1]++;
+                    win->pacedFrames[periodUs < PACED_60_US ? 0 : periodUs < PACED_30_US ? 1 : periodUs < PACED_20_US ? 2 : 3]++;
                 }
             }
             if (sWindows[PROF_WINDOW_OVERLAY].startNs == 0) {
