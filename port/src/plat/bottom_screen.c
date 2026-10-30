@@ -1163,9 +1163,9 @@ static void draw_menu(const State *s) {
         upper_text(upper, sizeof(upper), m->tabs[i]);
         /* A long name (French ones) that would touch the tab's edges drops to the small font. */
         if (font_ready(FONT_FUN) && text_width_as_is(FONT_FUN, upper) <= MENU_PANEL_X0 - 16) {
-            heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8, m->tabs[i], 1);
+            heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8 + (sStyle != 0 ? 1 : 0), m->tabs[i], 1);
         } else if (font_ready(FONT_FUN)) {
-            text_centred_as_is(FONT_SMALL, 4, MENU_PANEL_X0 - 4, y + tabHeight / 2 - 6, upper,
+            text_centred_as_is(FONT_SMALL, 4, MENU_PANEL_X0 - 4, y + tabHeight / 2 - 6 + (sStyle != 0 ? 1 : 0), upper,
                                i == m->tab ? YELLOW : WHITE, 1);
         } else {
             text_clipped(FONT_SMALL, 10, y + tabHeight / 2 - 6, m->tabs[i], i == m->tab ? YELLOW : WHITE, 1,
@@ -1319,7 +1319,7 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
                     iconW = 0;
                     tx = x0 + (x1 - x0 - w2) / 2;
                 }
-                text_clipped(FONT_SMALL, tx + iconW, cy - 6, t, dockInk, 0, x1);
+                text_clipped(FONT_SMALL, tx + iconW, cy - 5, t, dockInk, 0, x1);
             } else {
                 int iconW = 0;
                 Colour hole = sStyle == 1 ? (Colour){ 40, 100, 235, 255 } : (Colour){ 245, 90, 30, 255 };
@@ -1334,9 +1334,9 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
                 if (iconW) {
                     int tx = x0 + (x1 - x0 - w - iconW) / 2;
                     draw_icon(t, tx + 7, cy, ink, hole);
-                    text_clipped(FONT_FUN, tx + iconW, y0 + 4, upper, ink, !grey, x1);
+                    text_clipped(FONT_FUN, tx + iconW, y0 + 5, upper, ink, !grey, x1);
                 } else {
-                    text_centred(FONT_FUN, x0, x1, y0 + 4, upper, ink, !grey);
+                    text_centred(FONT_FUN, x0, x1, y0 + 5, upper, ink, !grey);
                 }
             }
         }
