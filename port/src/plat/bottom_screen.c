@@ -1307,8 +1307,10 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
         }
         {
             int cy = (y0 + y1) / 2;
-            int w = text_width(FONT_FUN, t);
-            upper_case(t, upper, sizeof(upper));
+            int w;
+            // The language first, then capitals: port_text only knows the words as the menus write them.
+            upper_case(port_text(t), upper, sizeof(upper));
+            w = text_width(FONT_FUN, upper);
             if (sStyle == 3) {
                 Colour dockInk = grey ? ink : (on ? (Colour){ 120, 235, 120, 255 } : WHITE);
                 int w2 = text_width(FONT_SMALL, t), iconW = 18;

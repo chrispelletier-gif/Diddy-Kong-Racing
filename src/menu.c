@@ -770,8 +770,9 @@ u8 gTitleCinematicTextColours[] = {
 UNUSED u8 unused_800DFA0C[] = { 0, 0, 15, 120 };
 
 #ifdef TARGET_PORT
-// The port's OPTIONS_GENERAL rows the Options menu has room for.
-#define PORT_OPT_GENERAL_ROWS 3
+// The port's OPTIONS_GENERAL rows the Options menu has room for: one, so the menu keeps its 11 rows at 16 pixels (the
+// first-run setup's row is on the Settings > Start-up page only).
+#define PORT_OPT_GENERAL_ROWS 1
 // Room for a row per port setting the Options menu shows (port_options_menu_strings): ENGLISH and SUBTITLES, the
 // general rows, AUDIO OPTIONS, the categories, SAVE OPTIONS, MAGIC CODES, RETURN and the closing NULL.
 char *gOptionMenuStrings[2 + PORT_OPT_GENERAL_ROWS + 1 + OPTIONS_CATEGORY_COUNT + 3 + 1] = { NULL };

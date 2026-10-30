@@ -373,6 +373,11 @@ static const PortText sFrench[] = {
     { "Intro logos", "Logos d'intro" },
     { "Start at the title screen", "Demarre a l'ecran titre" },
     { "A, B or START skips them", "A, B ou START pour les passer" },
+    { "First-run setup", "Config. initiale" },
+    { "Done", "Faite" },
+    { "Next start", "Au demarrage" },
+    { "Language, play style and picture again", "Langue, style de jeu et image" },
+    { "Shows at the title screen next start", "Au prochain demarrage" },
 
     // SAVE OPTIONS (src/menu.c port_savemenu_*).
     { "GAME PAK", "LOGICIEL" },
