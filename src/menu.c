@@ -8669,7 +8669,12 @@ s32 menu_character_select_loop(s32 updateRate) {
             if (confirmOffset >= gNumberOfActivePlayers) {
                 music_change_off();
                 load_level_for_menu(ASSET_LEVEL_OPTIONSBACKGROUND, -1, 0);
+#ifdef TARGET_PORT
+                // The Rumble Pak caution screen is skipped on the 3DS port.
+                if (FALSE) {
+#else
                 if (gNumberOfActivePlayers == 1 && !gPlayerHasSeenCautionMenu) {
+#endif
                     menu_init(MENU_CAUTION);
                 } else {
                     menu_init(MENU_GAME_SELECT);
