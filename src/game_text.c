@@ -338,6 +338,9 @@ void set_current_text(s32 textID) {
             return;
         }
         asset_load(ASSET_GAME_TEXT, (u32) gGameTextTableEntries[D_8012A7A4], ((s32) entries[textID & 1]) ^ temp, size);
+#ifdef TARGET_PORT
+        port_fix_game_text(gGameTextTableEntries[D_8012A7A4], size);
+#endif
         D_8012A7A0 = gGameTextTableEntries[D_8012A7A4];
         D_8012A7A4 = (D_8012A7A4 + 1) & 1;
         D_8012A788 = 0;

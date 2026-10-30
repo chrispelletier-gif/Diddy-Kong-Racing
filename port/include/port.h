@@ -245,6 +245,8 @@ void port_set_skip_intro(s32 on);
  * (French when it is set to FRANCAIS), or english itself when there is no translation.
  */
 const char *port_text(const char *english);
+/* The game's dialogue after it is loaded: wording that names a button the 3DS lacks is changed (port_text.c). */
+void port_fix_game_text(char *text, int size);
 
 /*
  * The first-run setup (port/src/game/port_setup.c): language, then a play style or a page each for the picture, the

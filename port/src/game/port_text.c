@@ -190,7 +190,6 @@ static const PortText sFrench[] = {
     { "Circle Pad", "Pad circulaire" },
     { "Steer", "Diriger" },
     { "Hop / drift", "Derapage" },
-    { "C buttons", "Boutons C" },
     { "Bug report", "Rapport bug" },
     { "Version %.20s", "Version %.20s" },
     { "Build %.24s", "Version %.24s" },
@@ -352,11 +351,10 @@ static const PortText sFrench[] = {
     { "Brake", "Freiner" },
     { "Use item", "Objet" },
     { "Hop, drift", "Saut, derapage" },
-    { "N64 L", "L N64" },
-    { "C-Up", "C-Haut" },
-    { "C-Down", "C-Bas" },
-    { "C-Left", "C-Gauche" },
-    { "C-Right", "C-Droite" },
+    { "No effect", "Sans effet" },
+    { "Camera view", "Vue camera" },
+    { "Track arrows", "Fleches" },
+    { "HUD toggle", "Bascule HUD" },
     { "Start", "Start" },
     { "Look back", "Vue arriere" },
     { "Nothing", "Rien" },
@@ -453,4 +451,33 @@ const char *port_text(const char *english) {
         }
     }
     return english;
+}
+
+/*
+ * The game's own dialogue after it is loaded from the ROM (set_current_text). The French Taj text tells the player to
+ * press Z to honk, a button the 3DS does not have; it says to honk instead, as the English does. The new words are the
+ * same length (padded with spaces, which draw as nothing) so the text and its size are unchanged.
+ */
+void port_fix_game_text(char *text, int size) {
+    static const struct {
+        const char *from, *to;
+    } sFixes[] = {
+        { "APPUYANT SUR Z.", "KLAXONNANT.    " },
+        { "APPUYEZ SUR Z", "KLAXONNEZ    " },
+    };
+    unsigned i;
+    int at, k, length;
+
+    for (i = 0; i < sizeof(sFixes) / sizeof(sFixes[0]); i++) {
+        for (length = 0; sFixes[i].from[length] != '\0'; length++) {}
+        for (at = 0; at + length <= size; at++) {
+            for (k = 0; k < length && text[at + k] == sFixes[i].from[k]; k++) {}
+            if (k == length) {
+                for (k = 0; k < length; k++) {
+                    text[at + k] = sFixes[i].to[k];
+                }
+                break;
+            }
+        }
+    }
 }

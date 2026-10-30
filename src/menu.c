@@ -1766,6 +1766,11 @@ s16 gCreditsControlData[] = {
     CREDITS_NEW_TITLE(CREDITS_DEFAULT_TITLE_TIME),
     82, 83,
     CREDITS_NEXT_LEVEL,
+#ifdef TARGET_PORT
+    CREDITS_NEW_TITLE(CREDITS_DEFAULT_TITLE_TIME),
+    87, 88, // "Nintendo 3DS Port", the port's author
+    CREDITS_NEXT_LEVEL,
+#endif
     CREDITS_NEW_TITLE(CREDITS_DEFAULT_TITLE_TIME),
     84, // "THE END"
     CREDITS_NEW_TITLE(CREDITS_MAGIC_CODE_TIME),
@@ -1789,8 +1794,22 @@ s16 gCreditsControlData[] = {
     CREDITS_END
 };
 
+// Where the developer times' CREDITS_END is in gCreditsControlData (the port's page adds four entries before it).
+#ifdef TARGET_PORT
+#define CREDITS_TIMES_INDEX 134
+#else
+#define CREDITS_TIMES_INDEX 130
+#endif
+
+// The credits' strings; the port adds two more (a page for the 3DS port) after the game's.
+#ifdef TARGET_PORT
+#define CREDITS_STRING_COUNT 89
+#else
+#define CREDITS_STRING_COUNT 87
+#endif
+
 // List of amazing people.
-char *gCreditsArray[87] = { 
+char *gCreditsArray[CREDITS_STRING_COUNT] = { 
     "CREDITS",
     "Software Director",
     "R.Harrison",
@@ -1851,7 +1870,13 @@ char *gCreditsArray[87] = {
     "T.Stamper",
     NULL,
     NULL,
-    NULL };
+    NULL
+#ifdef TARGET_PORT
+    ,
+    "Nintendo 3DS Port",
+    "ChrisAP"
+#endif
+};
 
 
 // clang-format off
@@ -4539,7 +4564,15 @@ void optionscreen_free(void) {
  * Gets global audio volume and checks if the jukebox cheat is active to set the lower Y bounds.
  */
 void menu_audio_options_init(void) {
+#ifdef TARGET_PORT
+    // The STEREO / MONO / HEADPHONES row is not offered (the 3DS has its own sound settings): the screen starts on
+    // SFX VOLUME and the sound is always stereo.
+    gOptionsMenuItemIndex = 1;
+    gAudioOutputType = STEREO;
+    set_stereo_pan_mode(STEREO);
+#else
     gOptionsMenuItemIndex = 0;
+#endif
     gOptionBlinkTimer = 0;
     gMenuDelay = 0;
     gSoundOptionMask = NULL;
@@ -4607,7 +4640,11 @@ void func_80084854(UNUSED s32 updateRate) {
     if (temp >= 256) {
         temp = 511 - temp;
     }
+#ifdef TARGET_PORT
+    gAudioMenuStrings[0].text = "";
+#else
     gAudioMenuStrings[0].text = gAudioOutputStrings[gAudioOutputType];
+#endif
     mtx_ortho(&sMenuCurrDisplayList, &sMenuCurrHudMat);
 
     if (osTvType == OS_TV_TYPE_PAL) {
@@ -4767,7 +4804,11 @@ s32 menu_audio_options_loop(s32 updateRate) {
             } else if (contY < 0 && gOptionsMenuItemIndex < gMenuStage - 1) {
                 gOptionsMenuItemIndex++;
                 playSound = 1;
+#ifdef TARGET_PORT
+            } else if (contY > 0 && gOptionsMenuItemIndex > 1) {
+#else
             } else if (contY > 0 && gOptionsMenuItemIndex > 0) {
+#endif
                 gOptionsMenuItemIndex--;
                 playSound = 1;
             } else if (gOptionsMenuItemIndex == 0 && contX != 0) {
@@ -14614,7 +14655,7 @@ void menu_credits_init(void) {
     load_font(ASSET_FONTS_BIGFONT);
 #endif
     music_voicelimit_set(24);
-    gCreditsControlData[130] = CREDITS_END; // DONT show developer times
+    gCreditsControlData[CREDITS_TIMES_INDEX] = CREDITS_END; // DONT show developer times
     if (gViewingCreditsFromCheat) {
         music_play(SEQUENCE_DARKMOON_CAVERNS);
         gCreditsArray[84] = gCreditsLastMessageArray[2]; // "THE END"
@@ -14625,7 +14666,7 @@ void menu_credits_init(void) {
         if (settings->bosses & 0x20) { // WIZPIG 2
             music_play(SEQUENCE_CRESCENT_ISLAND);
             gCreditsArray[84] = gCreditsLastMessageArray[1];                                  // "TO BE CONTINUED ..."
-            gCreditsControlData[130] = CREDITS_BEST_RACE_TIMES(CREDITS_BEST_RACE_TIMES_TIME); // Show developer times.
+            gCreditsControlData[CREDITS_TIMES_INDEX] = CREDITS_BEST_RACE_TIMES(CREDITS_BEST_RACE_TIMES_TIME); // Show developer times.
             D_80126BCC = 9;
         } else {
             music_play(SEQUENCE_DARKMOON_CAVERNS);
