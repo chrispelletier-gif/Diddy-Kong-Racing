@@ -37,7 +37,8 @@
  *   DKR_AUTORUN_SWITCH_TRACKS=id,...  Tracks (default: the GPU benchmark's three).
  *   DKR_AUTORUN_SWITCH_CHARACTER=n    Character (default Bumper).
  *   DKR_AUTORUN_SWITCH_CONFIGS=n,...  The races' switch sets: 0 every switch at its usual setting, n switch n-1 of
- *                                     sSwitches flipped (default all).
+ *                                     sSwitches flipped, and with two switches or more a last one with all of
+ *                                     them flipped together (default all).
  * Its files are switch_bench_state.txt and switch_bench_results.csv (with "config" and "pct_60fps" columns, as the
  * GPU benchmark's).
  *
@@ -83,6 +84,7 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "gfx/gfx_split.h"
 #include <string.h>
 
 #define MAX_RACES 1024
@@ -143,22 +145,56 @@ typedef struct BenchSwitch {
     s8 usual, test;
 } BenchSwitch;
 
-/* Every race sets 3D itself (DKR_STEREO3D, off unless a switch turns it on) and the other render settings (see
- * apply_config), so the player's settings don't change what the bench measures. Settled before: GPU vertex maths
- * (P30) with the track and models recorded (P31, P34) gained nothing on a New 3DS, whose races are GPU-bound (#237),
- * and stay off (Settings > Picture > GPU vertex maths); stereo frames made once (P33) saved under 1 ms of renderer CPU
- * for more GPU time in 3D (#240) and stays off (3D made once); command list splits (P19) are off by default (#153), early depth (P20) was dropped
- * (#155), the white-line diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches: the
- * depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
+/* Command list splits (P19) are off by default (#153), early depth (P20) was dropped (#155), the white-line
+ * diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches on the New 3DS: the depth
+ * clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
  * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
- * transforms (P27) gained nothing and stay off. The list ends with an empty entry, so it may be otherwise empty (the
- * bench then says so instead of racing). Bench #246 settled the third top screen buffer (P35, on by default: the heavy
- * tracks went from 48 to 60 fps), while adaptive anti-aliasing and kernel waits per queue (P32) showed nothing and stay
- * off. The races run with anti-aliasing 2x, where the heavy tracks used to drop below 60 fps. */
+ * transforms (P27) gained nothing and stay off. The Old 3DS (roadmap O8) is another matter: its renderer is CPU-bound
+ * on a slower core without a second level cache. There VFP vectors won (#238), and the texture hash kept for 8 frames
+ * and cache flushes by system call won together (#241), so all three are on by default on an Old 3DS; redrawing the
+ * bottom screen's race HUD less often gained nothing (#241). Rendering ahead by 2 frames won on both of its renderer
+ * cores (#244, #245), so it is the Old 3DS default and the bench pins it there. In #251 a steady 20 fps cap matched
+ * or beat 30 with far fewer slower frames, so it is the Old 3DS default and the bench races at 20 there. The New
+ * 3DS's third top screen buffer (P35) was at most 1 fps ahead but took memory textures needed (#252), so it stays
+ * off there. The frame pacer (gfx_c3d.c) still cost frames on two tracks of three, so it is raced off against on.
+ * The Old 3DS renderer cuts (P38) each won in #255 (Jungle Falls 24.7 fps with all of them, 20.4 to 22.4 with one
+ * off) and the walk and draw breakdowns cost 2.5 to 4 fps there, so those rows are gone. The 20 fps cap now holds
+ * (src/video.c; #255 ran 60% of its frames at 30 under it), so 30 is raced against it. This list is the Old 3DS's:
+ * its usual 20 fps would pin a New 3DS to 20 too. The GPU route (ideas from other 3DS ports, shelved on the New 3DS
+ * after #237 where it gained nothing on a GPU-bound frame): GPU vertex maths (P30) by itself, then with the track's
+ * geometry kept on the GPU (P31), then with models recorded the first time they are drawn too (P34); off by default
+ * until this bench says otherwise on an Old 3DS.
+ * Bench #258/#259 (v21/v22, Old 3DS) settled the rest: the frame pacer stays on (off had more frames slower than 20 fps;
+ * still raced, as the bench needs one row),
+ * the 20 fps cap stays (30 reached 30 on only 11% of frames), and the GPU route gained nothing there either (P31 equal,
+ * P34 6.7 ms more renderer time, P30 tunnel walls missing as on the New 3DS, #234), so it is off and out of the bench.
+ * Bench #263 (v24, System 80%): the two-core renderer (P21) ran 29 fps against 20-21, with 93% of frames at 30, and
+ * showed the 20 fps cap had never held on the port (its code sat in the N64 branch of src/video.c). So 30 is the Old
+ * 3DS's cap and the bench races at 30 there; P21 is still raced while its best renderer core is found.
+ * The two-core renderer is now the Old 3DS default, raced off; with the GPU mostly idle (7-9 ms of a 33 ms frame) the
+ * looks an Old 3DS has off for speed are raced on one at a time (anti-aliasing 2x, Balanced widescreen, colour boost),
+ * and render ahead 1, as the split already keeps two frames in flight.
+ * Bench #266 (v27, Jungle Falls): the two-core renderer off fell to 21 fps, so it is out of the bench; anti-aliasing 2x,
+ * Balanced widescreen and render ahead 1 each kept 97-98% of frames at 30, so an Old 3DS now races with them as the
+ * New 3DS does, and each is raced back to the old setting on the heavier tracks. Colour boost cost nothing (a look,
+ * left to the player).
+ * The two-core renderer's backend is woken once 16 KB of draws are queued rather than for every draw (each wake-up is
+ * a system call on both cores); raced against waking it every time.
+ * Back faces culled in the walk (P40, DKR_CPU_CULL, on by default on an Old 3DS) is raced off against on: it stops
+ * a command's double sided triangles splitting its draw from the one sided ones (about one draw in eight).
+ * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
+    { "backend woken for every draw (P21)", { "DKR_SPLIT_WAKE_KB", NULL }, 16, 0 },
+    { "render ahead 2", { "BENCH_RENDER_AHEAD", NULL }, 1, 2 },
+    { "anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_2X, PLAT_AA_OFF },
+    { "the N64's 4:3", { "BENCH_WIDESCREEN", NULL }, 2, 0 },
+    { "back faces culled by the GPU, not the walk (P40 off)", { "DKR_CPU_CULL", NULL }, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
+/* With two switches or more, a last race flips them all together: gains don't always add up. */
+#define SWITCH_ALL (SWITCH_CONFIGS > 2 ? SWITCH_CONFIGS : -1)
+#define SWITCH_RACES (SWITCH_CONFIGS + (SWITCH_ALL >= 0))
 #define MAX_CONFIGS 16
 
 static s32 sMode; // enum Mode
@@ -176,34 +212,41 @@ static void apply_config(s32 config) {
         return;
     }
     if (sMode == MODE_SWITCH) {
-        // The same render settings for every race, whatever the player's are: anti-aliasing 2x, 32-bit buffers,
-        // 60 fps, Balanced widescreen, 400 pixels, mipmaps on, no colour boost, edge trimming on, render ahead 1,
-        // GPU vertex maths off (the menu's settings would otherwise change what the bench measures). Then every
-        // variable at its usual setting, then the race's switch: a variable shared by several switches keeps the
-        // race's test setting.
+        // The menus' settings have no say in the bench's races (user rule, 2026-10-29): every race draws with the
+        // bench's own render settings: anti-aliasing 2x, 60 fps, Balanced widescreen and render ahead 1 on a New 3DS;
+        // anti-aliasing 2x, 30 fps, Balanced widescreen and render ahead 1 on an Old 3DS;
+        // 400 pixels, no 3D, mipmaps on, no colour boost, edge trimming on, GPU vertex maths off. Only
+        // where the renderer runs (an Old 3DS's Renderer row) needs a restart, so that one is the player's, and the
+        // results' graphics column says which. Then every variable at its usual setting, then the race's switches: a
+        // variable several switches share (the GPU route's rows) keeps the race's test setting.
         static const struct {
             const char *name;
             s8 value;
         } sBenchRender[] = {
-            { "BENCH_WIDESCREEN", 2 }, { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },
-            { "BENCH_COLOUR", 0 },     { "BENCH_GUARD_BAND", 1 },  { "BENCH_RENDER_AHEAD", 1 },
-            { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 },   { "DKR_MODEL_MESH", 0 },
+            { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },  { "BENCH_COLOUR", 0 },    { "BENCH_GUARD_BAND", 1 },
+            { "DKR_STEREO3D", 0 },      { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 }, { "DKR_MODEL_MESH", 0 },
         };
-        plat_set_gpu_config(PLAT_AA_2X);
-        plat_set_60fps(1);
+        plat_set_60fps(!plat_old_3ds());
         for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
+        plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
+        plat_override_switch("BENCH_RENDER_AHEAD", 1);
+        plat_override_switch("BENCH_WIDESCREEN", 2);
+        plat_override_switch("BENCH_AA", PLAT_AA_2X);
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
                 plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
             }
         }
-        if (config > 0) {
-            for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[config - 1].env[k] != NULL; k++) {
-                plat_override_switch(sSwitches[config - 1].env[k], sSwitches[config - 1].test);
+        for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
+            if (config == i + 1 || config == SWITCH_ALL) {
+                for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
+                    plat_override_switch(sSwitches[i].env[k], sSwitches[i].test);
+                }
             }
         }
+        plat_set_gpu_config(plat_switch("BENCH_AA", PLAT_AA_OFF)); // The bench's anti-aliasing, or a row's
         return;
     }
     plat_set_gpu_config(sBenchConfigs[config].aa);
@@ -252,7 +295,7 @@ static s32 is_bench(void) {
 }
 
 static s32 config_count(void) {
-    return sMode == MODE_SWITCH ? SWITCH_CONFIGS : BENCH_CONFIGS;
+    return sMode == MODE_SWITCH ? SWITCH_RACES : BENCH_CONFIGS;
 }
 
 static const char *config_name(s32 config) {
@@ -260,7 +303,7 @@ static const char *config_name(s32 config) {
         return "?";
     }
     if (sMode == MODE_SWITCH) {
-        return config == 0 ? "usual settings" : sSwitches[config - 1].name;
+        return config == 0 ? "usual settings" : config == SWITCH_ALL ? "all switches together" : sSwitches[config - 1].name;
     }
     return sBenchConfigs[config].name;
 }
@@ -570,6 +613,10 @@ static const char *graphics_setup(void) {
         s32 len = (s32) strlen(text);
         plat_snprintf(text + len, sizeof(text) - len, "/sys%d", (int) share);
     }
+    if (gfx_split_active()) {
+        s32 len = (s32) strlen(text);
+        plat_snprintf(text + len, sizeof(text) - len, "/split");
+    }
     return text;
 }
 
@@ -587,13 +634,14 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     make_path(path, sizeof(path), results_file());
     existing = plat_load_file(path, &size);
     if (existing == NULL) {
-        char header[512];
+        char header[640];
         plat_snprintf(header, sizeof(header),
                       "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
                       "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
                       "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
                       "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
-                      "audio_gaps,audio_drops,sound,graphics\n",
+                      "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
+                      "paced_20fps_pct,paced_slower_pct\n",
                       sModes[sMode].extraColumn ? "," : "",
                       sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
         append_file(results_file(), header);
@@ -635,10 +683,14 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     }
     length = strlen(line);
     // After the mode's own column, so the columns before keep their places in older results files.
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s\n",
+    // Then the frame pacing: the 1% low, and the share of game frames that took one retrace, two, three or more (measured
+    // between frames, so unlike pct_30fps it counts the frames the game meant to show at 60 but couldn't).
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
-                  plat_audio_setup(), graphics_setup());
+                  plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
+                  (int) pct(stats->pacedFrames[0], stats->gameFrames), (int) pct(stats->pacedFrames[1], stats->gameFrames),
+                  (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames));
     append_file(results_file(), line);
     port_log("autorun: %s", line);
     if (str_equal(outcome, "finished")) {
@@ -716,7 +768,7 @@ static void init(void) {
         for (i = 0; i < (s32) ARRAY_COUNT(switchNames); i++) {
             hash_text(plat_getenv(switchNames[i]));
         }
-        for (i = 1; i < SWITCH_CONFIGS; i++) {
+        for (i = 1; i < SWITCH_RACES; i++) {
             hash_text(config_name(i)); // A new switch starts a new run.
         }
     } else if (sMode == MODE_QUICK) {
@@ -1011,8 +1063,9 @@ enum BenchColumn {
     COL_AUDIO_GAPS = COL_COUNT, // Only in results written since the sound columns were added (the benchmark: one on).
     COL_PCT_60FPS = COL_COUNT,  // The benchmark's second column of its own.
 };
-/* The most columns a line has: the benchmark's two, the sound's three and the graphics settings. */
-#define MAX_FIELDS (COL_COUNT + 6)
+/* The most columns a line has: the benchmark's two, the sound's three, the graphics settings and the frame pacing's
+ * four. */
+#define MAX_FIELDS (COL_COUNT + 10)
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 3
@@ -1023,6 +1076,8 @@ typedef struct BenchGroup {
     s32 races;
     double fps, pct30, pct60, rdp, gpu, audio, gaps;
     s32 worstFrame, worstGpu;
+    s32 pacedRaces; // Races with the frame pacing columns (results written before they were added have none).
+    double low1, paced[4];
     s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
 } BenchGroup;
 
@@ -1030,6 +1085,18 @@ static const char *const sLimitNames[BENCH_LIMITS] = { "GPU", "renderer CPU", "g
 
 static double bench_avg(double sum, s32 count) {
     return count ? sum / count : 0.0;
+}
+
+/* A group's frame pacing cells: the 1% low and the share of frames that took one retrace, two, three or more. */
+static const char *pacing_cells(const BenchGroup *g) {
+    static char text[48];
+    if (g->pacedRaces == 0) {
+        return "- | -";
+    }
+    plat_snprintf(text, sizeof(text), "%.1f | %.0f/%.0f/%.0f/%.0f", bench_avg(g->low1, g->pacedRaces),
+                  bench_avg(g->paced[0], g->pacedRaces), bench_avg(g->paced[1], g->pacedRaces),
+                  bench_avg(g->paced[2], g->pacedRaces), bench_avg(g->paced[3], g->pacedRaces));
+    return text;
 }
 
 /* Splits a results line into fields in place. Returns the number of fields. */
@@ -1148,6 +1215,14 @@ static void bench_summary(char *out, s32 size) {
         g->audio += parse_decimal(fields[COL_AUDIO]);
         gapsColumn = quick ? COL_AUDIO_GAPS : COL_AUDIO_GAPS + 1;
         g->gaps += numFields > gapsColumn ? port_atoi(fields[gapsColumn]) : 0;
+        // The frame pacing, after the sound's columns and the graphics settings.
+        if (numFields > gapsColumn + 8) {
+            g->pacedRaces++;
+            g->low1 += parse_decimal(fields[gapsColumn + 4]);
+            for (i = 0; i < 4; i++) {
+                g->paced[i] += parse_decimal(fields[gapsColumn + 5 + i]);
+            }
+        }
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -1167,31 +1242,37 @@ static void bench_summary(char *out, s32 size) {
             length = plat_snprintf(out, size,
                                    "\n### Quick test (averages of the finished races)\n\n"
                                    "No earlier quick test on this console to compare with; the next one will be.\n\n"
-                                   "| track | run, build | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame "
-                                   "| limit | audio ms | sound gaps |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n");
+                                   "| track | run, build | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | GPU ms "
+                                   "| worst GPU | rdp ms | worst frame | limit | audio ms | sound gaps |\n"
+                                   "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n");
         } else {
             length = plat_snprintf(out, size,
                                    "\n### Quick test: run %d against run %d (averages of the finished races)\n\n"
-                                   "| track | run, build | races | fps | 30 fps | GPU ms | worst GPU | rdp ms | worst frame "
-                                   "| limit | audio ms | sound gaps |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
+                                   "| track | run, build | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | GPU ms "
+                                   "| worst GPU | rdp ms | worst frame | limit | audio ms | sound gaps |\n"
+                                   "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
                                    (int) sRun, (int) previousRun);
         }
     } else if (sMode == MODE_SWITCH) {
+        static const char *const sAaNames[3] = { "off", "4x", "2x" };
+        s32 aa = plat_antialias();
         length = plat_snprintf(out, size,
                                "\n### Switches (averages of the finished races)\n\n"
                                "Each switch is flipped by itself; saved is against the usual settings' races. "
-                               "Render settings, the bench's own in every race (see apply_config): 60 fps cap, "
-                               "anti-aliasing 2x, Balanced widescreen, 400 pixels, 3D off.\n\n"
-                               "| track | switch | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | rdp ms | rdp saved "
-                               "| worst GPU | worst frame | limit |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n");
+                               "Render settings, the bench's own in every race (see apply_config): %d fps cap, "
+                               "anti-aliasing %s, %s, 400 pixels, 3D off.\n\n"
+                               "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
+                               "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | limit |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n",
+                               60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
+                               plat_old_3ds() ? "the N64's 4:3" : "Balanced widescreen");
     } else {
         length = plat_snprintf(out, size,
                                "\n### Render settings (averages of the finished races)\n\n"
                                "GPU saved is against the first setting, %s.\n\n"
-                               "| track | settings | races | fps | 30 fps | 60 fps | GPU ms | GPU saved | worst GPU | "
-                               "rdp ms | worst frame | limit | audio ms | sound gaps |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
+                               "| track | settings | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
+                               "| GPU saved | worst GPU | rdp ms | worst frame | limit | audio ms | sound gaps |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
                                sBenchConfigs[0].name);
     }
     if (!quick) {
@@ -1213,9 +1294,9 @@ static void bench_summary(char *out, s32 size) {
                 if (sMode == MODE_SWITCH) {
                     length += plat_snprintf(
                         out + length, size - length,
-                        "| %s | %s | %d | %.1f | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s |\n",
+                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s |\n",
                         groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
-                        bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
+                        pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                         base->races ? "" : "?",
                         base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
                         bench_avg(g->rdp, g->races), base->races ? "" : "?",
@@ -1225,9 +1306,9 @@ static void bench_summary(char *out, s32 size) {
                 }
                 length += plat_snprintf(
                     out + length, size - length,
-                    "| %s | %s | %d | %.1f | %.0f%% | %.0f%% | %.1f | %s%.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
+                    "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
                     groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
-                    bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
+                    pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                     base->races ? "" : "?",
                     base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
                     (int) g->worstGpu, bench_avg(g->rdp, g->races), (int) g->worstFrame, sLimitNames[limit],
@@ -1252,9 +1333,9 @@ static void bench_summary(char *out, s32 size) {
                 return;
             }
             length += plat_snprintf(out + length, size - length,
-                                    "| %s | %s | %d | %.1f | %.0f%% | %.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
+                                    "| %s | %s | %d | %.1f | %s | %.0f%% | %.1f | %d | %.1f | %d | %s | %.2f | %.0f |\n",
                                     groups[t][0].track, g->build, (int) g->races,
-                                    bench_avg(g->fps, g->races), bench_avg(g->pct30, g->races),
+                                    bench_avg(g->fps, g->races), pacing_cells(g), bench_avg(g->pct30, g->races),
                                     bench_avg(g->gpu, g->races), (int) g->worstGpu, bench_avg(g->rdp, g->races),
                                     (int) g->worstFrame, sLimitNames[limit], bench_avg(g->audio, g->races),
                                     g->gaps);
@@ -1267,7 +1348,7 @@ static void bench_summary(char *out, s32 size) {
         }
         length += plat_snprintf(out + length, size - length,
                                 "%s%s: %+.1f fps, 30 fps on %+.0f%% of frames, GPU %+.1f ms, rdp %+.1f ms, worst "
-                                "frame %+d ms, audio %+.2f ms.\n",
+                                "frame %+d ms, audio %+.2f ms",
                                 t == 0 ? "\n" : "", groups[t][0].track,
                                 bench_avg(on->fps, on->races) - bench_avg(off->fps, off->races),
                                 bench_avg(on->pct30, on->races) - bench_avg(off->pct30, off->races),
@@ -1275,6 +1356,15 @@ static void bench_summary(char *out, s32 size) {
                                 bench_avg(on->rdp, on->races) - bench_avg(off->rdp, off->races),
                                 (int) (on->worstFrame - off->worstFrame),
                                 bench_avg(on->audio, on->races) - bench_avg(off->audio, off->races));
+        if (length < size && off->pacedRaces > 0 && on->pacedRaces > 0) {
+            length += plat_snprintf(out + length, size - length, ", 1%% low %+.1f fps, frames slower than 30 fps %+.0f%%",
+                                    bench_avg(on->low1, on->pacedRaces) - bench_avg(off->low1, off->pacedRaces),
+                                    bench_avg(on->paced[2] + on->paced[3], on->pacedRaces) -
+                                        bench_avg(off->paced[2] + off->paced[3], off->pacedRaces));
+        }
+        if (length < size) {
+            length += plat_snprintf(out + length, size - length, ".\n");
+        }
     }
 }
 

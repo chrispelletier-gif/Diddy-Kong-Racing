@@ -39,6 +39,14 @@ def mean(values):
     return sum(values) / len(values) if values else 0.0
 
 
+def pacing(group):
+    """The 1% low fps and the share of frames slower than 30 fps, from the races that have the columns."""
+    paced = [r for r in group if r.get("low1pct_fps") not in (None, "")]
+    if not paced:
+        return "- | -"
+    return f"{mean(num(r, 'low1pct_fps') for r in paced):.1f} | {mean(num(r, 'paced_20fps_pct') + num(r, 'paced_slower_pct') for r in paced):.0f}%"
+
+
 def group_table(rows, key, title):
     groups = defaultdict(list)
     for row in rows:
@@ -46,10 +54,10 @@ def group_table(rows, key, title):
     lines = [
         f"## By {title}",
         "",
-        f"| {title} | races | fps | 30 fps | 20 fps | worst frame | hitches/race | "
+        f"| {title} | races | fps | 1% low | frames slower than 30 | 30 fps | 20 fps | worst frame | hitches/race | "
         + " | ".join(label for _, label in STAGES)
         + " | limit |",
-        "|---|---:|---:|---:|---:|---:|---:|" + "---:|" * len(STAGES) + "---|",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|" + "---:|" * len(STAGES) + "---|",
     ]
     for name, group in sorted(groups.items(), key=lambda item: mean(num(r, "fps") for r in item[1])):
         limits = defaultdict(int)
@@ -57,7 +65,7 @@ def group_table(rows, key, title):
             limits[row["limit"]] += 1
         limit = max(limits, key=limits.get)
         lines.append(
-            f"| {name} | {len(group)} | {mean(num(r, 'fps') for r in group):.1f} | "
+            f"| {name} | {len(group)} | {mean(num(r, 'fps') for r in group):.1f} | {pacing(group)} | "
             f"{mean(num(r, 'pct_30fps') for r in group):.0f}% | {mean(num(r, 'pct_20fps') for r in group):.0f}% | "
             f"{max(num(r, 'worst_frame_ms') for r in group):.0f} ms | "
             f"{mean(num(r, 'hitches') for r in group):.1f} | "

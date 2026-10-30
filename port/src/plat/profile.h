@@ -59,7 +59,9 @@ void prof_render_task(unsigned long long totalNs);
 /*
  * Parts of the renderer's time (PROF_RDP) on the 3DS, for finding where it goes: the backend's draw calls as a whole
  * (what is left of PROF_RDP is the display list walk), and within them the guard band clipping, the GPU settings and
- * the vertex and index writes. Logged with the profile line as averages per rendered frame.
+ * the vertex and index writes. Logged with the profile line as averages per rendered frame. Each breakdown has a
+ * switch, DKR_DRAW_PARTS for the draws' and DKR_WALK_PARTS for the walk's, off by default on an Old 3DS: there each
+ * of their clock reads is a system call, a few thousand a frame, while PROF_RDP needs two.
  */
 enum ProfPart {
     PROF_PART_BACKEND,
@@ -106,6 +108,8 @@ typedef struct ProfStats {
     unsigned int worstRenderUs;   /* Longest renderer busy time for one frame. */
     unsigned int worstGpuUs;      /* Longest GPU drawing time for one frame. */
     unsigned int hitches;         /* Game frames that took longer than 50 ms. */
+    unsigned int low1FrameUs;     /* The 1% low: 99 in 100 game frames came at least this soon (0: no frames). */
+    unsigned int pacedFrames[4];  /* Game frames by the time they took: one retrace (60 fps), two (30), three (20), more. */
     unsigned long long idleNs;    /* Main core idle time (3DS with the idle meter, else 0). */
     unsigned long long renderIdleNs; /* The renderer's core (the same core on an Old 3DS). */
 } ProfStats;
@@ -147,5 +151,8 @@ void prof_set_status(const char *text);
 #ifdef __cplusplus
 }
 #endif
+
+/* The renderer's draw mix since the last call (gfx_rdp.c): per kind (port_drawtag.h) draws, triangles, vertices. */
+void gfx_draw_mix_take(unsigned long out[4][3]);
 
 #endif

@@ -1,3 +1,4 @@
+#include "port_drawtag.h"
 #include "objects.h"
 #include "memory.h"
 
@@ -3707,6 +3708,7 @@ void render_object(Gfx **dList, Mtx **mtx, Vertex **verts, Object *obj) {
     gObjectCurrDisplayList = *dList;
     gObjectCurrMatrix = *mtx;
     gObjectCurrVertexList = *verts;
+    port_draw_tag(gObjectCurrDisplayList++, obj->behaviorId == BHV_RACER ? PORT_DRAW_RACERS : PORT_DRAW_OBJECTS);
     scale = obj->trans.scale;
     render_object_parts(obj);
     obj->trans.scale = scale;

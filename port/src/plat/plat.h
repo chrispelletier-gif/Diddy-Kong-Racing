@@ -24,6 +24,25 @@ extern "C" {
 #define PLAT_DEBUG_TOOLS 1
 #endif
 
+/*
+ * Code layout for the Old 3DS's 16 KB instruction cache (roadmap O9). The renderer's per-draw functions are PLAT_HOT:
+ * on ARM they are put in the .text.hot section, which the 3DS link places together, after the rest of the code, so
+ * that a draw runs through one compact stretch of code rather than functions spread among cold ones. (A section
+ * rather than GCC's hot attribute, which would also have the compiler optimise them harder and inline more into
+ * them. On other targets the macro is empty: a section attribute would keep GCC from splitting those functions' own
+ * cold blocks off, which it does there.) What never runs in a race frame but sits in the same functions (logging,
+ * snapshots, diagnostics, settings read once) is PLAT_COLD, in a function of its own: optimised for size, put in
+ * .text.unlikely, and its call taken as the branch not taken. Rare code that still has to be fast, such as decoding a
+ * texture at load time, is only kept out of line (PLAT_NOINLINE).
+ */
+#ifdef __arm__
+#define PLAT_HOT __attribute__((section(".text.hot")))
+#else
+#define PLAT_HOT
+#endif
+#define PLAT_COLD __attribute__((cold, noinline))
+#define PLAT_NOINLINE __attribute__((noinline))
+
 typedef struct PlatThread PlatThread;
 typedef void (*PlatThreadFunc)(void *arg);
 
@@ -33,6 +52,7 @@ enum PlatThreadKind {
     PLAT_THREAD_HARDWARE, /* Emulated hardware (VI retrace, PI). Always above every game thread. */
     PLAT_THREAD_RCP,      /* Emulated RDP (graphics). May run on a different core. */
     PLAT_THREAD_AUDIO,    /* Emulated RSP audio. May run on a different core. */
+    PLAT_THREAD_RCP2,     /* The renderer's second half (two-core renderer, gfx_split.c): on a core the RDP's isn't. */
 };
 
 void plat_init(void);
@@ -54,6 +74,12 @@ void *plat_get_current_os_thread(void);
  */
 unsigned long long plat_idle_ns(void);
 unsigned long long plat_render_idle_ns(void);
+/* The time the bottom screen's own thread has spent drawing (ns), and how many areas it has drawn (P36: on an Old
+ * 3DS it shares the game's core). 0 where there is no such thread. */
+unsigned long long plat_screen_busy_ns(void);
+/* Nonzero on an Old 3DS (roadmap O8): some switches default differently there. */
+int plat_old_3ds(void);
+unsigned long plat_screen_draws(void);
 
 /* Monotonic time. */
 unsigned long long plat_time_ns(void);
@@ -112,7 +138,9 @@ const char *plat_getenv(const char *name);
  * plat_clear_switch_overrides drops them all). gPlatSwitchEpoch counts the changes, so code that keeps a switch's
  * value reads it again when the epoch moves on (the renderer does at the start of each frame).
  */
-int plat_switch(const char *name, int fallback);
+/* Out of line: a switch's name comparisons are not to be inlined into the renderer's code (plat_fov_tan_scale reads
+ * one, from the vertex load's billboard placing). */
+int plat_switch(const char *name, int fallback) PLAT_NOINLINE;
 void plat_override_switch(const char *name, int value);
 void plat_clear_switch_overrides(void);
 extern volatile int gPlatSwitchEpoch;
@@ -131,14 +159,15 @@ const char *const *plat_rom_search_dirs(void);
 /* Directory where the ROM and save files live. */
 const char *plat_data_dir(void);
 
-void plat_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* Logging is cold: the code around a log call is laid out as the branch not taken (PLAT_HOT says why). */
+void plat_log(const char *fmt, ...) __attribute__((format(printf, 1, 2), cold));
 /* A start-up progress line: shown on the bottom screen on the 3DS, and logged. */
-void plat_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-void plat_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
+void plat_status(const char *fmt, ...) __attribute__((format(printf, 1, 2), cold));
+void plat_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn, cold));
 /* Keeps logging after the start-up lines, which the 3DS otherwise stops at to spare the SD card. */
-void plat_log_keep(void);
+void plat_log_keep(void) __attribute__((cold));
 /* Also writes log lines to this file until called with NULL, which closes it (3DS only). */
-void plat_log_copy_to(const char *path);
+void plat_log_copy_to(const char *path) __attribute__((cold));
 
 /*
  * 3DS only: closing the application. The game's threads keep running until the process ends, so the renderer stops
@@ -283,6 +312,14 @@ extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
  */
 int plat_render_ahead(void);
 void plat_set_render_ahead(int frames);
+/*
+ * The game time the frame the renderer is drawing now covers, in retraces (its logic step), set by the renderer thread
+ * before each display list. The Old 3DS frame pacer (gfx_c3d.c) shows each frame that long after the one before.
+ */
+void plat_set_frame_step(int retraces);
+int plat_frame_step(void);
+/* The two-core renderer (gfx_split.c) going on or off: the system core's share it needs is held only while on. */
+void plat_split_render_cores(int on);
 
 /* The usual setting of the switches from the other ports survey (DKR_GPU_TRANSFORM, DKR_TRACK_MESH, DKR_MODEL_MESH,
  * DKR_STEREO_ONCE) while settings.txt has none: off, until hardware says otherwise; a test build can be made with
