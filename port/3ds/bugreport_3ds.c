@@ -787,13 +787,17 @@ static void button_thread(void *arg) {
              sReportRequested) &&
             !sBusy) {
             sBusy = 1;
+            net_3ds_background(1);
             report_now();
+            net_3ds_background(0);
             sReportRequested = 0;
             sBusy = 0;
         }
         if (sResultsRequested && !sBusy) {
             sBusy = 1;
+            net_3ds_background(1);
             send_test_results();
+            net_3ds_background(0);
             sBusy = 0;
         }
         last = keys;

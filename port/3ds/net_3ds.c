@@ -16,6 +16,24 @@ static LightLock sLock = 1; // Unlocked (LightLock_Init) before anything runs.
 static int sUsers;
 static u32 *sSocBuffer;
 
+// The lowest priority a game thread gets is 0x3F (plat_3ds.c, which only the idle meter uses); this is just above.
+#define BACKGROUND_PRIO 0x3E
+static __thread s32 sSavedPrio = -1;
+
+void net_3ds_background(int background) {
+    s32 prio = 0;
+
+    if (background && sSavedPrio < 0) {
+        if (R_SUCCEEDED(svcGetThreadPriority(&prio, CUR_THREAD_HANDLE)) && prio < BACKGROUND_PRIO) {
+            sSavedPrio = prio;
+            svcSetThreadPriority(CUR_THREAD_HANDLE, BACKGROUND_PRIO);
+        }
+    } else if (!background && sSavedPrio >= 0) {
+        svcSetThreadPriority(CUR_THREAD_HANDLE, sSavedPrio);
+        sSavedPrio = -1;
+    }
+}
+
 int net_3ds_begin(char *error, size_t errorSize) {
     static int sCurlReady;
     u32 wifi = 0;

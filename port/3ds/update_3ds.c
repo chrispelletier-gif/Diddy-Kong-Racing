@@ -746,8 +746,13 @@ int update_3ds_touch(int x, int y) {
 
 /* Looks for new builds; returns 1 if the choices are shown, 0 (back to idle) if there are none. */
 static int check_updates(void) {
+    int found;
+
     sState = STATE_BUSY;
-    if (check()) {
+    net_3ds_background(1);
+    found = check();
+    net_3ds_background(0);
+    if (found) {
         sState = STATE_CHOOSE;
         draw_choices();
         return 1;
@@ -760,7 +765,7 @@ static void update_thread(void *arg) {
     (void) arg;
     bugreport_watch_thread("update");
     for (;;) {
-        int button;
+        int button, installed;
         // Every two seconds without a tap, the test run's buttons and rows are brought up to date (a run ends by
         // itself).
         if (LightEvent_WaitTimeout(&sTapEvent, 2000000000LL) != 0) {
@@ -857,7 +862,10 @@ static void update_thread(void *arg) {
                     plat_request_ui_sound(PLAT_UI_SOUND_SELECT);
                     sState = STATE_BUSY;
                     sChosen = button;
-                    if (install(&sChannels[button])) {
+                    net_3ds_background(1);
+                    installed = install(&sChannels[button]);
+                    net_3ds_background(0);
+                    if (installed) {
                         sState = STATE_INSTALLED;
                         draw_text_button("Quit to finish the update");
                     } else {
