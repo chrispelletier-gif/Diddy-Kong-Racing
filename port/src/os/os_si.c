@@ -288,6 +288,15 @@ void osContGetQuery(OSContStatus *data) {
 
 s32 osContStartReadData(OSMesgQueue *mq) {
     port_input_poll(sControllers, MAXCONTROLLERS);
+    if (port_autorun_enabled()) {
+        // The unattended test run drives everything itself (the karts by the AI, the menus by direct calls): a stray
+        // press, such as TRY AGAIN after a race, would break it. The bottom screen's Stop button is the way out.
+        for (s32 i = 0; i < MAXCONTROLLERS; i++) {
+            sControllers[i].buttons = 0;
+            sControllers[i].stickX = 0;
+            sControllers[i].stickY = 0;
+        }
+    }
     flush_saves(FALSE);
     port_post_mesg(mq, NULL);
     return 0;
