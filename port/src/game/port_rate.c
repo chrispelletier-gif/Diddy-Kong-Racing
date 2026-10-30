@@ -10,10 +10,12 @@
 
 s32 gPortHalfStep;
 s32 gPortSkipTick;
+s32 gPortLogicStep;
 
 static s32 sRateFix = -1; // -1 until DKR_RATE_FIX is read.
 
 void port_set_logic_rate(s32 updateRate) {
+    gPortLogicStep = updateRate;
     if (sRateFix < 0) {
         const char *env = plat_getenv("DKR_RATE_FIX");
         sRateFix = env == NULL || atoi(env) != 0;

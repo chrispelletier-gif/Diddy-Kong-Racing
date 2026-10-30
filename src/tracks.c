@@ -1,3 +1,4 @@
+#include "port_drawtag.h"
 #include "tracks.h"
 
 #include "asset_loading.h"
@@ -1901,6 +1902,7 @@ void render_level_geometry_and_objects(void) {
         }
     }
 
+    port_draw_tag(gTrackDL++, PORT_DRAW_OTHER);
     if (gVoidData != NULL && func_80027568()) {
         void_check(segmentIds, numberOfSegments, get_current_viewport());
     }
@@ -1936,6 +1938,7 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         return; // The portrait camera shows the model alone.
     }
 #endif
+    port_draw_tag(gTrackDL++, PORT_DRAW_TRACK);
     //! @bug: batchInfo is uninitalized
     numberVertices = (batchInfo + 1)->verticesOffset - batchInfo->verticesOffset;
     segment = &gCurrentLevelModel->segments[segmentId];

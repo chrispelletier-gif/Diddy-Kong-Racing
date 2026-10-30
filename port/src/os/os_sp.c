@@ -31,6 +31,9 @@ static s32 sRcpStarted;
 static volatile s32 sGfxTasksPending;
 // Graphics tasks handed over and finished so far (kernel lock), for waiting on the ones queued at a given moment.
 static volatile u32 sGfxTasksSubmitted, sGfxTasksFinished;
+/* Each display list's logic step (gPortLogicStep), by the order they were handed over; they are drawn in that order. */
+#define GFX_STEP_RING 8
+static u8 sGfxSteps[GFX_STEP_RING];
 /* Tasks handed to the workers whose completion has not been raised yet (kernel lock). */
 static s32 sRcpTasksBusy;
 /* What the audio worker is doing, for the 3DS watchdog's stall report. */
@@ -92,6 +95,7 @@ static void gfx_thread(void *arg) {
         gPlatGfxStage = "waiting for a display list";
         task = worker_next(&sGfxWorker);
         port_raise_event(OS_EVENT_SP);
+        plat_set_frame_step(sGfxSteps[sGfxTasksFinished % GFX_STEP_RING]);
         start = plat_time_ns();
         port_gfx_run_task(task);
         prof_render_task(plat_time_ns() - start);
@@ -179,6 +183,7 @@ void port_rcp_gfx_submitted(void) {
     gPlatCounters[PLAT_COUNTER_GFX_QUEUED]++;
     plat_klock();
     sGfxTasksPending++;
+    sGfxSteps[sGfxTasksSubmitted % GFX_STEP_RING] = (u8) gPortLogicStep;
     sGfxTasksSubmitted++;
     plat_kunlock();
 }

@@ -27,8 +27,13 @@ $(SHADER_BIN): $(SHADER_SRC)
 	@echo "PICASSO $^"
 	@$(TOOLS_BIN)/picasso -o $@ $^
 
-$(SHADER_ASM) $(SHADER_HDR): $(SHADER_BIN)
-	@cd $(dir $<) && $(TOOLS_BIN)/bin2s -a 4 -H shader_shbin.h shader.shbin > shader_shbin.s
+# One rule makes both files: as "asm hdr: bin" a parallel make ran bin2s twice at once, and the assembler could read a
+# half-written .s and leave an empty object (an undefined shader_shbin at link).
+$(SHADER_ASM): $(SHADER_BIN)
+	@cd $(dir $<) && $(TOOLS_BIN)/bin2s -a 4 -H shader_shbin.h shader.shbin > shader_shbin.s.tmp && \
+		mv shader_shbin.s.tmp shader_shbin.s
+
+$(SHADER_HDR): $(SHADER_ASM)
 
 $(SHADER_OBJS): $(SHADER_ASM)
 	@$(CC) $(ARCH) -x assembler-with-cpp -c $< -o $@

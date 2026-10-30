@@ -151,7 +151,7 @@ static inline float gfx_flat_px(float x, float narrow, float width) {
 }
 
 /* Backend entry points. */
-void gfxb_init(void);
+void gfxb_init(void) __attribute__((cold));
 void gfxb_start_frame(void);
 void gfxb_end_frame(void);
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a);
@@ -190,6 +190,8 @@ typedef struct GfxModelParams {
 /* What gfxb_model_check says about a model draw whose model space box is boxMin..boxMax. */
 enum { GFX_MODEL_CPU, GFX_MODEL_GPU, GFX_MODEL_HIDDEN };
 int gfxb_gpu_transform(void);
+/* Whether the walk may cull back faces itself this frame (DKR_CPU_CULL): not while the frame is drawn for two eyes. */
+int gfxb_cpu_cull_ok(void);
 int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]);
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles);

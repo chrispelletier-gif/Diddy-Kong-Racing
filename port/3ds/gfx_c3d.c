@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "gfx/gfx_backend.h"
+#include "gfx/gfx_split.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
 #include "plat/settings.h"
@@ -98,6 +99,7 @@ typedef struct C3DTexture {
     struct C3DTexture *prev, *next; // In sTextures (textures in VRAM, P17)
     int toVram;                     // Waiting to be copied to VRAM (promote_textures)
 } C3DTexture;
+_Static_assert(offsetof(C3DTexture, tex) == 0, "a C3DTexture's address is its C3D_Tex's (hang_draw_start)");
 
 static C3D_RenderTarget *sTarget;
 static C3D_RenderTarget *sTargetRight; // The right eye's, while the screen is in 3D (see the stereo section)
@@ -154,6 +156,10 @@ static int sMipmapsUsed = 1, sMipmapsShown, sColourBoost;
 static volatile int sWideSetting = 1, s800Setting = 1, sStereoSetting = 1;
 static int sWide;               // This frame is drawn wide
 static float sScale3D = NARROW; // Clip x of 3D draws: NARROW, or 1 for widescreen
+/* Edge trimming as this frame draws it (plat_3ds_guard_band_setting, read once a frame: the per-draw path stays off
+ * the switch lookup, a string search that costs an Old 3DS instruction-cache refills). */
+static int sGuardBandFrame = 1;
+int plat_3ds_guard_band_setting(void);
 static int sStereo;             // This frame is drawn twice, once for each eye
 static int s800;                // The screen shows 800 pixels across
 static int sWideUnsupported;    // An original 2DS, which can't show 800 pixels
@@ -314,7 +320,7 @@ static void promote_textures(void) {
 }
 
 /* Moves one texture's memory from VRAM to the linear heap, with the GPU idle and outside a citro3d frame. */
-static int texture_to_linear(C3DTexture *t) {
+PLAT_COLD static int texture_to_linear(C3DTexture *t) {
     u32 total = C3D_TexCalcTotalSize(t->tex.size, t->levels);
     void *data = linearAlloc(total);
     if (data == NULL) {
@@ -333,7 +339,7 @@ static int texture_to_linear(C3DTexture *t) {
  * With the GPU idle: moves every texture in VRAM to the linear heap, for a render target that needs the room.
  * Returns how many moved.
  */
-static int evict_vram_textures(void) {
+PLAT_COLD static int evict_vram_textures(void) {
     C3DTexture *t;
     int moved = 0, count = 0;
     for (t = sTextures; t != NULL; t = t->next) {
@@ -397,7 +403,7 @@ static struct {
     u8 scissorFlat;
 } sGpu;
 
-static void forget_gpu_state(void) {
+PLAT_HOT static void forget_gpu_state(void) {
     sGpu.known = 0;
 }
 
@@ -410,12 +416,16 @@ static void forget_gpu_state(void) {
  *    plane, so anything beyond it is pinned to the farthest depth instead of being clipped,
  *  - then everything is rotated a quarter turn for the 3DS screen: x' = y, y' = -x.
  */
-static inline void to_screen(const GfxVertex *v, float *pos) {
+static inline void to_screen_scaled(const GfxVertex *v, float *pos, float scale3D) {
     float z = 0.5f * (v->z - v->w);
     pos[0] = v->y;
-    pos[1] = -v->x * sScale3D;
+    pos[1] = -v->x * scale3D;
     pos[2] = z < 0.0f ? z : 0.0f;
     pos[3] = v->w;
+}
+
+static inline void to_screen(const GfxVertex *v, float *pos) {
+    to_screen_scaled(v, pos, sScale3D);
 }
 
 /* The same for a flat draw: its 4:3 shape kept on a wide screen (gfx_flat_x), and in stereo its w made sEyeConv, so
@@ -440,7 +450,7 @@ static inline void place(const GfxVertex *v, float *pos, int flat) {
 
 /* The attribute settings of the vertex formats. The shader's inputs are v0 position, v1 and v2 the texture
  * coordinates, v3 colour; the new formats list them in the same order so that only the last one differs. */
-static void init_vertex_formats(void) {
+PLAT_COLD static void init_vertex_formats(void) {
     C3D_AttrInfo *attr;
     int i;
     sVfmtOld = plat_getenv("DKR_VERTEX_FORMAT") != NULL && atoi(plat_getenv("DKR_VERTEX_FORMAT")) == 48;
@@ -480,26 +490,34 @@ static void init_vertex_formats(void) {
  * format starts the buffer setting at sVboUsed (rounded up to 16 bytes) with the new stride; the same format carries
  * on from the last draw's vertices, so the settings stay as they are.
  */
-static int use_vertex_format(int fmt) {
-    int stride = sVfmtStride[fmt];
-    if (fmt != sVfmtBound) {
-        C3D_BufInfo *buf = C3D_GetBufInfo();
-        sVboUsed = (sVboUsed + 15) & ~15;
-        sVfmtBase = sVboUsed;
-        if (fmt != sVfmtAttrSet) {
-            C3D_SetAttrInfo(&sVfmtAttr[fmt]);
-            sVfmtAttrSet = fmt;
-        }
-        BufInfo_Init(buf);
-        BufInfo_Add(buf, sVbo + sVfmtBase, stride, fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 3 : 4,
-                    fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 0x210 : 0x3210);
-        sBufMesh = NULL;
-        if (sVfmtBound >= 0) {
-            sVfmtSwitches++;
-        }
-        sVfmtBound = fmt;
+/* The new buffer setting (and attribute setting) of a format change: out of line, as most draws keep the format. */
+static void __attribute__((noinline)) bind_vertex_format(int fmt) {
+    C3D_BufInfo *buf = C3D_GetBufInfo();
+    sVboUsed = (sVboUsed + 15) & ~15;
+    sVfmtBase = sVboUsed;
+    if (fmt != sVfmtAttrSet) {
+        C3D_SetAttrInfo(&sVfmtAttr[fmt]);
+        sVfmtAttrSet = fmt;
     }
-    return (sVboUsed - sVfmtBase) / stride;
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, sVbo + sVfmtBase, sVfmtStride[fmt], fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 3 : 4,
+                fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 0x210 : 0x3210);
+    sBufMesh = NULL;
+    if (sVfmtBound >= 0) {
+        sVfmtSwitches++;
+    }
+    sVfmtBound = fmt;
+}
+
+PLAT_HOT static int use_vertex_format(int fmt) {
+    if (fmt != sVfmtBound) {
+        bind_vertex_format(fmt);
+    }
+    // Divided by a constant for each format: the ARM11 has no divide instruction, and this is on the per-draw path.
+    return fmt == VFMT_SHORT   ? (sVboUsed - sVfmtBase) / (int) sizeof(C3DVertex)
+           : fmt == VFMT_LONG  ? (sVboUsed - sVfmtBase) / (int) sizeof(C3DVertex2)
+           : fmt == VFMT_MODEL ? (sVboUsed - sVfmtBase) / (int) sizeof(GfxModelVertex)
+                               : (sVboUsed - sVfmtBase) / (int) sizeof(C3DVertexOld);
 }
 
 /*
@@ -605,7 +623,7 @@ static void gpu_test_mark_passed(void) {
     plat_save_file(path, text, strlen(text));
 }
 
-static void gpu_self_test(void) {
+PLAT_COLD static void gpu_self_test(void) {
     static const char *const sNames[] = {
         "empty frame",
         "triangle",
@@ -933,14 +951,23 @@ static int wide_setting(void) {
     return plat_switch("BENCH_WIDESCREEN", sWideSetting);
 }
 
+/* The widescreen style as frames use it: read once a frame (apply_screen_mode), as the renderer asks for it at every
+ * billboard load and the switch lookup is a string search; -1 until the first frame. */
+static volatile int sWideStyleFrame = -1;
+
+static int wide_style(void) {
+    int style = sWideStyleFrame;
+    return style >= 0 ? style : wide_setting();
+}
+
 float plat_aspect_scale(void) {
-    return wide_setting() ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
+    return wide_style() ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
 }
 
 float plat_fov_tan_scale(void) {
     // Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
     static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
-    int style = wide_setting();
+    int style = wide_style();
     return style >= 0 && style <= 3 ? sTanScale[style] : 1.0f;
 }
 
@@ -1183,11 +1210,12 @@ static void apply_screen_mode(void) {
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;
 
-    if ((wide_setting() != 0) != sWide && sTarget != NULL) {
+    sWideStyleFrame = wide_setting();
+    if ((sWideStyleFrame != 0) != sWide && sTarget != NULL) {
         // The game only clears its 4:3 part of the screen: clear the sides of the last wide picture.
         sFrameStarted = 0;
     }
-    sWide = wide_setting() != 0;
+    sWide = sWideStyleFrame != 0;
     sScale3D = sWide ? 1.0f : NARROW;
     apply_stereo_tuning(stereo, slider);
     if (sTarget == NULL ||
@@ -1248,9 +1276,10 @@ static void apply_screen_mode(void) {
 
 static void alloc_frame_slots(void);
 
-/* An Old 3DS (roadmap O8): its one core already runs the renderer at under 20 fps, so the defaults it starts with
- * (until the player picks in Settings) leave out what costs CPU or GPU time: anti-aliasing, 800 pixels and stereo 3D
- * (which draws everything twice). The player's choice always wins. */
+/* An Old 3DS (roadmap O8): the defaults it starts with (until the player picks in Settings) leave out 800 pixels and
+ * stereo 3D (which draws everything twice). With the two-core renderer its GPU is mostly idle, and switch bench #266
+ * (Jungle Falls) kept 97-98% of frames at 30 with anti-aliasing 2x or Balanced widescreen, so those are its defaults
+ * now, as on a New 3DS (whose anti-aliasing default is 4x). The player's choice always wins. */
 static int is_old_3ds(void) {
     bool isNew3DS = false;
     APT_CheckNew3DS(&isNew3DS);
@@ -1258,9 +1287,10 @@ static int is_old_3ds(void) {
 }
 
 /* The screen settings (see sWideSetting), and whether the console can show 800 pixels across. */
-static void read_screen_settings(void) {
+PLAT_COLD static void read_screen_settings(void) {
     u8 model = 0;
     int old3ds = is_old_3ds();
+    // An Old 3DS starts with the N64's own 4:3 picture: it is being made to run well at that size first (O8).
     sWideSetting = settings_get("widescreen", 2);
     sWideSetting = sWideSetting < 0 || sWideSetting > 3 ? 2 : sWideSetting;
     s800Setting = settings_get("wide800", !old3ds) != 0;
@@ -1293,7 +1323,7 @@ void gfxb_init(void) {
         // Anti-aliasing is the Settings menu's choice; until one is made, 4x unless DKR_AA says otherwise (0 off, 1 4x,
         // 2 2x, as settings.txt has it). An fb16 line left in settings.txt by an older build is ignored.
         const char *aa = plat_getenv("DKR_AA");
-        sDefaultAa = settings_get("aa", aa != NULL ? atoi(aa) : is_old_3ds() ? PLAT_AA_OFF : PLAT_AA_4X);
+        sDefaultAa = settings_get("aa", aa != NULL ? atoi(aa) : is_old_3ds() ? PLAT_AA_2X : PLAT_AA_4X);
         if (sDefaultAa < PLAT_AA_OFF || sDefaultAa > PLAT_AA_2X) {
             sDefaultAa = PLAT_AA_4X;
         }
@@ -1388,6 +1418,7 @@ static struct {
     int frame;
     unsigned int gapUs, gpuUs;
     unsigned int swaps, replaced, swapGapUs; // Since the previous frame end; swapGapUs is between the last two swaps.
+    int step;                                // The frame's logic step, in retraces (the game time it covers).
     int haveNote;
     PlatGameNote note;
 } sTiming[TIMING_FRAMES];
@@ -1398,22 +1429,23 @@ static u64 sLastEndTick;
  * thread), so the swap is wrapped (-Wl,--wrap=gfxScreenSwapBuffers) to see when, not when the CPU ended the frame. */
 static volatile unsigned int sSwapCount, sSwapReplaced, sSwapGapUs;
 static u64 sLastSwapTick;
-
 /*
- * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, on by default since switch bench #246: Crescent Island
- * and Haunted Woods went from 48 to 60 fps with the same GPU time; DKR_TRIPLE_BUFFER=0 = two). libctru has two, so a frame finished
- * before the last one reached the screen waits for it (wait_for_present). With three, of our own in linear memory,
- * it is copied into one that is neither on screen nor waiting to be, and carries on. citro3d copies a frame into what
- * gfxGetFramebuffer returns and shows it with gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours: the
- * first while sTripleGet is set (only around the frame's C3D_FrameEnd, so the error console still gets libctru's), the
- * second for a frame handed over with sTripleFrame set (triple_choose). The swap runs on the GSP thread after the GPU
- * finishes, which libctru may report before it has run, so triple_choose first waits for the last one (sTripleSwaps
- * catching up with sTripleQueued) before it changes anything the swap reads.
+ * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, on by default since switch bench #246: 48 to 60 fps
+ * on Crescent Island and Haunted Woods with the same GPU time; off on an Old 3DS, where #251 had it at most 1 fps
+ * ahead but its memory left textures without a GPU copy, #252). libctru has two, so a frame finished before the last one reached the screen waits for it
+ * (wait_for_present). With three, of our own in linear memory, it is copied into one that is neither on screen nor
+ * waiting to be, and carries on. citro3d copies a frame into what gfxGetFramebuffer returns and shows it with
+ * gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours: the first while sTripleGet is set (only around
+ * the frame's C3D_FrameEnd, so the error console still gets libctru's), the second for a frame handed over with
+ * sTripleFrame set (triple_choose). The swap runs on the GSP thread after the GPU finishes, which libctru may report
+ * before it has run, so triple_choose first waits for the last one (sTripleSwaps catching up with sTripleQueued)
+ * before it changes anything the swap reads.
  * sTripleShown is the buffer on screen, sTripleMaybe one that may have reached it (presented while another was still
  * waiting, just as the screen took that), sTriplePresented the last presented: none of them is written next. They are
  * kept while frames go to libctru's buffers, as one of ours may still be on screen then.
  */
 #define TRIPLE_BYTES (GSP_SCREEN_WIDTH * GSP_SCREEN_HEIGHT_TOP_2X * 3) // 800 pixels across or two eyes, 24-bit
+#define TRIPLE_TEXTURE_RESERVE (8 * 1024 * 1024) // Linear memory that must stay free for textures (Old 3DS)
 static int sTripleWanted;
 static volatile int sTripleFrame, sTripleGet;
 static volatile unsigned int sTripleQueued, sTripleSwaps;
@@ -1520,6 +1552,14 @@ static int triple_choose(void) {
         return 0;
     }
     if (sTriple[0] == NULL) {
+        // Textures come first: an Old 3DS has about 5 MB of linear memory for them, and taking 1.7 MB of it here left
+        // 35 textures without a GPU copy (bug report #252).
+        if (plat_old_3ds() && linearSpaceFree() < 3 * TRIPLE_BYTES + TRIPLE_TEXTURE_RESERVE) {
+            plat_log("top screen: %lu KB of linear memory free, too little for a third buffer: two kept",
+                     (unsigned long) (linearSpaceFree() / 1024));
+            sTripleFail = 1;
+            return 0;
+        }
         for (i = 0; i < 3; i++) {
             sTriple[i] = linearAlloc(TRIPLE_BYTES);
             if (sTriple[i] == NULL) {
@@ -1581,6 +1621,73 @@ static void wait_for_present(void) {
     }
 }
 
+/*
+ * Frame pacing (Old 3DS, roadmap O8). Each frame moves the game on by its logic step: the retraces its main loop
+ * measured for the frame before. On an Old 3DS with the renderer on the game's core, the renderer and the game take
+ * turns, so a frame is shown whenever its drawing happens to end: steps of 3, 3, 3 could reach the screen 2, 4 and 3
+ * retraces apart, and the race jumps although the frame rate looks fine. So a frame that is ready early waits until
+ * its step has passed since the last one was shown; one that is late goes at once and the count starts again from
+ * it. The wait never makes the gap longer than the last one: the game measures its steps from how long its own
+ * frames took, and a frame held back holds the game back too (it waits for a free frame slot), so waiting for whole
+ * steps fed on itself and pulled the frame rate down (switch bench #247: 15.0 fps, 17.9 without pacing).
+ * DKR_FRAME_PACE=0 = old; on by default on an Old 3DS only, and there only while the frames are handed over from the
+ * game's core: on the system core (Renderer System 80%, or the two-core renderer's second half there) its short sleeps
+ * wait for the core's next time slice, and bench #261 (Crescent Island, System 80%) ran 15.0 fps with it and 21.1
+ * without.
+ */
+static u32 sPaceShown;    // The retrace the last frame was handed over for.
+static int sPaceInterval; // Retraces between the last two hand-overs.
+static unsigned int sPaceFrames, sPaceWaits, sPaceLate;
+
+/* Every 300 frames: how many waited to be on time, and how many were late (shown later than their step). */
+static void pace_count(int waited, int late) {
+    sPaceFrames++;
+    sPaceWaits += waited;
+    sPaceLate += late;
+    if (sPaceFrames == 300) {
+        plat_log("frame pacing: of %u frames, %u waited to be on time, %u were late", sPaceFrames, sPaceWaits,
+                 sPaceLate);
+        sPaceFrames = sPaceWaits = sPaceLate = 0;
+    }
+}
+
+static void pace_frame(void) {
+    u32 now = gPlatCounters[PLAT_COUNTER_VI];
+    int step = plat_frame_step();
+    s32 ahead;
+    if (!plat_switch("DKR_FRAME_PACE", plat_old_3ds() && svcGetProcessorID() == 0) || step < 1 || step > 6) {
+        sPaceInterval = (int) (now - sPaceShown);
+        sPaceShown = now;
+        return;
+    }
+    if (step > sPaceInterval) {
+        step = sPaceInterval;
+    }
+    // A frame handed over now reaches the screen at the next retrace (the GPU takes a few ms): the last one handed
+    // over at retrace P was shown at P + 1, so this one, due step retraces after it, is handed over at P + step.
+    ahead = (s32) (sPaceShown + step - now);
+    if (ahead <= 0 || ahead > 6) {
+        sPaceInterval = (int) (now - sPaceShown);
+        sPaceShown = now; // Late (or after a load or the HOME menu): shown at once, the next counts from it.
+        pace_count(0, ahead < 0);
+        return;
+    }
+    pace_count(1, 0);
+    {
+        unsigned long long start = plat_time_ns();
+        while ((s32) (gPlatCounters[PLAT_COUNTER_VI] - (now + ahead)) < 0) {
+            svcSleepThread(1000 * 1000);
+        }
+        if (prof_enabled()) {
+            unsigned long long ns = plat_time_ns() - start;
+            prof_add(PROF_GPU_WAIT, ns);
+            prof_part(PROF_PART_PRESENT_WAIT, ns);
+        }
+    }
+    sPaceInterval = (int) (now + ahead - sPaceShown);
+    sPaceShown = now + ahead;
+}
+
 static u8 *sScreenSeen[2], *sShownScreen;
 
 static void find_recent_screen(void) {
@@ -1617,6 +1724,7 @@ static void record_timing(void) {
         sTiming[sTimingNext].swaps = swaps - lastSwaps;
         sTiming[sTimingNext].replaced = replaced - lastReplaced;
         sTiming[sTimingNext].swapGapUs = sSwapGapUs;
+        sTiming[sTimingNext].step = plat_frame_step();
         sTiming[sTimingNext].haveNote = plat_get_game_note(&sTiming[sTimingNext].note);
         sTimingNext = (sTimingNext + 1) % TIMING_FRAMES;
     }
@@ -1625,10 +1733,10 @@ static void record_timing(void) {
     sLastEndTick = now;
 }
 
-static void log_timing(void) {
+PLAT_COLD static void log_timing(void) {
     int i;
     plat_log("last %d frames (CPU time since the previous frame ended, GPU time of the one before, top screen swaps "
-             "since then and the time between the last two, player):", TIMING_FRAMES);
+             "since then and the time between the last two, logic step, player):", TIMING_FRAMES);
     for (i = 0; i < TIMING_FRAMES; i++) {
         int k = (sTimingNext + i) % TIMING_FRAMES;
         char note[80];
@@ -1640,17 +1748,17 @@ static void log_timing(void) {
         } else {
             plat_snprintf(note, sizeof(note), "(player note busy)");
         }
-        plat_log("  frame %d: +%u.%u ms, gpu %u.%u ms, %u swap%s +%u.%u ms%s, %s", sTiming[k].frame,
+        plat_log("  frame %d: +%u.%u ms, gpu %u.%u ms, %u swap%s +%u.%u ms%s, step %d, %s", sTiming[k].frame,
                  sTiming[k].gapUs / 1000, sTiming[k].gapUs / 100 % 10, sTiming[k].gpuUs / 1000,
                  sTiming[k].gpuUs / 100 % 10, sTiming[k].swaps, sTiming[k].swaps == 1 ? "" : "s",
                  sTiming[k].swapGapUs / 1000, sTiming[k].swapGapUs / 100 % 10,
-                 sTiming[k].replaced != 0 ? " (REPLACED one before it was shown)" : "", note);
+                 sTiming[k].replaced != 0 ? " (REPLACED one before it was shown)" : "", sTiming[k].step, note);
     }
 }
 
 /* Takes the ring's slots, as many as fit; called at start-up, or when the switch bench turns the ring on. Slots once
  * taken are kept. */
-static void allocate_recent_frames(void) {
+PLAT_COLD static void allocate_recent_frames(void) {
     // Leave most of linear memory for textures (each slot is 576 KB).
     while (sRecentCount < RECENT_SLOTS && linearSpaceFree() >= RECENT_MAX_BYTES + 14 * 1024 * 1024) {
         sRecent[sRecentCount] = linearAlloc(RECENT_MAX_BYTES);
@@ -1711,7 +1819,7 @@ static int line_score(const u8 *pixels, int rows, int bpp, int first, int step, 
 
 /* Logs where a line was found and the bytes under it, to tell a stray memory write (samples, a game structure) from
  * something drawn. */
-static void log_line_bytes(const u8 *buffer, int row) {
+PLAT_COLD static void log_line_bytes(const u8 *buffer, int row) {
     const u8 *p = buffer + row * TOP_HEIGHT * sRecentScreenBpp;
     char hex[3 * 48 + 1];
     int i;
@@ -1804,7 +1912,7 @@ static void record_recent_frame(void) {
  * logs every frame's score. Called once the GPU has finished the snapshot frame, so the ring is idle. */
 void plat_save_file_later(const char *path, void *data, unsigned int size);
 
-static void save_recent_frames(int snapshotFrame) {
+PLAT_COLD static void save_recent_frames(int snapshotFrame) {
     int score[RECENT_SLOTS], where[RECENT_SLOTS], i, k;
     char path[256];
 
@@ -1921,7 +2029,7 @@ static void sync_from_memory(const void *data, u32 size) {
     GSPGPU_InvalidateDataCache(data, size);
 }
 
-static void remember_texture(const C3DTexture *t) {
+PLAT_COLD static void remember_texture(const C3DTexture *t) {
     u32 size = texture_words(t) * 4;
     u32 *copy;
     int i;
@@ -1953,7 +2061,7 @@ static void save_words(const char *what, int index, const void *data, u32 words)
 }
 
 /* Once the GPU has finished the snapshot frame, and before any texture is deleted. */
-static void check_textures_after_frame(void) {
+PLAT_COLD static void check_textures_after_frame(void) {
     int i, j, changed = 0;
     for (i = 0; i < sNumChecked; i++) {
         const C3DTexture *t = sChecked[i].tex;
@@ -1996,7 +2104,7 @@ static void check_textures_after_frame(void) {
 }
 
 /* Where the other buffers in GPU memory are, to see what lies next to a texture that changed. */
-static void log_buffers(void) {
+PLAT_COLD static void log_buffers(void) {
     u16 w, h;
     u8 *top0, *top1, *bottom;
     top0 = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
@@ -2013,7 +2121,7 @@ static void log_buffers(void) {
              (unsigned long) (vramSpaceFree() / 1024));
 }
 
-static void save_command_list(void) {
+PLAT_COLD static void save_command_list(void) {
     char path[256];
     FILE *f;
     plat_snprintf(path, sizeof(path), "%s/diff_%05d_cmd.bin", plat_data_dir(), sSnapshotFrame);
@@ -2033,9 +2141,10 @@ static void save_command_list(void) {
  */
 typedef struct HangDraw {
     u32 cmdStart, cmdEnd; // Word offsets of the draw's commands in the frame's command list
+    /* The draw's settings (a GfxDrawState) up to its textures: one block copy a draw, instead of picking the fields
+     * the report prints out one by one (hang_draw_start is on the per-draw path). */
+    u8 state[offsetof(GfxDrawState, textures)];
     u16 triangles;
-    u8 blend, alphaTest, alphaRef, depthTest, depthWrite, decal, fog, cull, cycles;
-    u8 cc[2][8]; // Per cycle: rgb a, b, c, d, then alpha a, b, c, d
     const C3D_Tex *tex[2];
 } HangDraw;
 #define HANG_DRAWS 1024
@@ -2085,7 +2194,7 @@ static u32 cmd_position(void) {
 }
 
 /* Two frame slots, each with a vertex buffer and a command list as large as citro3d's own. */
-static void alloc_frame_slots(void) {
+PLAT_COLD static void alloc_frame_slots(void) {
     gxCmdQueue_s *queue = &__C3D_Context.gxQueue;
     gxCmdEntry_s *entries;
     int i;
@@ -2183,16 +2292,9 @@ static void bind_target(C3D_RenderTarget *target) {
     GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
 }
 
-/* Draws count vertices from vertex on, or the count vertices the indices name; once, or in 3D once for each eye. */
-static void draw_prims(int vertex, int count, const u16 *indices) {
-    if (!sStereo || sOnceFrame) {
-        if (indices != NULL) {
-            C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
-        } else {
-            C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
-        }
-        return;
-    }
+/* Draws count vertices from vertex on, or the count vertices the indices name, once for each eye (3D). Out of line
+ * so that the per-draw path of a frame drawn once (draw_prims) stays short. */
+static void __attribute__((noinline)) draw_prims_stereo(int vertex, int count, const u16 *indices) {
     // sEyeSep is positive for the left eye's offset; what is sEyeConv away stays at the depth of the screen.
     bind_target(sTarget);
     write_eye(sEyeSep, -sEyeSep * sEyeConv);
@@ -2204,6 +2306,17 @@ static void draw_prims(int vertex, int count, const u16 *indices) {
     bind_target(sTargetRight);
     write_eye(-sEyeSep, sEyeSep * sEyeConv);
     if (indices != NULL) {
+        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+    } else {
+        C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
+    }
+}
+
+/* Draws count vertices from vertex on, or the count vertices the indices name; once, or in 3D once for each eye. */
+static inline void draw_prims(int vertex, int count, const u16 *indices) {
+    if (sStereo && !sOnceFrame) {
+        draw_prims_stereo(vertex, count, indices);
+    } else if (indices != NULL) {
         C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
     } else {
         C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
@@ -2241,7 +2354,7 @@ static void stereo_once_lists(FrameSlot *slot) {
     }
 }
 
-static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
+PLAT_HOT static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
     FrameSlot *slot = &sSlots[sRec];
     HangDraw *d;
     int i;
@@ -2253,28 +2366,16 @@ static HangDraw *hang_draw_start(const GfxDrawState *state, int numTriangles) {
     d->cmdStart = cmd_position();
     d->cmdEnd = d->cmdStart;
     d->triangles = numTriangles;
-    d->blend = state->blend;
-    d->alphaTest = state->alphaTest;
-    d->alphaRef = state->alphaRef;
-    d->depthTest = state->depthTest;
-    d->depthWrite = state->depthWrite;
-    d->decal = state->decal;
-    d->fog = state->fogEnabled;
-    d->cull = state->cullMode;
-    d->cycles = state->combiner.numCycles;
+    memcpy(d->state, state, sizeof(d->state));
     for (i = 0; i < 2; i++) {
-        const GfxCCEquation *rgb = &state->combiner.rgb[i], *alpha = &state->combiner.alpha[i];
-        const u8 cc[8] = { rgb->a, rgb->b, rgb->c, rgb->d, alpha->a, alpha->b, alpha->c, alpha->d };
-        memcpy(d->cc[i], cc, sizeof(cc));
-        d->tex[i] = (state->textures[i] != NULL && state->textures[i]->backendData != NULL)
-                        ? &((const C3DTexture *) state->textures[i]->backendData)->tex
-                        : NULL;
+        // The C3D_Tex is the first member of a C3DTexture, which outlives the frame (process_pending_frees).
+        d->tex[i] = (state->textures[i] != NULL) ? (const C3D_Tex *) state->textures[i]->backendData : NULL;
     }
     return d;
 }
 
 /* Writes gpu_hang.txt and gpu_hang_cmd.bin, once, when the GPU stops responding during the frame last handed over. */
-static void save_gpu_hang(void) {
+PLAT_COLD static void save_gpu_hang(void) {
     const gxCmdQueue_s *queue = &__C3D_Context.gxQueue;
     const FrameSlot *slot = sOnGpu >= 0 ? &sSlots[sOnGpu] : NULL;
     const u32 *base = slot != NULL ? slot->cmd : NULL;
@@ -2327,14 +2428,16 @@ static void save_gpu_hang(void) {
         "address; '*' = in the command list the GPU stopped in)\n");
     for (i = 0; i < slot->numDraws && i < HANG_DRAWS; i++) {
         const HangDraw *d = &slot->draws[i];
+        const GfxDrawState *s = (const GfxDrawState *) d->state; // Only the fields before the textures are there.
         int inStuck = stuckEntry >= 0 && d->cmdEnd > listStart && d->cmdStart < listEnd;
         int t;
         ADD("%c%4d cmd %5lu-%5lu tris %3u blend %u at %u/%u z %u/%u dec %u fog %u cull %u cyc %u", inStuck ? '*' : ' ',
-            i, (unsigned long) d->cmdStart, (unsigned long) d->cmdEnd, d->triangles, d->blend, d->alphaTest,
-            d->alphaRef, d->depthTest, d->depthWrite, d->decal, d->fog, d->cull, d->cycles);
-        for (t = 0; t < d->cycles && t < 2; t++) {
-            const u8 *c = d->cc[t];
-            ADD(" cc %u,%u,%u,%u/%u,%u,%u,%u", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+            i, (unsigned long) d->cmdStart, (unsigned long) d->cmdEnd, d->triangles, s->blend, s->alphaTest,
+            s->alphaRef, s->depthTest, s->depthWrite, s->decal, s->fogEnabled, s->cullMode, s->combiner.numCycles);
+        for (t = 0; t < s->combiner.numCycles && t < 2; t++) {
+            const GfxCCEquation *rgb = &s->combiner.rgb[t], *alpha = &s->combiner.alpha[t];
+            ADD(" cc %u,%u,%u,%u/%u,%u,%u,%u", rgb->a, rgb->b, rgb->c, rgb->d, alpha->a, alpha->b, alpha->c,
+                alpha->d);
         }
         for (t = 0; t < 2; t++) {
             if (d->tex[t] != NULL) {
@@ -2375,7 +2478,7 @@ static void save_gpu_hang(void) {
 }
 
 /* Logs every draw of the current frame. */
-void gfxb_log_draws(int snapshotFrame) {
+PLAT_COLD void gfxb_log_draws(int snapshotFrame) {
     sLogFrame = sFrameCount;
     sSnapshotFrame = snapshotFrame;
     sSnapshotPending = snapshotFrame >= 0;
@@ -2660,11 +2763,11 @@ static void set_unif(int u, float x, float y, float z, float w) {
  * the reference renderer drawing them from the same draw. So the changed uniforms are written now and once more with
  * the draw, as write_settings_twice does for the other settings. DKR_UNIF_TWICE=0 writes them once.
  */
-static void unif_write_twice(void) {
+static void PLAT_COLD unif_write_twice_now(void) {
     unsigned changed = sUnifChanged;
     int u;
     sUnifChanged = 0;
-    if (!sUnifTwice || changed == 0) {
+    if (!sUnifTwice) {
         return;
     }
     C3Di_UpdateContext();
@@ -2675,11 +2778,16 @@ static void unif_write_twice(void) {
     }
 }
 
-/* The uniforms for a draw the CPU transformed: the shader passes it through, as shader.v.pica does. */
-static void set_cpu_uniforms(void) {
-    if (!sTransformOn || (sUnifKnown && !sUnifModel)) {
-        return;
+/* Only GPU vertex maths (P30) changes uniforms between draws: the test stays in the draws, the work out of their way
+ * (it would put the per-draw code past the Old 3DS's instruction cache). */
+static inline void unif_write_twice(void) {
+    if (__builtin_expect(sUnifChanged != 0, 0)) {
+        unif_write_twice_now();
     }
+}
+
+/* The uniforms for a draw the CPU transformed: the shader passes it through, as shader.v.pica does. */
+static void PLAT_COLD set_cpu_uniforms_now(void) {
     set_unif(UNIF_MTX + 0, 1.0f, 0.0f, 0.0f, 0.0f);
     set_unif(UNIF_MTX + 1, 0.0f, 1.0f, 0.0f, 0.0f);
     set_unif(UNIF_MTX + 2, 0.0f, 0.0f, 1.0f, 0.0f);
@@ -2691,6 +2799,12 @@ static void set_cpu_uniforms(void) {
     set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
     sUnifKnown = 1;
     sUnifModel = 0;
+}
+
+static inline void set_cpu_uniforms(void) {
+    if (__builtin_expect(sTransformOn && !(sUnifKnown && !sUnifModel), 0)) {
+        set_cpu_uniforms_now();
+    }
 }
 
 /*
@@ -2782,6 +2896,21 @@ static void transform_frame_drawn(int frame) {
     }
 }
 
+/*
+ * Whether the walk may drop back faces itself (P40). Not in 3D, where each eye's offset can turn a nearly edge-on
+ * triangle round, and not with DKR_NO_CULL. With the two-core renderer sStereo is the backend's, up to two frames
+ * behind, so the slider is read here too: while split, a raised slider stops the walk culling before the backend
+ * turns 3D on.
+ */
+int gfxb_cpu_cull_ok(void) {
+    static int noCull = -1;
+
+    if (noCull < 0) {
+        noCull = plat_getenv("DKR_NO_CULL") != NULL;
+    }
+    return !noCull && !sStereo && (!gfx_split_active() || osGet3DSliderState() <= 0.0f);
+}
+
 int gfxb_gpu_transform(void) {
     return sTransformOn;
 }
@@ -2797,8 +2926,11 @@ int gfxb_gpu_transform(void) {
  */
 static int sSwitchEpoch = -1;
 static int sSplitMode, sEarlyDepth, sDepthFill;
+static int sDrawLean; // DKR_DRAW_LEAN: the one-pass draw, see gfxb_draw_indexed
+static void set_frame_band(void);
 static int sFastState = 1; // DKR_FAST_STATE (roadmap P23): the cheaper per-draw settings path
 static int sFastClip = 1;  // DKR_FAST_CLIP (roadmap P22): triangles wholly beyond the band dropped, not clipped
+static int sDrawParts;     // DKR_DRAW_PARTS: time each draw's parts while the profiler is on (gfxb_draw_indexed)
 
 static void read_switches(void) {
     int recent, i;
@@ -2809,15 +2941,22 @@ static void read_switches(void) {
     sSplitMode = plat_switch("DKR_GPU_SPLIT", 0);
     sLineWatch = plat_switch("DKR_LINE_WATCH", 0);
     sEarlyDepth = plat_switch("DKR_EARLY_DEPTH", 0) != 0;
-    sSvcFlush = plat_switch("DKR_SVC_FLUSH", 0) != 0;
+    // On by default on an Old 3DS only (switch bench #241: with the renderer on the system core the GPU service's
+    // flushes are slow there). The New 3DS's #176 showed no difference.
+    sSvcFlush = plat_switch("DKR_SVC_FLUSH", plat_old_3ds()) != 0;
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
+    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0;
+    // The lean draw (gfxb_draw_indexed): on by default on an Old 3DS only, until a New 3DS bench has measured it.
+    sDrawLean = plat_switch("DKR_DRAW_LEAN", plat_old_3ds()) != 0;
+    // Off on an Old 3DS: the five to seven clock reads a draw are system calls there (see the draws' parts below).
+    sDrawParts = plat_switch("DKR_DRAW_PARTS", !plat_old_3ds()) != 0;
+    // GPU vertex maths (P30) and stereo frames made once (P33): Settings > Picture rows, off by default.
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
     sAdaptive = plat_switch("DKR_ADAPTIVE_AA", 0);
-    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", 1) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -2832,9 +2971,12 @@ static void read_switches(void) {
              "settings path %s",
              sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes", sLineWatch,
              sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off", sFastState ? "short" : "full");
-    plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s",
+    plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s, draws timed in "
+             "parts %s",
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
-             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all");
+             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all",
+             sDrawParts ? "on" : "off");
+    plat_log("switches: draw path %s", sDrawLean ? "lean (vertices tested and written in one pass)" : "full");
     plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
              sTransformHung ? " (but it hung before: left off)" : !sProgramTUsable ? " (shader not usable)" : "",
              sStereoOnce ? "made once, drawn twice" : "made for each eye");
@@ -2900,9 +3042,11 @@ void gfxb_start_frame(void) {
         bind_target(sTarget); // In case citro3d's frame hasn't begun, or the last frame ended on the right eye's.
     }
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
+    set_frame_band();
     promote_textures();
     forget_gpu_state();
     // The switch bench sets these itself (BENCH_*), so the player's settings don't change what it measures.
+    sGuardBandFrame = plat_3ds_guard_band_setting();
     sMipmapsUsed = plat_switch("BENCH_MIPMAPS", sMipmapSetting) != 0;
     sMipmapsShown = plat_switch("BENCH_MIPMAPS", sMipmapSetting) == 2;
     sColourBoost = plat_switch("BENCH_COLOUR", sColourSetting);
@@ -2917,7 +3061,7 @@ void gfxb_start_frame(void) {
 
 /* DKR_GFX_TEST draws a reference quad: a 16x16 texture, red on top, blue at the bottom, with a green left column. */
 static int sTestMode;
-static void draw_test_pattern(void) {
+PLAT_COLD static void draw_test_pattern(void) {
     static GfxTexture sTex;
     static unsigned int sPixels[16 * 16];
     GfxDrawState state;
@@ -3080,6 +3224,7 @@ void gfxb_end_frame(void) {
         sDrainSplits = 0;
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
+        pace_frame();
         if (!triple_choose()) {
             wait_for_present();
         }
@@ -3315,7 +3460,7 @@ static void tint_level(unsigned int *pixels, unsigned int count, int level) {
 }
 
 /* Builds and uploads the levels after the first, from the texture at GPU size. Returns 0 if out of memory. */
-static int upload_mip_levels(C3DTexture *t, const GfxTexture *tex, int format) {
+PLAT_NOINLINE static int upload_mip_levels(C3DTexture *t, const GfxTexture *tex, int format) {
     unsigned int pw = t->tex.width, ph = t->tex.height, x, y;
     unsigned int *pixels = malloc(pw * ph * sizeof(unsigned int));
     int level;
@@ -3424,7 +3569,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
 }
 
 /* For snapshots: logs a texture whose memory no longer holds what was uploaded. */
-static void verify_texture(const GfxTexture *tex) {
+PLAT_COLD static void verify_texture(const GfxTexture *tex) {
     const C3DTexture *t = (const C3DTexture *) tex->backendData;
     unsigned int pw, ph, tx, ty, wrong = 0, firstAt = 0;
     u32 firstGot = 0, firstWant = 0;
@@ -3678,42 +3823,53 @@ static void init_stage(TevStage *st) {
  */
 enum { FOG_PIXEL, FOG_VERTEX, FOG_OFF };
 
-static int fog_mode(void) {
-    static int sMode = -1;
-    if (sMode < 0) {
-        sMode = plat_getenv("DKR_NO_FOG") != NULL ? FOG_OFF : plat_getenv("DKR_VERTEX_FOG") != NULL ? FOG_VERTEX : FOG_PIXEL;
+static int sFogMode = -1;
+
+static void __attribute__((noinline, cold)) read_fog_mode(void) {
+    sFogMode = plat_getenv("DKR_NO_FOG") != NULL ? FOG_OFF : plat_getenv("DKR_VERTEX_FOG") != NULL ? FOG_VERTEX : FOG_PIXEL;
+}
+
+static inline int fog_mode(void) {
+    if (__builtin_expect(sFogMode < 0, 0)) {
+        read_fog_mode();
     }
-    return sMode;
+    return sFogMode;
 }
 
 static int sLutMul = 0x7FFFFFFF, sLutOffset; // What the fog table was made for
 static int sFogOn = -1;
 
-static void apply_fog(const GfxDrawState *state) {
+/* Builds and binds the fog table for the draw's fog settings. Out of line: a draw's fog settings mostly match the
+ * table's, so the per-draw code doesn't carry this. */
+static void __attribute__((noinline)) bind_fog_lut(const GfxDrawState *state) {
     static C3D_FogLut sLut;
+    float data[256];
+    int i;
+    // Depth d runs from 1 at the near plane to 0 at the far plane, and z / w = 1 - 2d (see to_screen).
+    for (i = 0; i <= 128; i++) {
+        float zw = 1.0f - 2.0f * (i / 128.0f);
+        float fog = zw * state->fogMul + state->fogOffset;
+        float keep;
+        fog = (fog < 0.0f) ? 0.0f : (fog > 255.0f) ? 255.0f : fog;
+        keep = 1.0f - fog / 255.0f; // The table holds how much of the original colour remains.
+        if (i < 128) {
+            data[i] = keep;
+        }
+        if (i > 0) {
+            data[i + 127] = keep - data[i - 1];
+        }
+    }
+    FogLut_FromArray(&sLut, data);
+    C3D_FogLutBind(&sLut);
+    sLutMul = state->fogMul;
+    sLutOffset = state->fogOffset;
+}
+
+PLAT_HOT static void apply_fog(const GfxDrawState *state) {
     int on = state->fogEnabled && fog_mode() == FOG_PIXEL;
 
     if (on && (state->fogMul != sLutMul || state->fogOffset != sLutOffset)) {
-        float data[256];
-        int i;
-        // Depth d runs from 1 at the near plane to 0 at the far plane, and z / w = 1 - 2d (see to_screen).
-        for (i = 0; i <= 128; i++) {
-            float zw = 1.0f - 2.0f * (i / 128.0f);
-            float fog = zw * state->fogMul + state->fogOffset;
-            float keep;
-            fog = (fog < 0.0f) ? 0.0f : (fog > 255.0f) ? 255.0f : fog;
-            keep = 1.0f - fog / 255.0f; // The table holds how much of the original colour remains.
-            if (i < 128) {
-                data[i] = keep;
-            }
-            if (i > 0) {
-                data[i + 127] = keep - data[i - 1];
-            }
-        }
-        FogLut_FromArray(&sLut, data);
-        C3D_FogLutBind(&sLut);
-        sLutMul = state->fogMul;
-        sLutOffset = state->fogOffset;
+        bind_fog_lut(state);
     }
     if (on) {
         u32 color = state->fog[0] | (state->fog[1] << 8) | (state->fog[2] << 16);
@@ -3831,7 +3987,9 @@ static void add_colour_boost(TevProgram *prog, int level) {
                 GPU_TEVOP_RGB_SRC_COLOR, GPU_PREVIOUS, GPU_TEVOP_RGB_SRC_COLOR, 0);
 }
 
-static void compile_combiner(const GfxDrawState *state, TevProgram *prog, int boost) {
+/* Out of line: only a draw whose combiner differs from the last one compiled runs it, so the per-draw code doesn't
+ * carry it. */
+static void __attribute__((noinline)) compile_combiner(const GfxDrawState *state, TevProgram *prog, int boost) {
     static const GfxCCEquation passthrough = { GFX_CC_ZERO, GFX_CC_ZERO, GFX_CC_ZERO, GFX_CC_COMBINED };
     int cycle;
 
@@ -3895,9 +4053,23 @@ typedef struct CombinerInputs {
     unsigned char primLodFrac;
     unsigned char fogStage;
     unsigned char boost;
-} CombinerInputs;
+} __attribute__((aligned(4))) CombinerInputs; // Whole words, compared as such (apply_combiner)
 
-static void apply_combiner(const GfxDrawState *state) {
+/* Whether two blocks of n words are the same: in place of a library memcmp, a call into code that is otherwise never
+ * in the instruction cache (what the per-draw code pays for it). */
+static inline int same_words(const void *a, const void *b, unsigned int n) {
+    const u32 *wa = (const u32 *) a, *wb = (const u32 *) b;
+    unsigned int i;
+#pragma GCC unroll 1
+    for (i = 0; i < n; i++) {
+        if (wa[i] != wb[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+PLAT_HOT static void apply_combiner(const GfxDrawState *state) {
     // The last combiner compiled, which most batches share with the one before.
     static TevProgram sProg;
     static CombinerInputs sLast;
@@ -3914,7 +4086,8 @@ static void apply_combiner(const GfxDrawState *state) {
     in.fogStage = state->fogEnabled && fog_mode() == FOG_VERTEX;
     // Not for the depth only draws that clear the depth buffer, which write no colour.
     in.boost = sDepthOnly ? 0 : sColourBoost;
-    if (sCompiled && memcmp(&in, &sLast, sizeof(in)) == 0) {
+    _Static_assert(sizeof(in) % 4 == 0 && sizeof(C3D_TexEnv) % 4 == 0, "the combiner inputs and stages are compared as words");
+    if (sCompiled && same_words(&in, &sLast, sizeof(in) / 4)) {
         if (sGpu.known) {
             return; // Same stages as the last batch.
         }
@@ -3961,7 +4134,7 @@ static void apply_combiner(const GfxDrawState *state) {
             C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
             C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
         }
-        if (!sGpu.known || memcmp(&stage, &sGpu.texEnv[i], sizeof(stage)) != 0) {
+        if (!sGpu.known || !same_words(&stage, &sGpu.texEnv[i], sizeof(stage) / 4)) {
             C3D_SetTexEnv(i, &stage);
             sGpu.texEnv[i] = stage;
         }
@@ -3974,37 +4147,50 @@ static void apply_combiner(const GfxDrawState *state) {
 
 /******************************** Drawing ********************************/
 
+/* The Show mipmap setting changed since a texture's levels were built: builds them again. The GPU may still be
+ * drawing the last frame with them, which can show one frame of mixed levels. Off the per-draw path: cold. */
+static void __attribute__((noinline, cold)) retint_levels(C3DTexture *t, GfxTexture *tex) {
+    if (upload_mip_levels(t, tex, gpu_format(tex))) {
+        gpu_flush(t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
+    }
+    t->tinted = sMipmapsShown;
+}
+
 /* Returns whether the texture changed. */
-static int bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV) {
+PLAT_HOT static int bind_texture(int unit, GfxTexture *tex, float *scaleU, float *scaleV) {
     C3DTexture *t = (tex != NULL) ? (C3DTexture *) tex->backendData : NULL;
     C3D_Tex *bind = (t != NULL) ? &t->tex : &sWhiteTex;
     int changed = !sGpu.known || bind != sGpu.tex[unit];
-    if (t != NULL && t->levels > 0 && t->tinted != sMipmapsShown && tex->pixels != NULL && !in_vram(t->tex.data)) {
-        // The Show setting changed since the levels were built. The GPU may still be drawing the last frame with
-        // them, which can show one frame of mixed levels.
-        if (upload_mip_levels(t, tex, gpu_format(tex))) {
-            gpu_flush(t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
-        }
-        t->tinted = sMipmapsShown;
-    }
     if (t != NULL) {
-        int maxLevel = (sMipmapsUsed && !t->point) ? t->levels : 0;
-        if (t->tex.maxLevel != maxLevel) {
-            t->tex.maxLevel = maxLevel; // The mipmap setting changed since it was set.
-            changed = 1;
+        *scaleU = t->scaleU;
+        *scaleV = t->scaleV;
+        // Only a texture with levels has mipmap settings to keep up to date: without them its maxLevel is 0 already
+        // (set_texture_filter).
+        if (t->levels > 0) {
+            int maxLevel;
+            if (t->tinted != sMipmapsShown && tex->pixels != NULL && !in_vram(t->tex.data)) {
+                retint_levels(t, tex);
+            }
+            maxLevel = (sMipmapsUsed && !t->point) ? t->levels : 0;
+            if (t->tex.maxLevel != maxLevel) {
+                t->tex.maxLevel = maxLevel; // The mipmap setting changed since it was set.
+                changed = 1;
+            }
         }
+    } else {
+        *scaleU = 1.0f;
+        *scaleV = 1.0f;
     }
     if (changed) {
         C3D_TexBind(unit, bind);
         sGpu.tex[unit] = bind;
     }
-    *scaleU = (t != NULL) ? t->scaleU : 1.0f;
-    *scaleV = (t != NULL) ? t->scaleV : 1.0f;
     return changed;
 }
 
-/* Converts a scissor rectangle on the N64 screen to the rotated framebuffer, for a flat draw or a 3D one. */
-static void set_scissor(const short rect[4], int flat) {
+/* Converts a scissor rectangle on the N64 screen to the rotated framebuffer, for a flat draw or a 3D one. Out of
+ * line: it runs when the scissor changes, a few times a frame, not for every draw. */
+static void __attribute__((noinline)) set_scissor(const short rect[4], int flat) {
     float x0, x1;
     int left, right, top, bottom;
     if (flat && sWide) {
@@ -4097,24 +4283,29 @@ static void set_scissor(const short rect[4], int flat) {
  * such draws out of about 155. DKR_REWRITE=0 writes twice only in the known cases, as before.
  */
 
+static int sFlushMode = -1, sAfterClear = -1, sRewrite = -1; // drain_before_draw's settings, read on its first call
+static unsigned int sLastKey = ~0u;
+
+static void __attribute__((noinline, cold)) read_drain_settings(void) {
+    const char *env = plat_getenv("DKR_FB_FLUSH");
+    sFlushMode = env != NULL ? atoi(env) : 0;
+    plat_log("framebuffer flush between draws: %s",
+             sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always");
+    env = plat_getenv("DKR_AFTER_CLEAR");
+    sAfterClear = env != NULL ? atoi(env) : 1;
+    env = plat_getenv("DKR_REWRITE");
+    sRewrite = env != NULL ? atoi(env) : 1;
+    plat_log("settings written twice: %s", sRewrite ? "on every blend or depth change" : "known cases only");
+}
+
 /* Returns whether the draw's settings are to be written twice: a draw whose blending or depth settings differ from
  * the draw before, or the first draw of a frame. */
-static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
-    static int sFlushMode = -1, sAfterClear = -1, sRewrite = -1;
-    static unsigned int sLastKey = ~0u;
+PLAT_HOT static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
     unsigned int key;
     int split, first;
 
-    if (sFlushMode < 0) {
-        const char *env = plat_getenv("DKR_FB_FLUSH");
-        sFlushMode = env != NULL ? atoi(env) : 0;
-        plat_log("framebuffer flush between draws: %s",
-                 sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always");
-        env = plat_getenv("DKR_AFTER_CLEAR");
-        sAfterClear = env != NULL ? atoi(env) : 1;
-        env = plat_getenv("DKR_REWRITE");
-        sRewrite = env != NULL ? atoi(env) : 1;
-        plat_log("settings written twice: %s", sRewrite ? "on every blend or depth change" : "known cases only");
+    if (__builtin_expect(sFlushMode < 0, 0)) {
+        read_drain_settings();
     }
     key = state->blend | (state->alphaTest << 4) | (state->alphaRef << 8) | (state->depthTest << 16) |
           (state->depthWrite << 17) | (sDepthOnly << 18) | (sClearing ? KEY_CLEAR : 0);
@@ -4145,14 +4336,15 @@ static int drain_before_draw(const GfxDrawState *state, int numTriangles) {
  * are drawn half transparent. A box that comes out grey has the right blending but an opaque texture; one that shows
  * the letter or shadow shape at full brightness has the right texture but no blending.
  */
-static int apply_alpha_diagnostic(const GfxDrawState *state) {
-    static int sOn = -1;
+static int sDiagAlpha = -1; // Read on the first call; set_all_state only calls while it isn't known to be off
+
+static int __attribute__((noinline, cold)) apply_alpha_diagnostic(const GfxDrawState *state) {
     int i;
 
-    if (sOn < 0) {
-        sOn = plat_getenv("DKR_DIAG_ALPHA") != NULL;
+    if (sDiagAlpha < 0) {
+        sDiagAlpha = plat_getenv("DKR_DIAG_ALPHA") != NULL;
     }
-    if (!sOn || !IS_BLENDED(state->blend)) {
+    if (!sDiagAlpha || !IS_BLENDED(state->blend)) {
         return 0;
     }
     for (i = 0; i < 6; i++) {
@@ -4172,8 +4364,13 @@ static int apply_alpha_diagnostic(const GfxDrawState *state) {
     return 1;
 }
 
-static void set_draw_state(const GfxDrawState *state) {
-    static int sNoCull = -1;
+static int sNoCull = -1; // DKR_NO_CULL, read on set_draw_state's first call
+
+static void __attribute__((noinline, cold)) read_cull_setting(void) {
+    sNoCull = plat_getenv("DKR_NO_CULL") != NULL;
+}
+
+PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
     u8 depthEnable, depthFunc, depthMask, cull, early;
 
     if (!sGpu.known || state->blend != sGpu.blend) {
@@ -4233,8 +4430,8 @@ static void set_draw_state(const GfxDrawState *state) {
         C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f * plat_camera_near() / 10.0f : 0.0f);
         sGpu.decal = state->decal;
     }
-    if (sNoCull < 0) {
-        sNoCull = plat_getenv("DKR_NO_CULL") != NULL;
+    if (__builtin_expect(sNoCull < 0, 0)) {
+        read_cull_setting();
     }
     cull = (sNoCull || state->cullMode == 0) ? GPU_CULL_NONE
            : state->cullMode == 1             ? GPU_CULL_BACK_CCW
@@ -4271,28 +4468,46 @@ static void set_draw_state(const GfxDrawState *state) {
 static GfxDrawState sCheckedState;
 static int sCheckedDepthOnly;
 
-static int same_but_textures(const GfxDrawState *a, const GfxDrawState *b) {
-    return memcmp(a, b, offsetof(GfxDrawState, fogEnabled) + 1) == 0 && a->fogMul == b->fogMul &&
-           a->fogOffset == b->fogOffset && a->cullMode == b->cullMode && a->flat == b->flat &&
-           memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
+/* Compared a word at a time in place (the fields up to fogEnabled are the first nine words and a byte): a library
+ * memcmp is a call into code that is otherwise never in the instruction cache, which is what a draw pays for here. */
+static inline int same_but_textures(const GfxDrawState *a, const GfxDrawState *b) {
+    const u32 *wa = (const u32 *) a, *wb = (const u32 *) b;
+    int i;
+    _Static_assert(offsetof(GfxDrawState, fogEnabled) == 36 && offsetof(GfxDrawState, scissor) % 4 == 0 &&
+                       sizeof(a->scissor) == 8,
+                   "same_but_textures compares the draw state's words");
+    for (i = 0; i < 9; i++) {
+        if (wa[i] != wb[i]) {
+            return 0;
+        }
+    }
+    return a->fogEnabled == b->fogEnabled && a->fogMul == b->fogMul && a->fogOffset == b->fogOffset &&
+           a->cullMode == b->cullMode && a->flat == b->flat &&
+           wa[offsetof(GfxDrawState, scissor) / 4] == wb[offsetof(GfxDrawState, scissor) / 4] &&
+           wa[offsetof(GfxDrawState, scissor) / 4 + 1] == wb[offsetof(GfxDrawState, scissor) / 4 + 1];
+}
+
+static int sStateCache = -1; // DKR_STATE_CACHE, read on set_all_state's first call
+
+static void __attribute__((noinline, cold)) read_state_cache_setting(void) {
+    const char *env = plat_getenv("DKR_STATE_CACHE");
+    sStateCache = env != NULL ? atoi(env) : 1;
+    plat_log("GPU settings: %s", sStateCache == 0   ? "all set for every draw"
+                                 : sStateCache == 2 ? "only changes are set"
+                                                    : "only changes are set, all draw settings with a new texture");
 }
 
 /* Sets every GPU setting a draw uses. */
-static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
-    static int sCache = -1;
+PLAT_HOT static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
     int newTexture;
 
-    if (sCache < 0) {
-        const char *env = plat_getenv("DKR_STATE_CACHE");
-        sCache = env != NULL ? atoi(env) : 1;
-        plat_log("GPU settings: %s", sCache == 0   ? "all set for every draw"
-                                     : sCache == 2 ? "only changes are set"
-                                                   : "only changes are set, all draw settings with a new texture");
+    if (__builtin_expect(sStateCache < 0, 0)) {
+        read_state_cache_setting();
     }
     if (sFastState && sGpu.known && sDepthOnly == sCheckedDepthOnly && same_but_textures(state, &sCheckedState)) {
         newTexture = bind_texture(0, state->textures[0], su0, sv0);
         newTexture |= bind_texture(1, state->textures[1], su1, sv1);
-        if (newTexture && sCache == 1) {
+        if (newTexture && sStateCache == 1) {
             C3D_CullFace((GPU_CULLMODE) sGpu.cull); // As below
         }
         return;
@@ -4302,11 +4517,11 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
     apply_combiner(state);
     apply_fog(state);
     set_draw_state(state);
-    if (newTexture && sGpu.known && sCache == 1) {
+    if (newTexture && sGpu.known && sStateCache == 1) {
         C3D_CullFace((GPU_CULLMODE) sGpu.cull); // Same value: only marks the group for writing.
     }
-    sGpu.known = sCache != 0;
-    if (apply_alpha_diagnostic(state)) {
+    sGpu.known = sStateCache != 0;
+    if (__builtin_expect(sDiagAlpha != 0, 0) && apply_alpha_diagnostic(state)) {
         // It wrote the combiner stages itself.
         forget_gpu_state();
     }
@@ -4327,7 +4542,7 @@ static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, flo
  * after the first write; the short way (DKR_FAST_STATE) puts back the flags the first write cleared, which marks the
  * same groups with the same values, so the command list comes out the same for less work.
  */
-static void write_settings_twice(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
+PLAT_HOT static void write_settings_twice(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
     if (sFastState) {
         u32 again = __C3D_Context.flags & C3D_SETTINGS_FLAGS;
         C3Di_UpdateContext();
@@ -4362,13 +4577,25 @@ static float band_for(int pixels) {
     return band < GUARD_BAND ? band : GUARD_BAND;
 }
 
+/* The band for the frame's render target, once a frame for the lean draw (the full draw works it out for each draw,
+ * as it always did; the GPU self test draws before the first frame). Clip x runs along the target's height (the
+ * screen's 400 or 800 pixels across), clip y along its width. */
+static void set_frame_band(void) {
+    sBandX = band_for(sTarget->frameBuf.height);
+    sBandY = band_for(sTarget->frameBuf.width);
+}
+
 /* Which sides of the band a vertex is beyond: bit p for clip_distance's plane p, OUTSIDE_BEHIND for w <= 0. */
 #define OUTSIDE_PLANES 0xF
 #define OUTSIDE_BEHIND 0x10
-static inline int outside_band(const GfxVertex *v) {
-    float gx = sBandX * v->w, gy = sBandY * v->w;
+static inline int outside_band_of(const GfxVertex *v, float bandX, float bandY) {
+    float gx = bandX * v->w, gy = bandY * v->w;
     return (v->x > gx) | ((-v->x > gx) << 1) | ((v->y > gy) << 2) | ((-v->y > gy) << 3) |
            (v->w <= 0.0f ? OUTSIDE_BEHIND : 0);
+}
+
+static inline int outside_band(const GfxVertex *v) {
+    return outside_band_of(v, sBandX, sBandY);
 }
 
 static float clip_distance(const GfxVertex *v, int plane) {
@@ -4417,12 +4644,58 @@ void plat_3ds_set_guard_band_setting(int on) {
     settings_set("guardband", sGuardBand);
 }
 
+static void __attribute__((noinline, cold)) read_guard_band_setting(void) {
+    const char *env = plat_getenv("DKR_GUARD_BAND");
+    sGuardBand = settings_get("guardband", env == NULL || atoi(env) != 0) != 0;
+}
+
 int plat_3ds_guard_band_setting(void) {
-    if (sGuardBand < 0) {
-        const char *env = plat_getenv("DKR_GUARD_BAND");
-        sGuardBand = settings_get("guardband", env == NULL || atoi(env) != 0) != 0;
+    if (__builtin_expect(sGuardBand < 0, 0)) {
+        read_guard_band_setting();
     }
     return plat_switch("BENCH_GUARD_BAND", sGuardBand);
+}
+
+/*
+ * Cuts one triangle (its corners a, b, c) to the guard band and writes the fan of the polygon that is left (at most 7
+ * corners, so 5 triangles) to out, each triangle of the fan with its own three corners, as the triangle list before
+ * indexing had. Returns how many corners were written (a multiple of 3, at most 15).
+ */
+static int __attribute__((noinline)) clip_triangle(const GfxVertex *a, const GfxVertex *b, const GfxVertex *c,
+                                                   GfxVertex *out) {
+    GfxVertex poly[2][16];
+    int j, k, n, m = 0, plane;
+    poly[0][0] = *a;
+    poly[0][1] = *b;
+    poly[0][2] = *c;
+    n = 3;
+    for (plane = 0; plane < 4 && n >= 3; plane++) {
+        const GfxVertex *pin = poly[plane & 1];
+        GfxVertex *pout = poly[(plane & 1) ^ 1];
+        int cnt = 0;
+        for (j = 0; j < n; j++) {
+            const GfxVertex *p = &pin[j], *q = &pin[(j + 1) % n];
+            float dp = clip_distance(p, plane), dq = clip_distance(q, plane);
+            if (dp >= 0.0f) {
+                pout[cnt++] = *p;
+            }
+            if ((dp >= 0.0f) != (dq >= 0.0f)) {
+                lerp_vertex(&pout[cnt++], p, q, dp / (dp - dq));
+            }
+        }
+        n = cnt;
+    }
+    // After four planes the polygon is back in poly[0]. Anything left with w <= 0 is behind the camera.
+    for (k = 1; k + 1 < n; k++) {
+        if (poly[0][0].w <= 0.0f || poly[0][k].w <= 0.0f || poly[0][k + 1].w <= 0.0f) {
+            continue;
+        }
+        out[m] = poly[0][0];
+        out[m + 1] = poly[0][k];
+        out[m + 2] = poly[0][k + 1];
+        m += 3;
+    }
+    return m;
 }
 
 /*
@@ -4436,26 +4709,17 @@ int plat_3ds_guard_band_setting(void) {
  * DKR_FAST_CLIP (the default) they are dropped as soon as their corners' sides show it, and the vertices are only
  * copied once a triangle really has to be cut, which most draws never reach (their indices then point into the
  * draw's own vertices). What is drawn is the same.
+ *
+ * The cutting itself (from the first vertex found outside on) is out of line, so that only the test of the vertices
+ * is in the per-draw path. With DKR_DRAW_LEAN that test is part of writing the vertices (gfxb_draw_indexed) and this
+ * is only used for draws the lean path leaves to the full one.
  */
-static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16 **indices, int *numTriangles) {
-    GfxVertex poly[2][16];
+static void __attribute__((noinline)) clip_cut_triangles(const GfxVertex **verts, int *numVerts, const u16 **indices,
+                                                         int *numTriangles) {
     const GfxVertex *in = *verts;
     const u16 *idx = *indices;
-    int i, j, k, n, plane, count = *numTriangles * 3, used, usedIdx, any = 0, copied;
+    int i, k, n, count = *numTriangles * 3, used, usedIdx, copied;
 
-    if (!plat_3ds_guard_band_setting() || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
-        return;
-    }
-    // Clip x runs along the target's height (the screen's 400 or 800 pixels across), clip y along its width.
-    sBandX = band_for(sTarget->frameBuf.height);
-    sBandY = band_for(sTarget->frameBuf.width);
-    for (i = 0; i < *numVerts; i++) {
-        sClipOutside[i] = outside_band(&in[i]);
-        any |= sClipOutside[i];
-    }
-    if (!any) {
-        return;
-    }
     // A triangle cut by all four planes has up to 7 corners: a fan of 5 triangles, each with its own 3 copies.
     if (!grow((void **) &sClipVerts, &sClipCapacity, *numVerts + *numTriangles * 15, sizeof(GfxVertex)) ||
         !grow((void **) &sClipIndices, &sClipIndexCapacity, *numTriangles * 15, sizeof(u16))) {
@@ -4484,40 +4748,11 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
                 copied = 1;
             }
         }
-        poly[0][0] = in[idx[i]];
-        poly[0][1] = in[idx[i + 1]];
-        poly[0][2] = in[idx[i + 2]];
-        n = 3;
-        for (plane = 0; plane < 4 && n >= 3; plane++) {
-            const GfxVertex *pin = poly[plane & 1];
-            GfxVertex *out = poly[(plane & 1) ^ 1];
-            int m = 0;
-            for (j = 0; j < n; j++) {
-                const GfxVertex *a = &pin[j], *b = &pin[(j + 1) % n];
-                float da = clip_distance(a, plane), db = clip_distance(b, plane);
-                if (da >= 0.0f) {
-                    out[m++] = *a;
-                }
-                if ((da >= 0.0f) != (db >= 0.0f)) {
-                    lerp_vertex(&out[m++], a, b, da / (da - db));
-                }
-            }
-            n = m;
+        n = clip_triangle(&in[idx[i]], &in[idx[i + 1]], &in[idx[i + 2]], &sClipVerts[used]);
+        for (k = 0; k < n; k++) {
+            sClipIndices[usedIdx++] = (u16) (used + k);
         }
-        // After four planes the polygon is back in poly[0]. Anything left with w <= 0 is behind the camera.
-        for (k = 1; k + 1 < n; k++) {
-            if (poly[0][0].w <= 0.0f || poly[0][k].w <= 0.0f || poly[0][k + 1].w <= 0.0f) {
-                continue;
-            }
-            // Each triangle of the fan gets its own copies, as the triangle list before indexing had.
-            sClipVerts[used] = poly[0][0];
-            sClipVerts[used + 1] = poly[0][k];
-            sClipVerts[used + 2] = poly[0][k + 1];
-            sClipIndices[usedIdx++] = (u16) used;
-            sClipIndices[usedIdx++] = (u16) (used + 1);
-            sClipIndices[usedIdx++] = (u16) (used + 2);
-            used += 3;
-        }
+        used += n;
     }
     if (copied) {
         *verts = sClipVerts;
@@ -4527,11 +4762,34 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
     *numTriangles = usedIdx / 3;
 }
 
+static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16 **indices, int *numTriangles) {
+    const GfxVertex *in = *verts;
+    int i, any = 0;
+
+    if (!sGuardBandFrame || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
+        return;
+    }
+    // Clip x runs along the target's height (the screen's 400 or 800 pixels across), clip y along its width.
+    sBandX = band_for(sTarget->frameBuf.height);
+    sBandY = band_for(sTarget->frameBuf.width);
+    for (i = 0; i < *numVerts; i++) {
+        sClipOutside[i] = outside_band(&in[i]);
+        any |= sClipOutside[i];
+    }
+    if (any) {
+        clip_cut_triangles(verts, numVerts, indices, numTriangles);
+    }
+}
+
 /*
  * The draws' parts (profile.h PROF_PART_BACKEND to _WRITE), timed while the profiler is on. They are kept in clock
  * ticks and handed over at the end of the frame: converting a reading to nanoseconds takes three 64-bit divisions,
  * which cost more than some of the parts (P23). As in the display list walk, each span between two readings holds
  * about one reading's cost, which is taken back out of its part and, through PROF_PART_WALK_TIMER, of the renderer's.
+ * A reading is a system call (svcGetSystemTick), and a draw takes five to seven of them: on an Old 3DS, with its
+ * 137 or so draws a frame, that is about half a millisecond as calibrated, and each one also evicts the draw's code
+ * and data from the 16 KB caches. DKR_DRAW_PARTS=0 (the Old 3DS's default) takes no readings; the readings are out
+ * of line and cold, so a draw without them carries one test per reading in its hot path.
  */
 enum { DRAW_PART_BACKEND, DRAW_PART_CLIP, DRAW_PART_STATE, DRAW_PART_TWICE, DRAW_PART_WRITE, DRAW_PART_COUNT };
 static const int sDrawPartProf[DRAW_PART_COUNT] = { PROF_PART_BACKEND, PROF_PART_CLIP, PROF_PART_STATE,
@@ -4543,6 +4801,29 @@ static unsigned int sDrawPartReads;                      // All the readings tak
 static inline void draw_part(int part, unsigned long long ticks, int reads) {
     sDrawPartTicks[part] += ticks;
     sDrawPartSpanReads[part] += reads;
+}
+
+/* A reading: the time since the reading before is charged to part (-1: none), with the readings within that span. */
+static __attribute__((noinline, cold)) unsigned long long draw_reading(unsigned long long since, int part,
+                                                                       int spanReads) {
+    unsigned long long now = plat_ticks();
+    if (part >= 0) {
+        draw_part(part, now - since, spanReads);
+    }
+    return now;
+}
+
+/* The draw's last reading: the whole draw since its first one, and the readings the draw took in all. */
+static __attribute__((noinline, cold)) void draw_readings_end(unsigned long long start, int spanReads, int reads) {
+    draw_part(DRAW_PART_BACKEND, plat_ticks() - start, spanReads);
+    sDrawPartReads += reads;
+}
+
+/* A draw that ends after its second reading with nothing left to draw: the whole of it was its first part (the
+ * clipping, or the lean draw's vertex pass). */
+static __attribute__((noinline, cold)) void draw_readings_empty(unsigned long long t0, unsigned long long t1) {
+    draw_part(DRAW_PART_BACKEND, t1 - t0, 1);
+    sDrawPartReads += 2;
 }
 
 static void hand_over_draw_parts(void) {
@@ -4570,70 +4851,138 @@ static void hand_over_draw_parts(void) {
  */
 static int sIndexed = -1;
 
-static int indexed_enabled(void) {
-    if (sIndexed < 0) {
-        const char *env = plat_getenv("DKR_INDEXED");
-        sIndexed = env == NULL || atoi(env) != 0;
-        plat_log("vertices: %s", sIndexed ? "shared, drawn by index" : "one for each triangle corner (DKR_INDEXED=0)");
+static void __attribute__((noinline, cold)) read_indexed_setting(void) {
+    const char *env = plat_getenv("DKR_INDEXED");
+    sIndexed = env == NULL || atoi(env) != 0;
+    plat_log("vertices: %s", sIndexed ? "shared, drawn by index" : "one for each triangle corner (DKR_INDEXED=0)");
+}
+
+static inline int indexed_enabled(void) {
+    if (__builtin_expect(sIndexed < 0, 0)) {
+        read_indexed_setting();
     }
     return sIndexed;
+}
+
+/* Converts one vertex to the GPU's short format at out (or the long one, with the second texture's coordinates
+ * after it). Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
+ * scale3D is sScale3D, passed in so that a loop can keep it in a register (see test_and_write_vertices). */
+static inline void convert_vertex(const GfxVertex *v, u8 *out, int fmt, int flat, float scale3D, float su0,
+                                  float sv0, float su1, float sv1) {
+    C3DVertex *o = (C3DVertex *) out;
+    if (flat) {
+        to_screen_flat(v, o->pos, flat);
+    } else {
+        to_screen_scaled(v, o->pos, scale3D);
+    }
+    o->tc0[0] = v->u0 * su0;
+    o->tc0[1] = 1.0f - v->v0 * sv0;
+    memcpy(o->color, &v->r, 4);
+    if (fmt == VFMT_LONG) {
+        C3DVertex2 *o2 = (C3DVertex2 *) out;
+        o2->tc1[0] = v->u1 * su1;
+        o2->tc1[1] = 1.0f - v->v1 * sv1;
+    }
+}
+
+/* The 48-byte vertices of DKR_VERTEX_FORMAT=48, kept out of the usual path. */
+static void __attribute__((noinline, cold)) write_vertices_old(u8 *out, const GfxVertex *verts, int count,
+                                                               const u16 *indices, int flat, float su0, float sv0,
+                                                               float su1, float sv1) {
+    C3DVertexOld *o = (C3DVertexOld *) out;
+    int i;
+    for (i = 0; i < count; i++) {
+        const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
+        place(v, o[i].pos, flat);
+        o[i].tc0[0] = v->u0 * su0;
+        o[i].tc0[1] = 1.0f - v->v0 * sv0;
+        o[i].tc1[0] = v->u1 * su1;
+        o[i].tc1[1] = 1.0f - v->v1 * sv1;
+        o[i].color[0] = v->r;
+        o[i].color[1] = v->g;
+        o[i].color[2] = v->b;
+        o[i].color[3] = v->a;
+    }
 }
 
 /* Writes the vertices in format fmt at out, stride apart, or if indices is given the vertices they name in order. */
 static void write_vertices(int fmt, u8 *out, const GfxVertex *verts, int count, const u16 *indices, int flat, float su0,
                            float sv0, float su1, float sv1) {
-    int i;
-    // Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
-    if (fmt == VFMT_SHORT) {
-        C3DVertex *o = (C3DVertex *) out;
-        for (i = 0; i < count; i++) {
-            const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
-            place(v, o[i].pos, flat);
-            o[i].tc0[0] = v->u0 * su0;
-            o[i].tc0[1] = 1.0f - v->v0 * sv0;
-            memcpy(o[i].color, &v->r, 4);
-        }
-    } else if (fmt == VFMT_LONG) {
-        C3DVertex2 *o = (C3DVertex2 *) out;
-        for (i = 0; i < count; i++) {
-            const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
-            place(v, o[i].pos, flat);
-            o[i].tc0[0] = v->u0 * su0;
-            o[i].tc0[1] = 1.0f - v->v0 * sv0;
-            memcpy(o[i].color, &v->r, 4);
-            o[i].tc1[0] = v->u1 * su1;
-            o[i].tc1[1] = 1.0f - v->v1 * sv1;
-        }
-    } else {
-        C3DVertexOld *o = (C3DVertexOld *) out;
-        for (i = 0; i < count; i++) {
-            const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
-            place(v, o[i].pos, flat);
-            o[i].tc0[0] = v->u0 * su0;
-            o[i].tc0[1] = 1.0f - v->v0 * sv0;
-            o[i].tc1[0] = v->u1 * su1;
-            o[i].tc1[1] = 1.0f - v->v1 * sv1;
-            o[i].color[0] = v->r;
-            o[i].color[1] = v->g;
-            o[i].color[2] = v->b;
-            o[i].color[3] = v->a;
-        }
+    int stride = sVfmtStride[fmt], i;
+    if (fmt == VFMT_OLD) {
+        write_vertices_old(out, verts, count, indices, flat, su0, sv0, su1, sv1);
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        const GfxVertex *v = &verts[indices != NULL ? indices[i] : i];
+        convert_vertex(v, out + i * stride, fmt, flat, sScale3D, su0, sv0, su1, sv1);
     }
 }
 
-void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts, const u16 *indices,
-                       int numTriangles) {
+/* The frame's buffer (vertices, indices or commands) is full: logs it, for the first few draws left out. */
+static void __attribute__((noinline, cold)) log_draw_left_out(int vertBytes, int count, int indexed) {
+    if (sDrawsLeftOut++ < 5) {
+        plat_log("frame %d: %s full (%d bytes of vertices, %d indices, %lu command words), triangles left out",
+                 sFrameCount,
+                 sVboUsed + 15 + vertBytes > VBO_BYTES ? "vertex buffer"
+                 : indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16) ? "index buffer"
+                                                                                   : "command list",
+                 sVboUsed, sIboUsed, (unsigned long) cmd_position());
+    }
+}
+
+/* DKR_LOG_DRAWS (or a snapshot): logs a draw, and checks its texture against what was uploaded. verts holds numVerts
+ * vertices; the lean draw's cut corners are only in the vertex buffer, so its first index may be past them. */
+static void __attribute__((noinline, cold)) log_draw(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
+                                                     int written, const u16 *indices, int numTriangles) {
+    const GfxCombiner *c = &state->combiner;
+    const GfxTexture *tex = state->textures[0];
+    const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
+    const GfxVertex *v0 = &verts[indices[0] < numVerts ? indices[0] : 0];
+    if (tex != NULL) {
+        verify_texture(tex);
+        if (t != NULL) {
+            remember_texture(t);
+        }
+    }
+    plat_log("draw %d tris %d verts blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d "
+             "cyc %d tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d "
+             "%d cmd %lu",
+             numTriangles, written, state->blend, state->alphaTest, state->alphaRef, state->depthTest,
+             state->depthWrite, state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b,
+             c->rgb[0].c, c->rgb[0].d, c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles,
+             (void *) tex, tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0,
+             t != NULL ? t->tex.width : 0, t != NULL ? t->tex.height : 0, t != NULL ? t->tex.data : NULL,
+             (unsigned long) (t != NULL ? t->tex.param : 0), v0->x, v0->y, v0->z, v0->w, v0->u0, v0->v0, v0->r,
+             v0->g, v0->b, v0->a, (unsigned long) gpuCmdBufOffset);
+}
+
+static void __attribute__((noinline, cold)) read_log_draws_setting(void) {
+    const char *env = plat_getenv("DKR_LOG_DRAWS");
+    sLogFrame = env != NULL ? atoi(env) : -1;
+}
+
+/* A draw's texture coordinate scales (bind_texture's), without binding anything. */
+static inline void texture_scales(const GfxTexture *tex, float *scaleU, float *scaleV) {
+    const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
+    *scaleU = (t != NULL) ? t->scaleU : 1.0f;
+    *scaleV = (t != NULL) ? t->scaleV : 1.0f;
+}
+
+/* The draw as it was before DKR_DRAW_LEAN (below): the guard band test, then the settings, then the vertices. */
+static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *state, const GfxVertex *verts,
+                                                        int numVerts, const u16 *indices, int numTriangles) {
     HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
     int first, vertex, count, fmt, flat = gfx_flat_mode(state), indexed = indexed_enabled();
     int vertBytes, written;
     u16 *ibo = NULL;
-    // Timed in parts while the profiler is on (draw_part).
-    int timed = prof_enabled(), twiceReads = 0;
-    unsigned long long t0 = 0, t1 = 0, t2 = 0, t3;
+    // Timed in parts while the profiler is on and DKR_DRAW_PARTS says so (draw_part).
+    int timed = sDrawParts && prof_enabled(), twiceReads = 0;
+    unsigned long long t0 = 0, t1 = 0, t2 = 0;
 
     if (timed) {
-        t0 = plat_ticks();
+        t0 = draw_reading(0, -1, 0);
     }
     if (sStereo && !flat && sTuning[STEREO_AUTO]) {
         // The draw's own vertices: the clip below adds corners on the near plane, nearer than anything really is.
@@ -4641,13 +4990,11 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     }
     clip_to_guard_band(&verts, &numVerts, &indices, &numTriangles);
     if (timed) {
-        t1 = plat_ticks();
-        draw_part(DRAW_PART_CLIP, t1 - t0, 1);
+        t1 = draw_reading(t0, DRAW_PART_CLIP, 1);
     }
     if (numTriangles == 0) {
         if (timed) {
-            draw_part(DRAW_PART_BACKEND, t1 - t0, 1);
-            sDrawPartReads += 2;
+            draw_readings_empty(t0, t1);
         }
         return;
     }
@@ -4662,45 +5009,17 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         // Out of room in the frame's vertex buffer or command list (a full command list stops the program, and
         // nothing of the frame reaches the GPU before it ends, so splitting it would not make room): leave the rest
         // of the frame's triangles out. Races use under a fifth of either.
-        if (sDrawsLeftOut++ < 5) {
-            plat_log("frame %d: %s full (%d bytes of vertices, %d indices, %lu command words), triangles left out",
-                     sFrameCount,
-                     sVboUsed + 15 + vertBytes > VBO_BYTES ? "vertex buffer"
-                     : indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16) ? "index buffer"
-                                                                                       : "command list",
-                     sVboUsed, sIboUsed, (unsigned long) cmd_position());
-        }
+        log_draw_left_out(vertBytes, count, indexed);
         if (timed) {
             sDrawPartReads += 2;
         }
         return;
     }
-    if (sLogFrame == -2) {
-        const char *env = plat_getenv("DKR_LOG_DRAWS");
-        sLogFrame = env != NULL ? atoi(env) : -1;
+    if (__builtin_expect(sLogFrame == -2, 0)) {
+        read_log_draws_setting();
     }
-    if (sFrameCount == sLogFrame) {
-        const GfxCombiner *c = &state->combiner;
-        if (state->textures[0] != NULL) {
-            verify_texture(state->textures[0]);
-            if (state->textures[0]->backendData != NULL) {
-                remember_texture((const C3DTexture *) state->textures[0]->backendData);
-            }
-        }
-        const GfxTexture *tex = state->textures[0];
-        const C3DTexture *t = (tex != NULL) ? (const C3DTexture *) tex->backendData : NULL;
-        plat_log("draw %d tris %d verts blend %d at %d/%d z %d/%d dec %d fog %d cull %d cc %d,%d,%d,%d/%d,%d,%d,%d "
-                 "cyc %d tex %p (%dx%d gpu %dx%d at %p param %08lX) v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d "
-                 "%d cmd %lu",
-                 numTriangles, numVerts, state->blend, state->alphaTest, state->alphaRef, state->depthTest,
-                 state->depthWrite, state->decal, state->fogEnabled, state->cullMode, c->rgb[0].a, c->rgb[0].b,
-                 c->rgb[0].c, c->rgb[0].d, c->alpha[0].a, c->alpha[0].b, c->alpha[0].c, c->alpha[0].d, c->numCycles,
-                 (void *) tex, tex != NULL ? tex->width : 0, tex != NULL ? tex->height : 0,
-                 t != NULL ? t->tex.width : 0, t != NULL ? t->tex.height : 0, t != NULL ? t->tex.data : NULL,
-                 (unsigned long) (t != NULL ? t->tex.param : 0), verts[indices[0]].x, verts[indices[0]].y,
-                 verts[indices[0]].z, verts[indices[0]].w, verts[indices[0]].u0, verts[indices[0]].v0,
-                 verts[indices[0]].r, verts[indices[0]].g, verts[indices[0]].b, verts[indices[0]].a,
-                 (unsigned long) gpuCmdBufOffset);
+    if (__builtin_expect(sFrameCount == sLogFrame, 0)) {
+        log_draw(state, verts, numVerts, numVerts, indices, numTriangles);
     }
     hangDraw = hang_draw_start(state, numTriangles);
     first = drain_before_draw(state, numTriangles);
@@ -4709,10 +5028,10 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     }
     set_all_state(state, &su0, &sv0, &su1, &sv1);
     if (first) {
-        unsigned long long tw = timed ? plat_ticks() : 0;
+        unsigned long long tw = timed ? draw_reading(0, -1, 0) : 0;
         write_settings_twice(state, &su0, &sv0, &su1, &sv1);
         if (timed) {
-            draw_part(DRAW_PART_TWICE, plat_ticks() - tw, 1);
+            draw_reading(tw, DRAW_PART_TWICE, 1);
             twiceReads = 2;
         }
     }
@@ -4720,8 +5039,7 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     set_cpu_uniforms();
     unif_write_twice();
     if (timed) {
-        t2 = plat_ticks();
-        draw_part(DRAW_PART_STATE, t2 - t1, 1 + twiceReads);
+        t2 = draw_reading(t1, DRAW_PART_STATE, 1 + twiceReads);
     }
     vertex = use_vertex_format(fmt);
     if (indexed && vertex + numVerts > 0xFFFF) {
@@ -4739,8 +5057,7 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         sIboUsed += count;
     }
     if (timed) {
-        t3 = plat_ticks();
-        draw_part(DRAW_PART_WRITE, t3 - t2, 1);
+        draw_reading(t2, DRAW_PART_WRITE, 1);
     }
     draw_prims(vertex, count, ibo);
     if (hangDraw != NULL) {
@@ -4749,8 +5066,211 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     sVboUsed += vertBytes;
     sFrameTriangles += numTriangles;
     if (timed) {
-        draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 4 + twiceReads);
-        sDrawPartReads += 5 + twiceReads;
+        draw_readings_end(t0, 4 + twiceReads, 5 + twiceReads);
+    }
+}
+
+/*
+ * The lean draw (DKR_DRAW_LEAN, on by default on an Old 3DS). The draw above went over a draw's vertices up to three
+ * times: the guard band test read each one, a draw with a cut triangle copied them all, and writing them to the
+ * vertex buffer read them again; and the code for all of that, with its cold branches, was far more than the Old
+ * 3DS's 16 KB instruction cache holds along with the display list walk, so each draw fetched much of it from memory
+ * again. Here each vertex is read once: it is tested against the band and written to the vertex buffer in the same
+ * pass, where the draw's vertices would go. Only when a vertex is outside the band are the triangles gone over
+ * (clip_cut_lean, out of line): the corners of those that are cut are written after the draw's own vertices, exactly
+ * as the full draw appended them to its copy, so the vertex and index buffers come out the same bytes, and the
+ * settings are written in the same order. What the full draw does that this one doesn't (the 48-byte vertex format,
+ * DKR_INDEXED=0, edge trimming off, or a frame's buffer nearly full) is left to it.
+ */
+static u8 sLeanOutside[GFX_MAX_BATCH_VERTICES];           // Each vertex's sides of the band (outside_band)
+static u16 sLeanIndices[GFX_MAX_BATCH_TRIANGLES * 15];   // The indices of a draw with a vertex outside the band
+
+/*
+ * The triangles of a draw with a vertex outside the band: those within it keep their indices, those wholly beyond
+ * one side are dropped (DKR_FAST_CLIP) and the rest are cut, their fans' corners converted after the draw's own
+ * vertices (used of them so far at out). Returns the vertex count; *count gets the index count.
+ */
+static int __attribute__((noinline)) clip_cut_lean(const GfxVertex *verts, const u16 *idx, int numTriangles, u8 *out,
+                                                   int stride, int fmt, int flat, float su0, float sv0, float su1,
+                                                   float sv1, int used, int *count) {
+    int i, k, n, usedIdx = 0, indexCount = numTriangles * 3;
+    for (i = 0; i < indexCount; i += 3) {
+        int a = sLeanOutside[idx[i]], b = sLeanOutside[idx[i + 1]], c = sLeanOutside[idx[i + 2]];
+        if (!(a | b | c)) {
+            sLeanIndices[usedIdx++] = idx[i];
+            sLeanIndices[usedIdx++] = idx[i + 1];
+            sLeanIndices[usedIdx++] = idx[i + 2];
+            continue;
+        }
+        if (sFastClip && (a & b & c & OUTSIDE_PLANES)) {
+            continue; // Wholly beyond one side: the clipper would leave nothing.
+        }
+        {
+            GfxVertex fan[15];
+            n = clip_triangle(&verts[idx[i]], &verts[idx[i + 1]], &verts[idx[i + 2]], fan);
+            for (k = 0; k < n; k++) {
+                convert_vertex(&fan[k], out + (used + k) * stride, fmt, flat, sScale3D, su0, sv0, su1, sv1);
+                sLeanIndices[usedIdx++] = (u16) (used + k);
+            }
+            used += n;
+        }
+    }
+    *count = usedIdx;
+    return used;
+}
+
+/*
+ * The lean draw's one pass over the vertices: each is tested against the band (its sides noted in outside, and all
+ * of them or'ed into the result) and written to the vertex buffer. The band and the 3D scale are copied out of their
+ * variables first, as the compiler reloads those after every vertex written otherwise (`out` could point at them).
+ * The empty asm keeps the compiler from taking the flat and format branches out of the loop into a copy of it for
+ * each case (three copies of this loop, of which a frame's draws use all three): one copy with the branches in it
+ * costs each vertex two predictable branches and keeps the per-draw code a few cache lines shorter. The same for the
+ * stereo and wide screen settings the flat path reads, which the loop isn't unswitched on either (the attribute: an
+ * asm on them too would cost the loop register moves). Out of line too: inlined, the loop came out twice in
+ * gfxb_draw_indexed.
+ */
+PLAT_HOT static int __attribute__((noinline, optimize("no-unswitch-loops")))
+test_and_write_vertices(const GfxVertex *verts, u8 *out, u8 *outside, int numVerts, int stride, int fmt, int flat,
+                        float su0, float sv0, float su1, float sv1) {
+    const float bandX = sBandX, bandY = sBandY, scale3D = sScale3D;
+    int i, any = 0;
+    for (i = 0; i < numVerts; i++) {
+        const GfxVertex *v = &verts[i];
+        int b = outside_band_of(v, bandX, bandY);
+        __asm__("" : "+r"(flat), "+r"(fmt));
+        outside[i] = (u8) b;
+        any |= b;
+        convert_vertex(v, out + i * stride, fmt, flat, scale3D, su0, sv0, su1, sv1);
+    }
+    return any;
+}
+
+/* The buffer setting has 16-bit indices from its start, and the lean draw's vertices (already written at out) would
+ * reach past them: starts a new setting here, and moves them where it starts. Rare (races use under a fifth of the
+ * buffer), so out of the per-draw code. */
+static int __attribute__((noinline, cold)) restart_vertex_buffer(int fmt, const u8 *out, int bytes) {
+    int vertex;
+    sVfmtBound = -1;
+    vertex = use_vertex_format(fmt);
+    if (sVbo + sVboUsed != out) {
+        memmove(sVbo + sVboUsed, out, bytes); // Only after the new buffer setting moved the start.
+    }
+    return vertex;
+}
+
+PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts, const u16 *indices,
+                       int numTriangles) {
+    HangDraw *hangDraw;
+    float su0, sv0, su1, sv1;
+    int first, vertex, count, fmt, stride, flat, start, written, any, i;
+    u8 *out;
+    u16 *ibo;
+    // Timed in parts while the profiler is on and DKR_DRAW_PARTS says so (draw_part). Here the vertex pass, band test
+    // and cutting included, is counted as writing the vertices (PROF_PART_WRITE), and PROF_PART_CLIP stays empty.
+    int timed, twiceReads = 0;
+    unsigned long long t0 = 0, t1 = 0, t2 = 0;
+
+    // Coordinates for a second texture only when the draw binds one (else it is the white texture).
+    fmt = state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
+    stride = sVfmtStride[fmt];
+    // In 3D with auto convergence the full draw notes each draw's nearest vertices first (near_depth_note).
+    if (!sDrawLean || sVfmtOld || !indexed_enabled() || !sGuardBandFrame ||
+        (sStereo && sTuning[STEREO_AUTO]) || numVerts > GFX_MAX_BATCH_VERTICES || numTriangles > GFX_MAX_BATCH_TRIANGLES ||
+        // Room for the most that cutting can add (the full draw checks what it really needs, and may still draw).
+        sVboUsed + 15 + (numVerts + numTriangles * 15) * stride > VBO_BYTES ||
+        sIboUsed + numTriangles * 15 > IBO_BYTES / (int) sizeof(u16) ||
+        gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+        draw_indexed_full(state, verts, numVerts, indices, numTriangles);
+        return;
+    }
+    timed = sDrawParts && prof_enabled();
+    if (timed) {
+        t0 = draw_reading(0, -1, 0);
+    }
+    flat = gfx_flat_mode(state);
+    texture_scales(state->textures[0], &su0, &sv0);
+    texture_scales(state->textures[1], &su1, &sv1);
+    // Where use_vertex_format will start the vertices: the same format carries on, a new one starts 16-byte aligned.
+    start = fmt != sVfmtBound ? (sVboUsed + 15) & ~15 : sVboUsed;
+    out = sVbo + start;
+    any = test_and_write_vertices(verts, out, sLeanOutside, numVerts, stride, fmt, flat, su0, sv0, su1, sv1);
+    written = numVerts;
+    count = numTriangles * 3;
+    if (count == 0) { // Nothing to draw (no caller passes 0 today): touch no GPU state, as the full path does not
+        if (timed) {
+            t1 = draw_reading(t0, DRAW_PART_WRITE, 1);
+            draw_readings_empty(t0, t1);
+        }
+        return;
+    }
+    if (__builtin_expect(any, 0)) {
+        written = clip_cut_lean(verts, indices, numTriangles, out, stride, fmt, flat, su0, sv0, su1, sv1, numVerts,
+                                &count);
+        indices = sLeanIndices;
+        numTriangles = count / 3;
+        if (count == 0) {
+            if (timed) {
+                t1 = draw_reading(t0, DRAW_PART_WRITE, 1);
+                draw_readings_empty(t0, t1);
+            }
+            return;
+        }
+    }
+    if (timed) {
+        t1 = draw_reading(t0, DRAW_PART_WRITE, 1);
+    }
+    if (__builtin_expect(sLogFrame == -2, 0)) {
+        read_log_draws_setting();
+    }
+    if (__builtin_expect(sFrameCount == sLogFrame, 0)) {
+        log_draw(state, verts, numVerts, written, indices, numTriangles);
+    }
+    hangDraw = hang_draw_start(state, numTriangles);
+    first = drain_before_draw(state, numTriangles);
+    if (first) {
+        forget_gpu_state();
+    }
+    set_all_state(state, &su0, &sv0, &su1, &sv1);
+    if (first) {
+        unsigned long long tw = timed ? draw_reading(0, -1, 0) : 0;
+        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+        if (timed) {
+            draw_reading(tw, DRAW_PART_TWICE, 1);
+            twiceReads = 2;
+        }
+    }
+    // With GPU vertex maths on, the one shader also draws the CPU path: after a model draw its
+    // uniforms must be set back to the identity, exactly as the full draw above does.
+    set_cpu_uniforms();
+    unif_write_twice();
+    if (timed) {
+        t2 = draw_reading(t1, DRAW_PART_STATE, 1 + twiceReads);
+    }
+    vertex = use_vertex_format(fmt);
+    if (__builtin_expect(vertex + written > 0xFFFF, 0)) {
+        vertex = restart_vertex_buffer(fmt, out, written * stride);
+    }
+    ibo = sIbo + sIboUsed;
+    for (i = 0; i < count; i++) {
+        ibo[i] = (u16) (vertex + indices[i]);
+    }
+    sIboUsed += count;
+    if (timed) {
+        draw_reading(t2, DRAW_PART_WRITE, 1);
+    }
+    if (sStereo) {
+        draw_prims_stereo(vertex, count, ibo);
+    } else {
+        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, ibo);
+    }
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
+    sVboUsed += written * stride;
+    sFrameTriangles += numTriangles;
+    if (timed) {
+        draw_readings_end(t0, 4 + twiceReads, 5 + twiceReads);
     }
 }
 
@@ -4780,7 +5300,7 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
     if (!sTransformOn) {
         return GFX_MODEL_CPU;
     }
-    if (!plat_3ds_guard_band_setting()) {
+    if (!sGuardBandFrame) {
         return GFX_MODEL_GPU;
     }
     sBandX = band_for(sTarget->frameBuf.height);
@@ -4983,6 +5503,17 @@ void gfxb_mesh_free(void *mesh) {
 static void delete_mesh(void *mesh) {
     C3DMesh *m = mesh;
     arena_free(m->base, m->numVerts);
+    if (sArenaFreeRuns == 1 && sArenaFree[0].count == MESH_ARENA_VERTS) {
+        // The last mesh is gone (meshes turned off, or a level left): the arena's megabyte goes back to the linear
+        // heap, which an Old 3DS needs for textures. Every frame that drew from it is done, as frees wait for that.
+        linearFree(sMeshArena);
+        sMeshArena = NULL;
+        sArenaFreeRuns = 0;
+        if (sBufMesh != NULL) {
+            sBufMesh = NULL; // The vertex buffer setting pointed into it: the next mesh draw points it again
+        }
+        plat_log("meshes: arena freed");
+    }
     free(m->indices);
     free(m);
 }
