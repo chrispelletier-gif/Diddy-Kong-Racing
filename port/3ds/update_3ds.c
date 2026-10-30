@@ -26,6 +26,8 @@
 #include <curl/curl.h>
 #include <mbedtls/sha256.h>
 #include "net_3ds.h"
+#else
+#define net_3ds_background(background) ((void) 0) /* No network in a player build. */
 #endif
 
 #ifndef PORT_BUILD_VERSION
