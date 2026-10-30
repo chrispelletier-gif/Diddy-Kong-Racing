@@ -29,8 +29,13 @@ int plat_take_setup_tap(void);
 
 enum { RACE_HUD_TOP, RACE_HUD_BOTTOM, RACE_HUD_BOTH }; // port_set_race_hud_setting's values.
 
+void plat_set_bottom_style(int style);
+s32 port_bottom_style(void);
+
 /* The fine tuning's pages in order; the picture's is left out where 60 fps can't be had (an Old 3DS). */
-static const s32 sSteps[4] = { SETUP_PAGE_PICTURE, SETUP_PAGE_SCREEN, SETUP_PAGE_CAMERA, SETUP_PAGE_HUD };
+#define STEPS 5
+static const s32 sSteps[STEPS] = { SETUP_PAGE_PICTURE, SETUP_PAGE_SCREEN, SETUP_PAGE_CAMERA, SETUP_PAGE_HUD,
+                                    SETUP_PAGE_LOOK };
 
 static s32 sState = -1; // -1 not decided yet, 0 not showing, 1 showing.
 static s32 sPage;       // SETUP_PAGE_*.
@@ -55,7 +60,7 @@ static s32 first_step(void) {
 /* Where the page is among the fine tuning's steps (first_step on), or -1. */
 static s32 step_of(s32 page) {
     s32 i;
-    for (i = first_step(); i < 4; i++) {
+    for (i = first_step(); i < STEPS; i++) {
         if (sSteps[i] == page) {
             return i;
         }
@@ -68,6 +73,7 @@ static s32 tile_count(s32 page) {
         case SETUP_PAGE_STYLE:
             return can_60fps() ? 3 : 2;
         case SETUP_PAGE_SCREEN:
+        case SETUP_PAGE_LOOK:
             return 4;
         case SETUP_PAGE_HUD:
             return 3;
@@ -108,6 +114,11 @@ static void apply_tile(s32 page, s32 tile) {
         case SETUP_PAGE_HUD:
             port_set_race_hud_setting(sHudOfTile[tile]);
             break;
+        case SETUP_PAGE_LOOK:
+            // The setup's own buttons and boxes change look with it. Written with the rest, at the end.
+            settings_set("bottomstyle", tile);
+            plat_set_bottom_style(tile);
+            break;
     }
 }
 
@@ -132,6 +143,8 @@ static s32 current_tile(s32 page) {
                 }
             }
             break;
+        case SETUP_PAGE_LOOK:
+            return port_bottom_style();
     }
     return 0;
 }
@@ -246,6 +259,29 @@ static const TileText sHudTiles[3] = {
         "Les infos de course de la N64 en haut, et la carte et le classement sur l'ecran tactile." } },
 };
 
+static const TileText sLookTiles[4] = {
+    { { "CLASSIC", "CLASSIC" },
+      { "DEFAULT", "DEFAUT" },
+      { { "Same as", "the menus", NULL }, { "Comme les", "menus", NULL } },
+      { "The bottom screen in the game's own style: its rounded boxes, just like the menus.",
+        "L'ecran du bas dans le style du jeu: ses boites arrondies, comme les menus." } },
+    { { "GLASS", "VERRE" },
+      { "", "" },
+      { { "Soft glass", "cards", NULL }, { "Cartes de", "verre", NULL } },
+      { "Frosted glass cards and round buttons: soft and light.",
+        "Des cartes de verre depoli et des boutons ronds: doux et leger." } },
+    { { "RACE TV", "TELE" },
+      { "", "" },
+      { { "Race TV", "slabs", NULL }, { "Bandeaux", "de course", NULL } },
+      { "Broadcast: slanted slabs in red and yellow, like a race on TV.",
+        "Television: des bandeaux inclines rouges et jaunes, comme une course a la tele." } },
+    { { "DOCK", "BARRE" },
+      { "", "" },
+      { { "Few boxes,", "icon bar", NULL }, { "Peu de boites,", "barre icones", NULL } },
+      { "Almost no boxes: the race info floats, with an icon bar below.",
+        "Presque pas de boites: les infos flottent, avec une barre d'icones en dessous." } },
+};
+
 static const TileText *tiles_of(s32 page) {
     switch (page) {
         case SETUP_PAGE_LANGUAGE:
@@ -258,6 +294,8 @@ static const TileText *tiles_of(s32 page) {
             return sScreenTiles;
         case SETUP_PAGE_CAMERA:
             return sCameraTiles;
+        case SETUP_PAGE_LOOK:
+            return sLookTiles;
         default:
             return sHudTiles;
     }
@@ -275,6 +313,8 @@ static const char *question_of(s32 page) {
             return tr("WHAT SHAPE OF PICTURE?", "QUELLE FORME D'IMAGE?");
         case SETUP_PAGE_CAMERA:
             return tr("WHICH CAMERA?", "QUELLE CAMERA?");
+        case SETUP_PAGE_LOOK:
+            return tr("HOW SHOULD THE BOTTOM SCREEN LOOK?", "STYLE DE L'ECRAN DU BAS?");
         default:
             return tr("WHERE SHOULD RACE INFO GO?", "OU AFFICHER LES INFOS?");
     }
@@ -286,7 +326,7 @@ static const char *question_of(s32 page) {
 /* Fills in what the bottom screen shows for the page and the tile lit. */
 static void describe(void) {
     const TileText *texts = tiles_of(sPage);
-    s32 i, j, step = step_of(sPage), last = step == 3;
+    s32 i, j, step = step_of(sPage), last = step == STEPS - 1;
     SetupScreen *s = &sScreen;
 
     static const SetupScreen sEmpty;
@@ -306,10 +346,11 @@ static void describe(void) {
         t->lineCount = j;
     }
     if (step >= 0) {
-        static const char *const sStepNames[4][2] = {
-            { "PICTURE", "IMAGE" }, { "SCREEN", "ECRAN" }, { "CAMERA", "CAMERA" }, { "RACE INFO", "INFOS" }
+        static const char *const sStepNames[STEPS][2] = {
+            { "PICTURE", "IMAGE" }, { "SCREEN", "ECRAN" }, { "CAMERA", "CAMERA" }, { "RACE INFO", "INFOS" },
+            { "LOOK", "STYLE" }
         };
-        for (i = first_step(); i < 4; i++) {
+        for (i = first_step(); i < STEPS; i++) {
             COPY(s->steps[s->stepCount], sStepNames[i][sFrench]);
             if (i == step) {
                 s->step = s->stepCount;
@@ -381,7 +422,7 @@ static void next(void) {
     sound_play(SOUND_SELECT2, NULL);
     if (sPage == SETUP_PAGE_LANGUAGE) {
         open_page(SETUP_PAGE_STYLE);
-    } else if (sPage == SETUP_PAGE_STYLE || step == 3) {
+    } else if (sPage == SETUP_PAGE_STYLE || step == STEPS - 1) {
         finish();
     } else {
         open_page(sSteps[step + 1]);
