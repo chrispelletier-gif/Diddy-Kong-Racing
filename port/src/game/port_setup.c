@@ -83,8 +83,9 @@ static const s32 sHudOfTile[3] = { RACE_HUD_BOTTOM, RACE_HUD_TOP, RACE_HUD_BOTH 
 static void apply_tile(s32 page, s32 tile) {
     switch (page) {
         case SETUP_PAGE_LANGUAGE:
+            // Only the setup's own words change now: the game's language (a text asset to load, and a save to write)
+            // is set when it finishes, so moving between the two tiles doesn't hitch.
             sFrench = tile == 1;
-            set_language(sFrench ? LANGUAGE_FRENCH : LANGUAGE_ENGLISH);
             break;
         case SETUP_PAGE_STYLE:
             sStyle = tile;
@@ -350,6 +351,7 @@ static void finish(void) {
     sState = 0;
     settings_set("setup", 1);
     settings_defer(FALSE);
+    set_language(sFrench ? LANGUAGE_FRENCH : LANGUAGE_ENGLISH);
     plat_set_setup_screen(NULL);
 }
 
