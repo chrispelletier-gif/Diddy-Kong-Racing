@@ -349,6 +349,7 @@ static void open_page(s32 page) {
 static void finish(void) {
     sState = 0;
     settings_set("setup", 1);
+    settings_defer(FALSE);
     plat_set_setup_screen(NULL);
 }
 
@@ -425,6 +426,7 @@ void port_setup_update(u32 buttons, s32 stickX, s32 stickY) {
     }
     if (!sOpened) {
         sOpened = TRUE;
+        settings_defer(TRUE); // Every tile applies settings: written once, at the end.
         sFrench = plat_system_french();
         apply_tile(SETUP_PAGE_LANGUAGE, sFrench);
         apply_tile(SETUP_PAGE_STYLE, SETUP_STYLE_ENHANCED);
@@ -433,6 +435,7 @@ void port_setup_update(u32 buttons, s32 stickX, s32 stickY) {
     }
     if (port_autorun_enabled()) {
         sState = 0; // A test run is starting from the title screen: no setup in its way, and asked again later.
+        settings_defer(FALSE);
         plat_set_setup_screen(NULL);
         return;
     }
