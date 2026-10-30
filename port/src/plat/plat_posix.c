@@ -3,6 +3,7 @@
 #include "plat.h"
 #include "race_hud.h"
 #include "setup_screen.h"
+#include "bottom_screen.h"
 
 #include <pthread.h>
 #include <semaphore.h>
@@ -86,6 +87,10 @@ int plat_race_hud_screen(void) {
 
 int plat_race_hud_covered(void) {
     return 0;
+}
+
+void plat_set_bottom_style(int style) {
+    bs_set_style(style);
 }
 
 void plat_set_race_hud(const RaceHud *hud) {

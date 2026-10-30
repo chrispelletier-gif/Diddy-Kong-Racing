@@ -417,7 +417,7 @@ static void fill(int x0, int y0, int x1, int y1, Colour c) {
 }
 
 /* A box with rounded corners and a one pixel edge, like the game's dialogue boxes. */
-static void box(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
+static void box_classic(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
     int y;
     fill(x0 + 1, y0 + 1, x1 - 1, y1 - 1, inside);
     fill(x0 + 2, y0, x1 - 2, y0 + 1, edge);
@@ -430,6 +430,157 @@ static void box(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
     plot(x1 - 2, y0 + 1, edge.r, edge.g, edge.b, edge.a);
     plot(x0 + 1, y1 - 2, edge.r, edge.g, edge.b, edge.a);
     plot(x1 - 2, y1 - 2, edge.r, edge.g, edge.b, edge.a);
+}
+
+/******************************** Looks ********************************/
+
+/*
+ * The bottom screen's look (a setting, port_race_hud.c): the game's own boxes (Classic), or one of three newer
+ * styles from the mockups, which draw every box, button and tab with smooth shapes instead. They keep the Classic
+ * layout, so taps land in the same places.
+ */
+static int sStyle;
+static int sRaceBaseMade;
+
+static Colour mix(Colour a, Colour b, int t, int span) {
+    Colour c;
+    if (span < 1) {
+        return a;
+    }
+    c.r = (unsigned char) (a.r + (b.r - a.r) * t / span);
+    c.g = (unsigned char) (a.g + (b.g - a.g) * t / span);
+    c.b = (unsigned char) (a.b + (b.b - a.b) * t / span);
+    c.a = (unsigned char) (a.a + (b.a - a.a) * t / span);
+    return c;
+}
+
+static void plot_c(int x, int y, Colour c, int cover) {
+    int a = c.a * cover / 255;
+    if (a > 0) {
+        plot(x, y, c.r, c.g, c.b, a);
+    }
+}
+
+/* How much of the pixel (x, y) a rounded rectangle covers, 0 to 255 (one pixel anti-aliased edge). */
+static int round_cover(int x, int y, int x0, int y0, int x1, int y1, int r) {
+    float px = x + 0.5f, py = y + 0.5f, dx, dy, d;
+    if (x < x0 || x >= x1 || y < y0 || y >= y1) {
+        return 0;
+    }
+    dx = (float) (x0 + r) - px;
+    if (px > x1 - r) {
+        dx = px - (float) (x1 - r);
+    }
+    dy = (float) (y0 + r) - py;
+    if (py > y1 - r) {
+        dy = py - (float) (y1 - r);
+    }
+    if (dx <= 0 || dy <= 0) {
+        return 255;
+    }
+    d = sqrtf(dx * dx + dy * dy) - (float) r + 0.5f;
+    return d <= 0 ? 255 : d >= 1 ? 0 : (int) ((1 - d) * 255);
+}
+
+/* A smooth rounded rectangle filled from top to bottom, with an optional edge of the given width (1 or 2). */
+static void smooth_box(int x0, int y0, int x1, int y1, int r, Colour top, Colour bottom, Colour edge, int edgeWidth) {
+    int x, y;
+    if (r > (x1 - x0) / 2) {
+        r = (x1 - x0) / 2;
+    }
+    if (r > (y1 - y0) / 2) {
+        r = (y1 - y0) / 2;
+    }
+    for (y = y0 < sClipTop ? sClipTop : y0; y < y1 && y < sClipEnd; y++) {
+        Colour c = mix(top, bottom, y - y0, y1 - y0 - 1);
+        for (x = x0; x < x1; x++) {
+            int outer = round_cover(x, y, x0, y0, x1, y1, r);
+            if (outer == 0) {
+                continue;
+            }
+            if (c.a > 0) {
+                plot_c(x, y, c, outer);
+            }
+            if (edge.a > 0) {
+                int inner = round_cover(x, y, x0 + edgeWidth, y0 + edgeWidth, x1 - edgeWidth, y1 - edgeWidth,
+                                        r > edgeWidth ? r - edgeWidth : 0);
+                plot_c(x, y, edge, outer * (255 - inner) / 255);
+            }
+        }
+    }
+}
+
+static void round_disc(int cx, int cy, int r, Colour c) {
+    smooth_box(cx - r, cy - r, cx + r, cy + r, r, c, c, (Colour){ 0, 0, 0, 0 }, 1);
+}
+
+static void bar(int x0, int y0, int x1, int y1, Colour c) {
+    smooth_box(x0, y0, x1, y1, 1, c, c, (Colour){ 0, 0, 0, 0 }, 1);
+}
+
+/* A slanted slab (leaning right, like a broadcast graphic), filled top to bottom, edges anti-aliased. */
+static void slab(int x0, int y0, int x1, int y1, int slant, Colour top, Colour bottom) {
+    int x, y, h = y1 - y0;
+    for (y = y0 < sClipTop ? sClipTop : y0; y < y1 && y < sClipEnd; y++) {
+        float left = x0 + (float) slant * (y1 - 1 - y) / (h > 1 ? h - 1 : 1);
+        float right = x1 - (float) slant * (y - y0) / (h > 1 ? h - 1 : 1);
+        Colour c = mix(top, bottom, y - y0, h - 1);
+        int xl = (int) left, xr = (int) right;
+        for (x = xl; x <= xr; x++) {
+            float cover = 1.0f;
+            if (x == xl) {
+                cover = 1.0f - (left - (float) xl);
+            }
+            if (x == xr) {
+                cover *= right - (float) xr;
+            }
+            plot_c(x, y, c, (int) (cover * 255));
+        }
+    }
+}
+
+static int is_lit_edge(Colour edge) {
+    return edge.r > 200 && edge.g > 150 && edge.b < 100 && edge.a > 200;
+}
+
+/* A panel or highlight in the current style. Classic draws the game's own rounded box. */
+static void box(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
+    int lit = is_lit_edge(edge), frame = edge.a > 0 && inside.a > 0;
+    if (sStyle == 0 || (inside.a == 0 && !lit)) {
+        // Classic, or the outline pieces the buttons are made of.
+        if (sStyle == 0 || edge.a != 0) {
+            box_classic(x0, y0, x1, y1, inside, edge);
+        }
+        return;
+    }
+    switch (sStyle) {
+        case 1: // Glass: frosted, smooth, softly edged.
+            if (lit) {
+                smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 8 : (y1 - y0) / 2, (Colour){ 255, 230, 100, 230 },
+                           (Colour){ 235, 150, 20, 230 }, (Colour){ 255, 250, 200, 200 }, 1);
+            } else if (frame) {
+                smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 7 : (y1 - y0) / 2, (Colour){ 40, 60, 140, 150 },
+                           (Colour){ 8, 20, 70, 160 }, (Colour){ 190, 215, 255, 80 }, 1);
+                fill(x0 + 6, y0 + 1, x1 - 6, y0 + 2, (Colour){ 255, 255, 255, 70 });
+            }
+            break;
+        case 2: // Broadcast: flat slanted slabs, the lit one in the logo's red-to-yellow.
+            if (lit) {
+                slab(x0, y0, x1, y1, 5, (Colour){ 235, 40, 40, 255 }, (Colour){ 255, 150, 20, 255 });
+            } else {
+                slab(x0, y0, x1, y1, 5, (Colour){ 30, 44, 110, 235 }, (Colour){ 22, 32, 92, 235 });
+            }
+            break;
+        default: // Dock: few boxes; panels are a whisper, the lit one a gold ring.
+            if (lit) {
+                smooth_box(x0, y0, x1, y1, (y1 - y0) / 2 < 14 ? (y1 - y0) / 2 : 14, (Colour){ 255, 255, 255, 40 },
+                           (Colour){ 255, 255, 255, 40 }, (Colour){ 255, 214, 40, 255 }, 1);
+            } else if (frame) {
+                smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 9 : (y1 - y0) / 2, (Colour){ 0, 20, 80, 70 },
+                           (Colour){ 0, 20, 80, 70 }, (Colour){ 0, 0, 0, 0 }, 1);
+            }
+            break;
+    }
 }
 
 /* Part of a picture, tinted (255 each: as it is); a black tint with alpha draws its shadow. */
@@ -580,14 +731,42 @@ static void make_background(void) {
     int x, y;
     for (y = 0; y < BS_HEIGHT; y++) {
         int r = 26 - y * 18 / BS_HEIGHT, g = 58 - y * 40 / BS_HEIGHT, b = 160 - y * 92 / BS_HEIGHT;
+        if (sStyle == 1 || sStyle == 3) {
+            r = 28 - y * 18 / BS_HEIGHT;
+            g = 76 - y * 48 / BS_HEIGHT;
+            b = 200 - y * 100 / BS_HEIGHT;
+        } else if (sStyle == 2) {
+            r = 20 - y * 12 / BS_HEIGHT;
+            g = 30 - y * 18 / BS_HEIGHT;
+            b = 84 - y * 44 / BS_HEIGHT;
+        }
         if (y >= BS_STATUS_Y) {
             r = 4;
             g = 8;
             b = 34;
         }
         for (x = 0; x < BS_WIDTH; x++) {
-            int light = (y < BS_STATUS_Y && ((x / 20) + (y / 20)) % 2 == 0) ? 7 : 0;
-            sBackground[y * BS_WIDTH + x] = rgb565(r + light, g + light, b + light);
+            int light = 0;
+            if (y < BS_STATUS_Y) {
+                if (sStyle == 0) {
+                    light = ((x / 20) + (y / 20)) % 2 == 0 ? 7 : 0;
+                } else if (sStyle == 1) {
+                    light = ((x / 20) + (y / 20)) % 2 == 0 ? 3 : 0;
+                    light += (60 - (x - 60) * (x - 60) / 80 - (y + 20) * (y + 20) / 90) > 0 ? 8 : 0;
+                } else if (sStyle == 2) {
+                    light = ((x + y) / 6) % 2 == 0 ? 3 : 0; // Faint diagonal stripes.
+                    if (y < 3) {
+                        r = 235 - x * 20 / BS_WIDTH;
+                        g = 40 + x * 100 / BS_WIDTH;
+                        b = 30;
+                    }
+                } else {
+                    // Dock: calm, with a soft darker swell near the bottom like the title's sea.
+                    light = y > 170 + (int) (4 * sinf(x / 24.0f)) ? -10 : 0;
+                }
+            }
+            sBackground[y * BS_WIDTH + x] = rgb565(r + light < 0 ? 0 : r + light, g + light < 0 ? 0 : g + light,
+                                                   b + light < 0 ? 0 : b + light);
         }
     }
     // A thin light line above the status strip.
@@ -595,6 +774,17 @@ static void make_background(void) {
         sBackground[(BS_STATUS_Y - 1) * BS_WIDTH + x] = rgb565(60, 90, 170);
     }
     sBackgroundMade = 1;
+}
+
+/* The look to draw in: 0 Classic, 1 Glass, 2 Broadcast, 3 Dock. Redraws everything. */
+void bs_set_style(int style) {
+    if (style < 0 || style > 3 || style == sStyle) {
+        return;
+    }
+    sStyle = style;
+    make_background();
+    sRaceBaseMade = 0;
+    sChanges = (1 << BS_AREA_COUNT) - 1;
 }
 
 /******************************** State ********************************/
@@ -902,6 +1092,13 @@ static int draw_on_off(const char *value, int x, int y) {
     if ((!on && strcmp(value, "Off") != 0) || label->rgba == NULL) {
         return 0;
     }
+    if (sStyle == 1 || sStyle == 3) {
+        // A switch: gold with the knob right when on, dim with the knob left when off.
+        Colour track = on ? (Colour){ 245, 170, 30, 255 } : (Colour){ 20, 30, 80, 200 };
+        smooth_box(x, y + 2, x + 38, y + 18, 8, track, track, (Colour){ 255, 255, 255, on ? 120 : 70 }, 1);
+        round_disc(on ? x + 30 : x + 8, y + 10, 6, on ? WHITE : (Colour){ 150, 160, 195, 255 });
+        return 1;
+    }
     picture_part(label, 0, 0, label->width, label->height, x, y, on ? WHITE : (Colour){ 150, 150, 160, 255 });
     return 1;
 }
@@ -1003,10 +1200,155 @@ static void draw_menu(const State *s) {
     text_clipped(FONT_SMALL, MENU_PANEL_X0 + 12, MENU_TIP_Y + 6, tip, HINT, 1, MENU_PANEL_X1 - 6);
 }
 
+/* Small icons for the new styles' buttons, drawn smooth in a 14 pixel square around (cx, cy). */
+static void line_px(int x0, int y0, int x1, int y1, Colour c) {
+    int i, n = abs(x1 - x0) > abs(y1 - y0) ? abs(x1 - x0) : abs(y1 - y0);
+    for (i = 0; i <= n; i++) {
+        int x = x0 + (x1 - x0) * i / (n ? n : 1), y = y0 + (y1 - y0) * i / (n ? n : 1);
+        fill(x, y, x + 2, y + 2, c);
+    }
+}
+
+/* Returns 1 if the label has an icon. */
+static int draw_icon(const char *label, int cx, int cy, Colour c, Colour hole) {
+    int i;
+    if (strcmp(label, "Pause") == 0) {
+        bar(cx - 5, cy - 6, cx - 1, cy + 6, c);
+        bar(cx + 2, cy - 6, cx + 6, cy + 6, c);
+    } else if (strcmp(label, "Settings") == 0) {
+        static const signed char sTeeth[8][2] = { { 0, -6 }, { 4, -4 }, { 6, 0 }, { 4, 4 }, { 0, 6 }, { -4, 4 }, { -6, 0 }, { -4, -4 } };
+        for (i = 0; i < 8; i++) {
+            round_disc(cx + sTeeth[i][0], cy + sTeeth[i][1], 2, c);
+        }
+        round_disc(cx, cy, 5, c);
+        round_disc(cx, cy, 2, hole);
+    } else if (strcmp(label, "Controls") == 0) {
+        smooth_box(cx - 9, cy - 5, cx + 9, cy + 5, 5, c, c, (Colour){ 0, 0, 0, 0 }, 1);
+        bar(cx - 6, cy - 1, cx - 2, cy + 1, hole);
+        bar(cx - 5, cy - 2, cx - 3, cy + 2, hole);
+        round_disc(cx + 4, cy - 1, 1, hole);
+        round_disc(cx + 6, cy + 1, 1, hole);
+    } else if (strcmp(label, "Updates") == 0) {
+        bar(cx - 1, cy - 7, cx + 2, cy + 1, c);
+        line_px(cx - 5, cy - 1, cx, cy + 5, c);
+        line_px(cx + 5, cy - 1, cx, cy + 5, c);
+        bar(cx - 7, cy + 6, cx + 8, cy + 8, c);
+    } else if (strcmp(label, "Close") == 0) {
+        line_px(cx - 5, cy - 5, cx + 5, cy + 5, c);
+        line_px(cx + 5, cy - 5, cx - 5, cy + 5, c);
+    } else if (strcmp(label, "Prev") == 0) {
+        line_px(cx + 3, cy - 6, cx - 3, cy, c);
+        line_px(cx - 3, cy, cx + 3, cy + 6, c);
+    } else if (strcmp(label, "Next") == 0) {
+        line_px(cx - 3, cy - 6, cx + 3, cy, c);
+        line_px(cx + 3, cy, cx - 3, cy + 6, c);
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
+static void upper_case(const char *in, char *out, int size) {
+    int j;
+    for (j = 0; in[j] != '\0' && j < size - 1; j++) {
+        out[j] = (in[j] >= 'a' && in[j] <= 'z') ? in[j] - 32 : in[j];
+    }
+    out[j] = '\0';
+}
+
+/* The buttons in one of the newer styles: pills (Glass), slanted slabs (Broadcast), a dock of icons (Dock). */
+static void draw_buttons_styled(const char (*buttons)[40], int count) {
+    int i, cell = count > 1 ? 40 / count : 40;
+    int y0 = BS_BUTTONS_Y + 2, y1 = BS_STATUS_Y - 3;
+
+    if (sStyle == 3) {
+        fill(0, BS_BUTTONS_Y, BS_WIDTH, BS_STATUS_Y, (Colour){ 8, 16, 60, 235 });
+        fill(0, BS_BUTTONS_Y, BS_WIDTH, BS_BUTTONS_Y + 1, (Colour){ 255, 255, 255, 60 });
+    } else if (sStyle == 2) {
+        fill(0, BS_BUTTONS_Y, BS_WIDTH, BS_STATUS_Y, (Colour){ 6, 9, 30, 255 });
+    }
+    for (i = 0; i < count; i++) {
+        const char *label = buttons[i];
+        int grey = label[0] == '-', on = label[0] == '+', x0 = (i * cell + 1) * 8, x1 = (i + 1) * cell * 8;
+        const char *t = label + (grey || on);
+        char upper[40];
+        Colour ink = grey ? (Colour){ 130, 135, 160, 255 } : WHITE;
+        if (count == 1 || x1 > BS_WIDTH - 8) {
+            x1 = BS_WIDTH - 8;
+        }
+        if (grey && label[1] == '\0') {
+            continue;
+        }
+        if (sStyle == 1) {
+            Colour top = on ? (Colour){ 110, 230, 110, 255 } : (Colour){ 90, 160, 255, 255 };
+            Colour bottom = on ? (Colour){ 30, 150, 40, 255 } : (Colour){ 30, 80, 220, 255 };
+            if (grey) {
+                top = (Colour){ 130, 135, 155, 255 };
+                bottom = (Colour){ 80, 85, 105, 255 };
+            }
+            smooth_box(x0 - 1, y0, x1 + 1, y1 + 1, 11, (Colour){ 0, 0, 30, 90 }, (Colour){ 0, 0, 30, 90 },
+                       (Colour){ 0, 0, 0, 0 }, 1);
+            smooth_box(x0, y0, x1, y1, 11, top, bottom, (Colour){ 255, 255, 255, grey ? 80 : 150 }, 1);
+            fill(x0 + 8, y0 + 2, x1 - 8, y0 + 4, (Colour){ 255, 255, 255, 60 });
+        } else if (sStyle == 2) {
+            Colour top = i == 0 && !grey ? (Colour){ 235, 40, 40, 255 } : (Colour){ 52, 74, 168, 255 };
+            Colour bottom = i == 0 && !grey ? (Colour){ 255, 150, 20, 255 } : (Colour){ 36, 54, 134, 255 };
+            if (on) {
+                top = (Colour){ 60, 200, 90, 255 };
+                bottom = (Colour){ 40, 160, 70, 255 };
+            } else if (grey) {
+                top = (Colour){ 70, 74, 100, 255 };
+                bottom = (Colour){ 54, 58, 84, 255 };
+            }
+            slab(x0, y0 + 1, x1, y1, 8, top, bottom);
+        } else if (on) {
+            smooth_box(x0 + 8, y0 + 1, x1 - 8, y0 + 3, 1, (Colour){ 90, 220, 90, 255 }, (Colour){ 90, 220, 90, 255 },
+                       (Colour){ 0, 0, 0, 0 }, 1);
+        }
+        {
+            int cy = (y0 + y1) / 2;
+            int w = text_width(FONT_FUN, t);
+            upper_case(t, upper, sizeof(upper));
+            if (sStyle == 3) {
+                Colour dockInk = grey ? ink : (on ? (Colour){ 120, 235, 120, 255 } : WHITE);
+                int w2 = text_width(FONT_SMALL, t), iconW = 18;
+                int tx = x0 + (x1 - x0 - w2 - iconW) / 2;
+                if (!draw_icon(t, tx + 7, cy, dockInk, (Colour){ 8, 16, 60, 255 })) {
+                    iconW = 0;
+                    tx = x0 + (x1 - x0 - w2) / 2;
+                }
+                text_clipped(FONT_SMALL, tx + iconW, cy - 6, t, dockInk, 0, x1);
+            } else {
+                int iconW = 0;
+                Colour hole = sStyle == 1 ? (Colour){ 40, 100, 235, 255 } : (Colour){ 245, 90, 30, 255 };
+                if (strcmp(t, "Pause") == 0 || strcmp(t, "Settings") == 0 || strcmp(t, "Controls") == 0 ||
+                    strcmp(t, "Updates") == 0 || strcmp(t, "Close") == 0 || strcmp(t, "Prev") == 0 ||
+                    strcmp(t, "Next") == 0) {
+                    iconW = 20;
+                }
+                if (sStyle == 2 && !(i == 0 && !grey)) {
+                    hole = (Colour){ 40, 60, 140, 255 };
+                }
+                if (iconW) {
+                    int tx = x0 + (x1 - x0 - w - iconW) / 2;
+                    draw_icon(t, tx + 7, cy, ink, hole);
+                    text_clipped(FONT_FUN, tx + iconW, y0 + 4, upper, ink, !grey, x1);
+                } else {
+                    text_centred(FONT_FUN, x0, x1, y0 + 4, upper, ink, !grey);
+                }
+            }
+        }
+    }
+}
+
 /* Buttons in the style of the game's blue arrows: blue, edged in yellow; grey if they can't be tapped, green if on. */
 static void draw_button_row(const char (*buttons)[40], int count) {
     int i, cell = count > 1 ? 40 / count : 40;
 
+    if (sStyle != 0) {
+        draw_buttons_styled(buttons, count);
+        return;
+    }
     for (i = 0; i < count; i++) {
         const char *label = buttons[i];
         int grey = label[0] == '-', on = label[0] == '+', x0 = (i * cell + 1) * 8, x1 = (i + 1) * cell * 8, y, row;

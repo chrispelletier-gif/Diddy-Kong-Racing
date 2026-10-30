@@ -84,6 +84,9 @@ void host_bottom_preview(const char *dir) {
     save(dir, "0_before_rom");
 
     bs_load_assets();
+    if (getenv("DKR_BOTTOM_STYLE") != NULL) {
+        bs_set_style(atoi(getenv("DKR_BOTTOM_STYLE")));
+    }
     {
         static const char *const sHome[3] = { "Settings", "Controls", "Updates" };
         bs_set_buttons(sHome, 3);
@@ -384,6 +387,9 @@ void host_bottom_race_start(void) {
     static const char *const sButtons[2] = { "Pause", "Settings" };
     bs_init(NULL);
     bs_load_assets();
+    if (getenv("DKR_BOTTOM_STYLE") != NULL) {
+        bs_set_style(atoi(getenv("DKR_BOTTOM_STYLE")));
+    }
     bs_set_buttons(sButtons, 2);
 }
 

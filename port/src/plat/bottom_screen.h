@@ -63,6 +63,8 @@ void bs_load_assets(void);
 
 void bs_add_message(const char *text);
 void bs_clear_messages(void);
+/* The look: 0 Classic, 1 Glass, 2 Broadcast, 3 Dock (the same layout, drawn in another style). */
+void bs_set_style(int style);
 /* The profiler's readout, lines separated by '\n'; "" removes it. */
 void bs_set_overlay(const char *text);
 /* menu NULL closes it. */

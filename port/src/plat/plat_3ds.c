@@ -705,6 +705,7 @@ void plat_3ds_console_init(void) {
 void plat_rom_loaded(void) {
     LightLock_Lock(&sConsoleLock);
     bs_load_assets();
+    bs_set_style(settings_get("bottomstyle", 0));
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
     screen_thread_start(sRcpCore == 1 ? 0 : sRcpCore);
@@ -766,6 +767,14 @@ static int same_standing(const RaceHud *a, const RaceHud *b) {
         }
     }
     return 1;
+}
+
+/* The bottom screen's look (Race HUD page, port_race_hud.c). */
+void plat_set_bottom_style(int style) {
+    LightLock_Lock(&sConsoleLock);
+    bs_set_style(style);
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
 }
 
 void plat_set_race_hud(const RaceHud *hud) {
