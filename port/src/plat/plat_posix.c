@@ -133,7 +133,7 @@ int plat_picture_style(void) {
 
 void plat_set_picture_style(int smooth) {
     plat_set_60fps_setting(smooth);
-    plat_set_gpu_config(smooth ? PLAT_AA_OFF : PLAT_AA_4X, -1);
+    plat_set_gpu_config(smooth ? PLAT_AA_OFF : PLAT_AA_4X);
 }
 
 /* The PC build's picture keeps DKR_WIDESCREEN's style; the setup's choice is only kept. */
