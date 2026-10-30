@@ -300,6 +300,14 @@ void plat_set_stereo_once_setting(int on);
 /* What the renderer thread is doing right now. */
 extern const char *volatile gPlatGfxStage;
 
+/*
+ * The port's own text in the game's language (port/src/game/port_text.c): english as the game writes it now (French
+ * when it is set to FRANCAIS), or english itself when there is no translation; and whether it is French now. The
+ * game's menus and the 3DS bottom screen use it; a new label, value or hint needs a line in port_text.c.
+ */
+const char *port_text(const char *english);
+int port_text_french(void);
+
 #ifdef __cplusplus
 }
 #endif

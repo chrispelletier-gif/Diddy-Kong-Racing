@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "plat/bottom_screen.h"
+#include "plat/plat.h"
 
 int stbi_write_png(char const *filename, int w, int h, int comp, const void *data, int stride_in_bytes);
 
@@ -147,7 +148,7 @@ void host_bottom_preview(const char *dir) {
     row(&menu, "Check for updates", "", "Install a newer build from GitHub");
     row(&menu, "Send a bug report", "", "Log and snapshot (also SELECT+touch)");
     menu.picked = -1;
-    snprintf(menu.note, sizeof(menu.note), "Build 1a2b3c4");
+    snprintf(menu.note, sizeof(menu.note), port_text("Build %.32s"), "1a2b3c4");
     bs_show_menu(&menu);
     {
         static const char *const sMenuButtons[3] = { "Close", "-Prev", "-Next" };
@@ -176,15 +177,25 @@ void host_bottom_preview(const char *dir) {
     save(dir, "4_saves_player");
 
     bs_show_menu(NULL);
-    bs_add_message("This build: 1a2b3c4");
-    bs_add_message("master 92709d8 master 2026-10-23");
-    bs_add_message("newest 5f2a9a2 claude/project-thread 2026-10-23 (this)");
+    {
+        // As update_3ds.c's plat_status lines show them (in the game's language).
+        char line[96];
+        snprintf(line, sizeof(line), port_text("This build: %.7s"), "1a2b3c4");
+        bs_add_message(line);
+        bs_add_message("master 92709d8 master 2026-10-23");
+        snprintf(line, sizeof(line), "newest 5f2a9a2 claude/project-thread 2026-10-23%s", port_text(" (this)"));
+        bs_add_message(line);
+    }
     {
         static const char *const sChoices[3] = { "master", "-newest", "cancel" };
         bs_set_buttons(sChoices, 3);
     }
     save(dir, "5_update_choices");
-    bs_set_panel_text("Downloading master... 45%");
+    {
+        char line[64];
+        snprintf(line, sizeof(line), port_text("Downloading %s: %d%%"), "master", 45);
+        bs_set_panel_text(line);
+    }
     save(dir, "6_busy");
     {
         static const char *const sConfirm[3] = { "Stop test", "-", "cancel" };

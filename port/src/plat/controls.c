@@ -411,7 +411,7 @@ void controls_option_value(int index, char *out, int size) {
             plat_snprintf(out, size, "%s", sTiltNames[sSettings.tilt]);
             break;
         case OPT_TILT_RANGE:
-            plat_snprintf(out, size, "%d degrees", sSettings.tiltRange);
+            plat_snprintf(out, size, port_text("%d degrees"), sSettings.tiltRange);
             break;
         case OPT_RESET:
             // An action row: no value.

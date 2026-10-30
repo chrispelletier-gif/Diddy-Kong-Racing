@@ -172,7 +172,7 @@ static void show_busy(const char *fmt, ...) {
     char text[64];
     va_list args;
     va_start(args, fmt);
-    vsnprintf(text, sizeof(text), fmt, args);
+    vsnprintf(text, sizeof(text), port_text(fmt), args);
     va_end(args);
     plat_3ds_panel_text(text);
 }
@@ -523,7 +523,7 @@ static int check(void) {
     }
     net_3ds_end();
     if (!found) {
-        plat_status("Update: no builds found%s", config.token[0] == '\0' ? " (a private repo needs the token)" : "");
+        plat_status("Update: no builds found%s", config.token[0] == '\0' ? port_text(" (a private repo needs the token)") : "");
         return 0;
     }
 
@@ -532,7 +532,7 @@ static int check(void) {
         const Channel *channel = &sChannels[i];
         if (channel->found) {
             plat_status("%-6s %.7s %.16s %.10s%s", channel->label, channel->commit, channel->branch, channel->date,
-                        is_installed(channel) ? " (this)" : "");
+                        is_installed(channel) ? port_text(" (this)") : "");
         } else {
             plat_status("%-6s none", channel->label);
         }

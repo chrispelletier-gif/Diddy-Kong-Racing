@@ -25,6 +25,11 @@ unsigned long port_assets_lut_start(void);
 unsigned long port_assets_lut_end(void);
 long port_inflate(const unsigned char *in, unsigned char *out);
 
+/*
+ * The screen is written in English; everything drawn with text() and the others below goes through port_text
+ * (plat.h), so it shows in French when the game is set to FRANCAIS.
+ */
+
 /******************************** Pictures and fonts from the ROM ********************************/
 
 typedef struct Picture {
@@ -477,7 +482,7 @@ static int advance(const Font *f, unsigned char c) {
     return f->fixedAdvance ? f->fixedAdvance : f->glyphs[c - 0x20].advance;
 }
 
-static int text_width(int font, const char *text) {
+static int text_width_as_is(int font, const char *text) {
     int width = 0;
     if (!font_ready(font)) {
         return (int) strlen(text) * 8;
@@ -488,8 +493,8 @@ static int text_width(int font, const char *text) {
     return width;
 }
 
-/* Draws text from x (until right, if text would go further) with its top at y. Returns where it ended. */
-static int text_clipped(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
+/* Draws text from x (until right, if text would go further) with its top at y, as it is. Returns where it ended. */
+static int text_clipped_as_is(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
     const Font *f = &sFonts[font];
     if (!font_ready(font)) {
         // Before the ROM's fonts are loaded: the 8x8 font, a little lower so it sits like the small font.
@@ -520,13 +525,36 @@ static int text_clipped(int font, int x, int y, const char *text, Colour colour,
     return x;
 }
 
+/* The same in the game's language (port_text). */
+static int text_width(int font, const char *text) {
+    return text_width_as_is(font, port_text(text));
+}
+
+static int text_clipped(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
+    return text_clipped_as_is(font, x, y, port_text(text), colour, shadow, right);
+}
+
 static int text(int font, int x, int y, const char *s, Colour colour, int shadow) {
     return text_clipped(font, x, y, s, colour, shadow, BS_WIDTH);
 }
 
+static void text_centred_as_is(int font, int x0, int x1, int y, const char *s, Colour colour, int shadow) {
+    int width = text_width_as_is(font, s);
+    text_clipped_as_is(font, x0 + (x1 - x0 - width) / 2, y, s, colour, shadow, x1);
+}
+
 static void text_centred(int font, int x0, int x1, int y, const char *s, Colour colour, int shadow) {
-    int width = text_width(font, s);
-    text_clipped(font, x0 + (x1 - x0 - width) / 2, y, s, colour, shadow, x1);
+    text_centred_as_is(font, x0, x1, y, port_text(s), colour, shadow);
+}
+
+/* Capitals of the text in the game's language, for the fun font's headings. */
+static void upper_text(char *out, int size, const char *s) {
+    int i;
+    s = port_text(s);
+    for (i = 0; s[i] != '\0' && i < size - 1; i++) {
+        out[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
+    }
+    out[i] = '\0';
 }
 
 /* Dense text (the profiler and the watchdog) in 8 pixel columns: the 8x8 font, or the small font centred. */
@@ -536,7 +564,7 @@ static void mono_text(int x, int y, const char *s, Colour colour) {
             mono_char(x, y, (unsigned char) *s, colour);
         } else {
             char one[2] = { *s, '\0' };
-            text_centred(FONT_SMALL, x, x + 8, y - 2, one, colour, 0);
+            text_centred_as_is(FONT_SMALL, x, x + 8, y - 2, one, colour, 0);
         }
     }
 }
@@ -662,7 +690,14 @@ void bs_set_race_hud(const RaceHud *hud) {
 }
 
 unsigned bs_take_changes(void) {
-    unsigned changes = sChanges;
+    static int sFrench = -1;
+    unsigned changes;
+    if (port_text_french() != sFrench) {
+        // The game's language changed: everything is redrawn in it.
+        sFrench = port_text_french();
+        sChanges = (1 << BS_AREA_COUNT) - 1;
+    }
+    changes = sChanges;
     sChanges = 0;
     if (changes != 0) {
         sDrawn = sState;
@@ -784,9 +819,9 @@ static void draw_controls(int y0, int y1) {
         char build[48];
         // Players see the version; debug builds the git describe, which names the commit too.
         if (PLAT_DEBUG_TOOLS) {
-            snprintf(build, sizeof(build), "Build %.24s", plat_build_version());
+            snprintf(build, sizeof(build), port_text("Build %.24s"), plat_build_version());
         } else {
-            snprintf(build, sizeof(build), "Version %.20s", plat_version());
+            snprintf(build, sizeof(build), port_text("Version %.20s"), plat_version());
         }
         text(FONT_SMALL, BS_WIDTH - 12 - text_width(FONT_SMALL, build), y0 + 6, build, DIM, 1);
     }
@@ -845,6 +880,9 @@ static void draw_home(const State *s) {
  */
 static int draw_on_off(const char *value, int x, int y) {
     int on = strcmp(value, "On") == 0;
+    if (port_text_french()) {
+        return 0; // The labels say ON and OFF: the value is written out (OUI, NON) instead.
+    }
     // Of the game's two versions of each label, the one with white letters is the brighter one; OFF gets the other,
     // greyed.
     const Picture *label = on ? &sOnOff[0][0] : &sOnOff[1][1];
@@ -867,15 +905,11 @@ static void arrow(int left, int x, int y) {
 /* The fun font's capitals (the game's headings, red edged in yellow), centred between x0 and x1 or from x0. */
 static void heading(int x0, int x1, int y, const char *s, int centred) {
     char upper[40];
-    int i;
-    for (i = 0; s[i] != '\0' && i < (int) sizeof(upper) - 1; i++) {
-        upper[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
-    }
-    upper[i] = '\0';
+    upper_text(upper, sizeof(upper), s);
     if (centred) {
-        text_centred(FONT_FUN, x0, x1, y, upper, WHITE, 1);
+        text_centred_as_is(FONT_FUN, x0, x1, y, upper, WHITE, 1);
     } else {
-        text_clipped(FONT_FUN, x0, y, upper, WHITE, 1, x1);
+        text_clipped_as_is(FONT_FUN, x0, y, upper, WHITE, 1, x1);
     }
 }
 
@@ -915,8 +949,14 @@ static void draw_menu(const State *s) {
         } else {
             box(4, y, MENU_PANEL_X0 - 4, y + tabHeight - 2, (Colour){ 0, 8, 40, 70 }, (Colour){ 140, 180, 255, 80 });
         }
-        if (font_ready(FONT_FUN)) {
+        char upper[40];
+        upper_text(upper, sizeof(upper), m->tabs[i]);
+        /* A long name (French ones) that would touch the tab's edges drops to the small font. */
+        if (font_ready(FONT_FUN) && text_width_as_is(FONT_FUN, upper) <= MENU_PANEL_X0 - 16) {
             heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8, m->tabs[i], 1);
+        } else if (font_ready(FONT_FUN)) {
+            text_centred_as_is(FONT_SMALL, 4, MENU_PANEL_X0 - 4, y + tabHeight / 2 - 6, upper,
+                               i == m->tab ? YELLOW : WHITE, 1);
         } else {
             text_clipped(FONT_SMALL, 10, y + tabHeight / 2 - 6, m->tabs[i], i == m->tab ? YELLOW : WHITE, 1,
                          MENU_PANEL_X0 - 4);
@@ -990,14 +1030,9 @@ static void draw_buttons(const State *s) {
         fill(x0 + 2, BS_BUTTONS_Y + 3, x1 - 2, BS_BUTTONS_Y + 4, (Colour){ 255, 255, 255, 90 });
         if (font_ready(FONT_FUN)) {
             char upper[40];
-            int j;
-            const char *t = label + (grey || on);
-            for (j = 0; t[j] != '\0' && j < (int) sizeof(upper) - 1; j++) {
-                upper[j] = (t[j] >= 'a' && t[j] <= 'z') ? t[j] - 32 : t[j];
-            }
-            upper[j] = '\0';
-            text_centred(FONT_FUN, x0, x1, BS_BUTTONS_Y + 6, upper, grey ? (Colour){ 120, 120, 130, 255 } : WHITE,
-                         !grey);
+            upper_text(upper, sizeof(upper), label + (grey || on));
+            text_centred_as_is(FONT_FUN, x0, x1, BS_BUTTONS_Y + 6, upper, grey ? (Colour){ 120, 120, 130, 255 } : WHITE,
+                               !grey);
         } else {
             text_centred(FONT_SMALL, x0, x1, BS_BUTTONS_Y + 6, label + (grey || on), grey ? DIM : WHITE, !grey);
         }
@@ -1372,7 +1407,7 @@ static void format_gap(int gap, char *out, int size) {
     }
     if (gap >= RACE_HUD_LAPPED || gap <= -RACE_HUD_LAPPED) {
         int laps = gap > 0 ? gap - RACE_HUD_LAPPED : -gap - RACE_HUD_LAPPED;
-        snprintf(out, size, "%c%d lap%s", gap > 0 ? '+' : '-', laps, laps == 1 ? "" : "s");
+        snprintf(out, size, port_text("%c%d lap%s"), gap > 0 ? '+' : '-', laps, laps == 1 ? "" : "s");
         return;
     }
     value = (gap < 0 ? -gap : gap) * 100 / 60;
@@ -1781,7 +1816,7 @@ static void draw_standing(const RaceHud *hud) {
     }
     if (hud->racerCount > 0) {
         char of[8];
-        snprintf(of, sizeof(of), "of %d", hud->racerCount);
+        snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
         text(FONT_SMALL, RIGHT_X1 - 8 - text_width(FONT_SMALL, of), 22, of, DIM, 1);
     }
     y = 44;
@@ -1825,11 +1860,11 @@ static void draw_bananas_and_laps(const RaceHud *hud) {
         }
     }
     if (done > 0) {
-        snprintf(label, sizeof(label), "Lap %d", done);
+        snprintf(label, sizeof(label), port_text("Lap %d"), done);
         text(FONT_SMALL, MIDDLE_X0 + 44, LOWER_Y0 + 42, label, HINT, 1);
         race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[done - 1], 1);
     } else if (timed > 0) {
-        snprintf(label, sizeof(label), "Lap %d", timed);
+        snprintf(label, sizeof(label), port_text("Lap %d"), timed);
         text(FONT_SMALL, MIDDLE_X0 + 44, LOWER_Y0 + 42, label, HINT, 1);
         race_time(MIDDLE_X0 + 8, LOWER_Y0 + 58, hud->lapTimes[timed - 1], 1);
     }
@@ -1971,7 +2006,7 @@ static void draw_lap_list(const RaceHud *hud, int x0, int y0) {
     timed_laps(hud, &timed, &done);
     // The last two laps: the one being driven and the one before.
     for (i = timed > 2 ? timed - 2 : 0; i < timed; i++) {
-        snprintf(label, sizeof(label), "Lap %d", i + 1);
+        snprintf(label, sizeof(label), port_text("Lap %d"), i + 1);
         text(FONT_SMALL, x0 + 8, y, label, HINT, 1);
         race_time(x0 + 8, y + 11, hud->lapTimes[i], 1);
         y += 27;
@@ -2021,7 +2056,7 @@ static void draw_time_trial(const RaceHud *hud) {
     text(FONT_FUN, TOWER_X0 + 8, 9, "SPLITS", WHITE, 1);
     for (i = 0; i < hud->lapsTimed && i < RACE_HUD_LAPS && i < 4; i++) {
         int finished = i < hud->lapsTimed - 1 || hud->finished;
-        snprintf(label, sizeof(label), "Lap %d", i + 1);
+        snprintf(label, sizeof(label), port_text("Lap %d"), i + 1);
         text(FONT_SMALL, TOWER_X0 + 8, y, label, finished ? HINT : YELLOW, 1);
         if (finished && i < hud->bestLapCount && hud->bestLaps[i] > 0) {
             int d = hud->lapTimes[i] - hud->bestLaps[i];
@@ -2117,7 +2152,7 @@ static void draw_versus(const RaceHud *hud) {
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, 52, "Taj's challenge", YELLOW, 1);
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, 66, "Win: a new balloon", DIM, 1);
     } else {
-        snprintf(subtitle, sizeof(subtitle), "Round %d", hud->round > 0 ? hud->round : 1);
+        snprintf(subtitle, sizeof(subtitle), port_text("Round %d"), hud->round > 0 ? hud->round : 1);
         draw_head_to_head(hud, subtitle);
         draw_item(hud);
     }
@@ -2260,8 +2295,8 @@ static void draw_challenge(const RaceHud *hud) {
             }
         }
         text(FONT_FUN, RIGHT_X0 + 8, 9, hud->mode == RACE_HUD_MODE_EGGS ? "EGG COLLECTOR" : "BANANAS", WHITE, 1);
-        snprintf(line, sizeof(line), "First to %d %s", hud->goal,
-                 hud->mode == RACE_HUD_MODE_EGGS ? "eggs wins" : "wins");
+        snprintf(line, sizeof(line), port_text("First to %d %s"), hud->goal,
+                 port_text(hud->mode == RACE_HUD_MODE_EGGS ? "eggs wins" : "wins"));
         text(FONT_SMALL, RIGHT_X0 + 8, 32, line, HINT, 1);
         if (place >= 1 && place <= 8) {
             x = piece(&sPlaces[place - 1], RIGHT_X0 + 8, 48, 1);
@@ -2269,7 +2304,7 @@ static void draw_challenge(const RaceHud *hud) {
         }
         togo = me != NULL ? hud->goal - me->score : 0;
         if (togo > 0) {
-            snprintf(line, sizeof(line), "%d to go", togo);
+            snprintf(line, sizeof(line), port_text("%d to go"), togo);
             text(FONT_SMALL, RIGHT_X0 + 60, 62, line, DIM, 1);
         }
     }
@@ -2351,7 +2386,7 @@ static void draw_menu_save(const RaceHud *hud) {
     int i, k, x, y = 98;
     char line[48];
     text(FONT_FUN, 96, 9, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE", WHITE, 1);
-    snprintf(line, sizeof(line), "Save file %s", hud->name);
+    snprintf(line, sizeof(line), port_text("Save file %s"), hud->name);
     text(FONT_SMALL, 96, 26, line, DIM, 1);
     picture_scaled(&sBalloon, 14, SAVE_PANEL_Y0 + 7, 1, 1);
     text(FONT_SMALL, 48, SAVE_PANEL_Y0 + 6, "Balloons", HINT, 1);
@@ -2366,12 +2401,12 @@ static void draw_menu_save(const RaceHud *hud) {
         picture(&sTTAmulet[hud->ttAmulet], 170, SAVE_PANEL_Y0 + 6);
     }
     text(FONT_SMALL, 198, SAVE_PANEL_Y0 + 6, "T.T. amulet", HINT, 1);
-    snprintf(line, sizeof(line), "%d of 4 pieces", hud->ttAmulet);
+    snprintf(line, sizeof(line), port_text("%d of 4 pieces"), hud->ttAmulet);
     text(FONT_SMALL, 198, SAVE_PANEL_Y0 + 17, line, YELLOW, 1);
     if (hud->wizpigAmulet > 0 && hud->wizpigAmulet <= 4) {
         picture(&sWizpigAmulet[hud->wizpigAmulet], 170, SAVE_PANEL_Y0 + 30);
         text(FONT_SMALL, 198, SAVE_PANEL_Y0 + 30, "Wizpig amulet", HINT, 1);
-        snprintf(line, sizeof(line), "%d of 4 pieces", hud->wizpigAmulet);
+        snprintf(line, sizeof(line), port_text("%d of 4 pieces"), hud->wizpigAmulet);
         text(FONT_SMALL, 198, SAVE_PANEL_Y0 + 41, line, YELLOW, 1);
     }
     // Each world: its eight balloons (four races, four silver coin races), trophy, key and boss.

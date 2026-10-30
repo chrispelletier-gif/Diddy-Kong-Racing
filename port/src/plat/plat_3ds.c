@@ -822,10 +822,20 @@ void plat_status(const char *fmt, ...) {
     char buffer[256];
     va_list args;
     va_start(args, fmt);
+    va_list french;
+    va_copy(french, args);
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     log_line("", buffer);
-    plat_3ds_console_line(buffer);
+    // The log stays English; the bottom screen shows the game's language (port_text).
+    if (port_text_french()) {
+        char shown[256];
+        vsnprintf(shown, sizeof(shown), port_text(fmt), french);
+        plat_3ds_console_line(port_text(shown));
+    } else {
+        plat_3ds_console_line(buffer);
+    }
+    va_end(french);
 }
 
 static void status_lines(const char *first, const char *second) {

@@ -1455,7 +1455,7 @@ static void send_results(const char *why) {
     } else if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
         bench_summary(summary + length, sizeof(summary) - length);
     }
-    plat_status("%s %s: %d races, %d problems", sModes[sMode].name, why, (int) (sFinished + sProblems), (int) sProblems);
+    plat_status("%s %s: %d races, %d problems", port_text(sModes[sMode].name), port_text(why), (int) (sFinished + sProblems), (int) sProblems);
     plat_send_test_results(title, summary);
 }
 
@@ -1546,7 +1546,7 @@ static void handle_request(void) {
             return; // Nothing to race.
         }
         prof_window_start(PROF_WINDOW_OVERLAY);
-        plat_status("%s started: race %d of %d", sModes[sMode].name, (int) sNext + 1,
+        plat_status("%s started: race %d of %d", port_text(sModes[sMode].name), (int) sNext + 1,
                     (int) sNumRaces);
         if (get_game_mode() == GAMEMODE_INGAME) {
             sQuitPending = TRUE; // Out of the game, to the title screen where the races start.
