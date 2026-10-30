@@ -639,6 +639,8 @@ static u32 peek_keys(void) {
     return keys;
 }
 
+void plat_log_drain(void);
+
 static void report_now(void) {
     ReportConfig config;
     Report report;
@@ -676,6 +678,7 @@ static void report_now(void) {
 
     memset(&report, 0, sizeof(report));
     report.kind = REPORT_BUTTON;
+    plat_log_drain(); // The snapshot's files are written behind the renderer's back.
     if (gPlatSnapshotSaved != before) {
         char name[64];
         int frame = gPlatSnapshotSaved, largeRecent;
