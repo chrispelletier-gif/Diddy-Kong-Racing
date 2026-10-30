@@ -11,6 +11,9 @@
 #include "plat/settings.h"
 #include "port.h"
 
+/* The Settings menu closes (the 3DS bottom screen's; nothing on the PC). */
+void plat_request_close_menu(void);
+
 static volatile s32 sSkipIntro = -1; // -1 until loaded.
 
 s32 port_skip_intro(void) {
@@ -50,6 +53,9 @@ void intro_option_change(int index, int step) {
     (void) step;
     if (index == 0) {
         port_set_skip_intro(!port_skip_intro());
+    } else if (PLAT_DEBUG_TOOLS) {
+        port_setup_restart(); // Runs now at the title screen: no settings to delete.
+        plat_request_close_menu();
     } else if (port_setup_done()) {
         port_setup_reset();
     } else {
@@ -59,6 +65,9 @@ void intro_option_change(int index, int step) {
 
 const char *intro_option_hint(int index) {
     if (index == 1) {
+        if (PLAT_DEBUG_TOOLS) {
+            return "Runs now at the title screen";
+        }
         return port_setup_done() ? "Language, play style and picture again" : "Shows at the title screen next start";
     }
     return port_skip_intro() ? "Start at the title screen" : "A, B or START skips them";

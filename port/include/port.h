@@ -257,6 +257,8 @@ void port_setup_update(u32 buttons, s32 stickX, s32 stickY);
 s32 port_setup_caption(const char **name, const char **tag, const char **about);
 s32 port_setup_done(void);
 void port_setup_reset(void);
+/* Debug: asks for the setup again, and runs it now when the title screen is showing. */
+void port_setup_restart(void);
 
 /*
  * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c, roadmap G9): port_race_hud_frame copies the

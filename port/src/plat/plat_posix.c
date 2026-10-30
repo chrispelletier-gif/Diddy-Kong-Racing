@@ -123,6 +123,8 @@ void plat_set_setup_screen(const SetupScreen *screen) {
     }
 }
 
+void plat_request_close_menu(void) {}
+
 int plat_take_setup_tap(void) {
     return SETUP_HIT_NONE;
 }

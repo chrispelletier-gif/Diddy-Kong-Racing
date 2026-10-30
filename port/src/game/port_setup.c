@@ -43,6 +43,7 @@ static s32 sChosen;     // The tile lit.
 static s32 sFrench;
 static s32 sStyle = SETUP_STYLE_ENHANCED;
 static SetupScreen sScreen;
+static s32 sOpened;     // The first page has been opened.
 
 /* English or French, by the language picked. */
 static const char *tr(const char *english, const char *french) {
@@ -452,6 +453,15 @@ void port_setup_reset(void) {
     settings_set("setup", 0);
 }
 
+/* Debug builds' Start-up row: asks for the setup again and starts it right away if the title screen is up. */
+void port_setup_restart(void) {
+    settings_set("setup", 0);
+    if (sState != 1) {
+        sState = -1;
+        sOpened = FALSE;
+    }
+}
+
 s32 port_setup_done(void) {
     return settings_get("setup", 0) != 0;
 }
@@ -461,7 +471,6 @@ s32 port_setup_done(void) {
  * its stick steps (src/menu.c's gMenuButtons, gMenuStickX and gMenuStickY). The first frame opens the first page.
  */
 void port_setup_update(u32 buttons, s32 stickX, s32 stickY) {
-    static s32 sOpened;
     s32 count, columns, tile, tap;
 
     if (!port_setup_active()) {
