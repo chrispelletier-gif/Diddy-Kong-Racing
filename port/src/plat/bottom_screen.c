@@ -2728,30 +2728,54 @@ static void draw_two_screens(Rect r, int where) {
     }
 }
 
-/* The flags on the language page: the Union Flag for English, the French tricolour. */
+/* Whether x, y is inside a polygon of count points (even-odd rule). */
+static int inside(const float (*points)[2], int count, float x, float y) {
+    int i, j, in = 0;
+    for (i = 0, j = count - 1; i < count; j = i++) {
+        if ((points[i][1] > y) != (points[j][1] > y) &&
+            x < (points[j][0] - points[i][0]) * (y - points[i][1]) / (points[j][1] - points[i][1]) + points[i][0]) {
+            in = !in;
+        }
+    }
+    return in;
+}
+
+/* The flags on the language page, for the North American game: the United States for English, Canada for French. */
 static void draw_flag(Rect r, int french) {
+    // The maple leaf, in a square of 1 across (y down).
+    static const float sLeaf[][2] = {
+        { 0.50f, 0.05f }, { 0.43f, 0.20f }, { 0.36f, 0.17f }, { 0.40f, 0.38f }, { 0.30f, 0.28f }, { 0.27f, 0.34f },
+        { 0.15f, 0.31f }, { 0.20f, 0.44f }, { 0.13f, 0.48f }, { 0.30f, 0.62f }, { 0.27f, 0.70f }, { 0.47f, 0.67f },
+        { 0.47f, 0.88f }, { 0.53f, 0.88f }, { 0.53f, 0.67f }, { 0.73f, 0.70f }, { 0.70f, 0.62f }, { 0.87f, 0.48f },
+        { 0.80f, 0.44f }, { 0.85f, 0.31f }, { 0.73f, 0.34f }, { 0.70f, 0.28f }, { 0.60f, 0.38f }, { 0.64f, 0.17f },
+        { 0.57f, 0.20f },
+    };
+    static const Colour RED = { 210, 20, 40, 255 }, NAVY = { 20, 40, 120, 255 };
     int w = r.x1 - r.x0, h = r.y1 - r.y0, x, y;
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
             Colour c;
             if (french) {
-                c = x < w / 3 ? (Colour){ 0, 35, 149, 255 } : x < w * 2 / 3 ? WHITE : (Colour){ 237, 41, 57, 255 };
+                // Red quarters at the sides, white square in the middle with the red maple leaf.
+                if (x < w / 4 || x >= w - w / 4) {
+                    c = RED;
+                } else {
+                    float side = (float) (w - 2 * (w / 4));
+                    float u = (x - w / 4 + 0.5f) / side, v = (y + 0.5f) / h * 1.0f;
+                    // The leaf fills the middle square's height.
+                    u = 0.5f + (u - 0.5f) * side / h;
+                    c = inside(sLeaf, sizeof(sLeaf) / sizeof(sLeaf[0]), u, v) ? RED : WHITE;
+                }
             } else {
-                // Distances from the diagonals and the middle lines, in pixels.
-                int d1 = abs(x * h - y * w) / (w > h ? w : h), d2 = abs((w - x) * h - y * w) / (w > h ? w : h);
-                int dx = abs(2 * x - w) / 2, dy = abs(2 * y - h) / 2, cross = h / 10 + 1, diag = h / 12 + 1;
-                c = (Colour){ 1, 33, 105, 255 };
-                if (d1 <= diag || d2 <= diag) {
-                    c = WHITE;
-                    if ((d1 <= diag / 2 && (x < w / 2) == (y < h / 2)) || (d2 <= diag / 2 && (x < w / 2) != (y < h / 2))) {
-                        c = (Colour){ 200, 16, 46, 255 };
+                // Thirteen stripes, red first, and the blue canton over the top seven with rows of white stars.
+                int stripe = y * 13 / h, cantonW = w * 2 / 5, cantonH = h * 7 / 13;
+                c = stripe % 2 == 0 ? RED : WHITE;
+                if (x < cantonW && y < cantonH) {
+                    int sx = x * 6 * 2 / cantonW, sy = y * 5 * 2 / cantonH;
+                    c = NAVY;
+                    if (sx % 2 == 1 && sy % 2 == 1 && w >= 40) {
+                        c = WHITE;
                     }
-                }
-                if (dx <= cross + 1 || dy <= cross + 1) {
-                    c = WHITE;
-                }
-                if (dx <= cross / 2 + 1 || dy <= cross / 2 + 1) {
-                    c = (Colour){ 200, 16, 46, 255 };
                 }
             }
             plot(r.x0 + x, r.y0 + y, c.r, c.g, c.b, 255);
