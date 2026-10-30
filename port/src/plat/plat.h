@@ -97,6 +97,8 @@ int plat_main_loop_iteration(void);
 /* Whole file helpers. plat_load_file returns a malloc'd buffer (or NULL) and writes the size to *size. */
 void *plat_load_file(const char *path, unsigned int *size);
 int plat_save_file(const char *path, const void *data, unsigned int size);
+/* Adds data to the end of a file, making it if there is none. Returns 0 if anything failed. */
+int plat_append_file(const char *path, const void *data, unsigned int size);
 /* Reads up to size bytes from the start of a file. Returns the number read, or -1 if it cannot be opened. */
 int plat_load_file_start(const char *path, void *data, unsigned int size);
 void *plat_malloc(size_t size);

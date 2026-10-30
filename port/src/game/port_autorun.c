@@ -319,28 +319,100 @@ static const char *results_file(void) {
     return sModes[sMode].resultsFile;
 }
 
-/* Appends text to a file in the data directory. */
-static void append_file(const char *name, const char *text) {
-    char path[256];
-    unsigned int size = 0, length = strlen(text);
-    char *old, *buffer;
+/*
+ * The results and state files are written by a thread of their own. On the 3DS every file opened, replaced or renamed
+ * on the SD card can take 100 ms and more (looking up a name reads the whole data directory, which keeps every bug
+ * report snapshot), and the results file used to be read and written whole: writing them as a race ended held the
+ * game for most of a second at the finish line (test runs #250 and #254: "long game frame: 773 / 829 ms" right after
+ * each race's results line). The writes keep their order; whatever reads the files back first waits for them
+ * (io_flush).
+ */
+#define IO_JOBS 16
 
-    make_path(path, sizeof(path), name);
-    old = plat_load_file(path, &size);
-    buffer = plat_malloc(size + length);
-    if (buffer == NULL) {
-        plat_free(old);
+typedef struct IoJob {
+    char path[256];
+    char *text;
+    char *header;       // Appends: written first if the file doesn't exist yet (or NULL).
+    s32 append;         // Added to the end of the file, else it replaces the file.
+} IoJob;
+
+static IoJob sIoJobs[IO_JOBS];
+static volatile u32 sIoQueued, sIoDone; // Jobs queued by the game thread, jobs the writer has finished.
+static PlatSem *sIoWake;
+
+static void io_thread(UNUSED void *arg) {
+    for (;;) {
+        IoJob *job;
+        unsigned long long start;
+        plat_sem_wait(sIoWake);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        job = &sIoJobs[sIoDone % IO_JOBS];
+        start = plat_time_ns();
+        if (job->append) {
+            if (job->header != NULL) {
+                char probe[1];
+                if (plat_load_file_start(job->path, probe, sizeof(probe)) < 0) {
+                    plat_append_file(job->path, job->header, strlen(job->header));
+                }
+            }
+            plat_append_file(job->path, job->text, strlen(job->text));
+        } else {
+            plat_save_file(job->path, job->text, strlen(job->text));
+        }
+        if (plat_time_ns() - start > 50000000ULL) {
+            port_log("autorun: writing %s took %d ms", job->path, (int) ((plat_time_ns() - start) / 1000000ULL));
+        }
+        plat_free(job->text);
+        plat_free(job->header);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        sIoDone++;
+    }
+}
+
+/* Waits until the writer has written everything queued. */
+static void io_flush(void) {
+    while (sIoDone != sIoQueued) {
+        plat_sleep_ns(1000000);
+    }
+}
+
+/* Hands a file write to the writer thread (text is copied). */
+static void io_queue(const char *name, const char *text, const char *header, s32 append) {
+    IoJob *job;
+    char *copy, *headerCopy = NULL;
+    u32 length = strlen(text);
+    if (sIoWake == NULL) {
+        sIoWake = plat_sem_create(0);
+        // Below every game thread, on the game's core, which is idle most of each frame.
+        plat_thread_create(io_thread, NULL, 2, PLAT_THREAD_GAME, "autorun files");
+    }
+    while (sIoQueued - sIoDone >= IO_JOBS) {
+        plat_sleep_ns(1000000);
+    }
+    copy = plat_malloc(length + 1);
+    if (copy == NULL) {
         return;
     }
-    if (old != NULL) {
-        bcopy(old, buffer, size);
-        plat_free(old);
-    } else {
-        size = 0;
+    bcopy(text, copy, length + 1);
+    if (header != NULL) {
+        headerCopy = plat_malloc(strlen(header) + 1);
+        if (headerCopy != NULL) {
+            bcopy(header, headerCopy, strlen(header) + 1);
+        }
     }
-    bcopy(text, buffer + size, length);
-    plat_save_file(path, buffer, size + length);
-    plat_free(buffer);
+    job = &sIoJobs[sIoQueued % IO_JOBS];
+    make_path(job->path, sizeof(job->path), name);
+    job->text = copy;
+    job->header = headerCopy;
+    job->append = append;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    sIoQueued++;
+    plat_sem_post(sIoWake);
+}
+
+/* Appends text to a file in the data directory, first writing header (if not NULL) when the file is new. */
+static void append_file(const char *name, const char *text, const char *header) {
+    io_queue(name, text, header, TRUE);
 }
 
 static void hash_text(const char *text) {
@@ -493,13 +565,11 @@ static void build_race_list(void) {
 /* running: the race under way (-1: none). recorded: its result is already in the results file. */
 static void save_state_recorded(s32 running, s32 recorded) {
     char text[176];
-    char path[256];
     plat_snprintf(text, sizeof(text),
                   "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nrecorded=%d\nfinished=%d\nproblems=%d\n",
                   (int) (sEnabled > 0), (unsigned int) sConfigHash, (int) sRun, (int) sNext, (int) running,
                   (int) recorded, (int) sFinished, (int) sProblems);
-    make_path(path, sizeof(path), state_file());
-    plat_save_file(path, text, strlen(text));
+    io_queue(state_file(), text, NULL, FALSE);
 }
 
 static void save_state(s32 running) {
@@ -542,7 +612,7 @@ static void record_problem(const char *what) {
     plat_snprintf(text, sizeof(text), "run %d race %d/%d: %s, %s, %s: %s\n", (int) sRun, (int) sNext + 1,
                   (int) sNumRaces, track_name(race->track), sCharacterNames[(s32) race->character],
                   sVehicleNames[(s32) race->vehicle], what);
-    append_file(PROBLEMS_FILE, text);
+    append_file(PROBLEMS_FILE, text, NULL);
     port_log("autorun: %s", text);
 }
 
@@ -575,30 +645,20 @@ static const char *graphics_setup(void) {
 
 /* Writes the results line of the race that just ended. stats may be NULL (the race never got going). */
 static void record_result(const char *outcome, s32 position, const ProfStats *stats) {
-    char path[256];
+    char header[512];
     char line[640];
-    unsigned int size;
-    void *existing;
     Race *race = &sRaces[sNext];
     ProfStats empty;
     u32 slow, i;
     s32 length;
 
-    make_path(path, sizeof(path), results_file());
-    existing = plat_load_file(path, &size);
-    if (existing == NULL) {
-        char header[512];
-        plat_snprintf(header, sizeof(header),
-                      "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
-                      "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
-                      "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
-                      "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
-                      "audio_gaps,audio_drops,sound,graphics\n",
-                      sModes[sMode].extraColumn ? "," : "",
-                      sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
-        append_file(results_file(), header);
-    }
-    plat_free(existing);
+    plat_snprintf(header, sizeof(header),
+                  "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
+                  "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
+                  "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
+                  "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
+                  "audio_gaps,audio_drops,sound,graphics\n",
+                  sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
         stats = &empty;
@@ -639,7 +699,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
                   plat_audio_setup(), graphics_setup());
-    append_file(results_file(), line);
+    append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (str_equal(outcome, "finished")) {
         sFinished++;
@@ -743,6 +803,7 @@ static void init(void) {
     sFpsSum = 0.0;
     sFpsCount = 0;
 
+    io_flush(); // A run that just ended may still be writing its state.
     make_path(path, sizeof(path), state_file());
     state = plat_load_file(path, &size);
     if (state != NULL && plat_getenv("DKR_AUTORUN_RESTART") == NULL) {
@@ -1323,6 +1384,7 @@ static void send_results(const char *why) {
     char title[128];
     static char summary[6144];
     s32 length;
+    io_flush(); // The summaries and the attached files read the results back.
     plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
                   sMode == MODE_BENCH    ? "GPU benchmark "
                   : sMode == MODE_SWITCH ? "switch bench "
