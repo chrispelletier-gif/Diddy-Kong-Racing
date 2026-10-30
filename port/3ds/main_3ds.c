@@ -234,7 +234,9 @@ int main(int argc, char **argv) {
     hidInit();
     mkdir("sdmc:/3ds", 0777);
     mkdir(plat_data_dir(), 0777);
-    data_reset_once();
+    if (PLAT_DEBUG_TOOLS) {
+        data_reset_once(); // Test builds only: a player build never wipes the data folder.
+    }
     plat_3ds_console_init();
     bugreport_watch_thread("main");
     // Offers to report the last run if it did not end normally. Must come before anything is logged.
