@@ -1,4 +1,7 @@
 #include "port_drawtag.h"
+#ifdef TARGET_PORT
+#include "plat/profile.h"
+#endif
 #include "tracks.h"
 
 #include "asset_loading.h"
@@ -396,6 +399,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
         } else
 #endif
+        port_draw_tag(gTrackDL++, PORT_DRAW_SKY);
         if (numViewports < 2) {
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
             if (gCurrentLevelHeader2->skyDome == -1) {
@@ -410,8 +414,10 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
         }
         gDPPipeSync(gTrackDL++);
+        port_draw_tag(gTrackDL++, PORT_DRAW_OTHER);
         initialise_player_viewport_vars(updateRate);
         weather_clip_planes(-1, -512);
+        port_draw_tag(gTrackDL++, PORT_DRAW_EFFECTS);
         // Show weather effects in single player.
         if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2
 #ifdef TARGET_PORT
@@ -422,11 +428,13 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         }
         lensflare_override(cam_get_active_camera());
         lensflare_render(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, cam_get_active_camera());
+        port_draw_tag(gTrackDL++, PORT_DRAW_HUD);
 #ifdef TARGET_PORT
         if (!port_portrait_active())
 #endif
         hud_render_player(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, get_racer_object_by_port(gSceneCurrentPlayerID),
                           updateRate);
+        port_draw_tag(gTrackDL++, PORT_DRAW_OTHER);
     }
     // Show TT Cam toggle for the fourth viewport when playing 3 player.
     if (numViewports == 3 && level_type() != RACETYPE_CHALLENGE_EGGS && level_type() != RACETYPE_CHALLENGE_BATTLE &&
@@ -1752,6 +1760,10 @@ void set_anti_aliasing(s32 setting) {
  * Render all objects inside visible segments then render the level's semitransparent geometry.
  * Afterwards, render particles.
  */
+#ifdef TARGET_PORT
+static s32 sPortSegmentsAllowed;
+#endif
+
 void render_level_geometry_and_objects(void) {
     s32 objCount;
     s32 numberOfSegments;
@@ -1772,6 +1784,9 @@ void render_level_geometry_and_objects(void) {
 
     sp160 = get_first_active_object(&objCount);
 
+#ifdef TARGET_PORT
+    sPortSegmentsAllowed = gCurrentLevelModel->numberOfSegments > 1 ? 0 : 1;
+#endif
     if (gCurrentLevelModel->numberOfSegments > 1) {
         numberOfSegments = 0;
         traverse_segments_bsp_tree(0, 0, gCurrentLevelModel->numberOfSegments - 1, segmentIds, &numberOfSegments);
@@ -1779,6 +1794,10 @@ void render_level_geometry_and_objects(void) {
         numberOfSegments = 1;
         segmentIds[0] = 0;
     }
+#ifdef TARGET_PORT
+    prof_scene_frame(gCurrentLevelModel->numberOfSegments, sPortSegmentsAllowed, gDrawLevelSegments ? numberOfSegments : 0,
+                     objCount - sp160);
+#endif
 
     for (i = 1; i <= gCurrentLevelModel->numberOfSegments; i++) {
         objectsVisible[i] = FALSE; // why not a bzero?
@@ -1819,10 +1838,12 @@ void render_level_geometry_and_objects(void) {
                 render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
                 continue;
             } else if (obj->shadow != NULL) {
+                port_draw_tag(gTrackDL++, PORT_DRAW_SHADOWS);
                 shadow_render(obj, obj->shadow);
             }
             render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
             if (obj->waterEffect != NULL && obj->header->flags & HEADER_FLAGS_WATER_EFFECT) {
+                port_draw_tag(gTrackDL++, PORT_DRAW_SHADOWS);
                 watereffect_render(obj, obj->waterEffect);
             }
         }
@@ -1842,10 +1863,12 @@ void render_level_geometry_and_objects(void) {
                 render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
                 continue;
             } else if (obj->shadow != NULL) {
+                port_draw_tag(gTrackDL++, PORT_DRAW_SHADOWS);
                 shadow_render(obj, obj->shadow);
             }
             render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
             if (obj->waterEffect != NULL && obj->header->flags & HEADER_FLAGS_WATER_EFFECT) {
+                port_draw_tag(gTrackDL++, PORT_DRAW_SHADOWS);
                 watereffect_render(obj, obj->waterEffect);
             }
         }
@@ -1858,6 +1881,7 @@ void render_level_geometry_and_objects(void) {
     }
 
     if (gWaveBlockCount != 0) {
+        port_draw_tag(gTrackDL++, PORT_DRAW_SEE_THROUGH);
         waves_render(&gTrackDL, &gTrackMtxPtr, get_current_viewport());
     }
 
@@ -1887,15 +1911,18 @@ void render_level_geometry_and_objects(void) {
                     render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
                     goto skip;
                 } else if (obj->shadow != NULL) {
+                    port_draw_tag(gTrackDL++, PORT_DRAW_SHADOWS);
                     shadow_render(obj, obj->shadow);
                 }
                 render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
                 if ((obj->waterEffect != 0) && (obj->header->flags & HEADER_FLAGS_WATER_EFFECT)) {
+                    port_draw_tag(gTrackDL++, PORT_DRAW_SHADOWS);
                     watereffect_render(obj, obj->waterEffect);
                 }
             }
         skip:
             if (obj->behaviorId == BHV_RACER) {
+                port_draw_tag(gTrackDL++, PORT_DRAW_EFFECTS);
                 render_racer_shield(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
                 render_racer_magnet(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
             }
@@ -1938,7 +1965,7 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         return; // The portrait camera shows the model alone.
     }
 #endif
-    port_draw_tag(gTrackDL++, PORT_DRAW_TRACK);
+    port_draw_tag(gTrackDL++, nonOpaque ? PORT_DRAW_SEE_THROUGH : PORT_DRAW_TRACK);
     //! @bug: batchInfo is uninitalized
     numberVertices = (batchInfo + 1)->verticesOffset - batchInfo->verticesOffset;
     segment = &gCurrentLevelModel->segments[segmentId];
@@ -2082,6 +2109,9 @@ void add_segment_to_order(s32 segmentIndex, s32 *segmentsOrderIndex, u8 *segment
         } else {
             temp = 1;
         }
+#ifdef TARGET_PORT
+        sPortSegmentsAllowed += temp & 1; // The profiler's scene counts: allowed by the visibility table.
+#endif
         if (temp & 1 && block_visible(&gCurrentLevelModel->segmentsBoundingBoxes[segmentIndex])) {
             segmentsOrder[(*segmentsOrderIndex)++] = segmentIndex;
         }

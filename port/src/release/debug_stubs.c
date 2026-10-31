@@ -47,3 +47,9 @@ s32 port_sweep_level_vertex(const void *vertices) {
     (void) vertices;
     return FALSE;
 }
+
+/* The profiler's draw kinds (port_drawtag.h): nothing is timed. */
+void port_draw_kind_game(int kind, int object) {
+    (void) kind;
+    (void) object;
+}

@@ -20,6 +20,7 @@
 #include "plat/profile.h"
 #include "plat/recorder.h"
 #include "gfx/gfx_split.h"
+#include "port_drawtag.h"
 
 #define USER_FILE "profiler.txt"
 
@@ -324,6 +325,264 @@ static int percent(u32 part, u32 whole) {
     return whole ? (int) (((unsigned long long) part * 100 + whole / 2) / whole) : 0;
 }
 
+/*
+ * The draw mix and the object mix (profile.h): the game thread's build time per kind and per object kind, the object
+ * logic's time, and the scene counts, as the game draws; taken with the renderer's once a second into the last
+ * second's (the monitor and the log lines) and the window's (a test run's race). The clock is only read on timed
+ * frames (sGameTimed): while the profiler is on, and on an Old 3DS, whose clock reads are system calls, one frame in 8.
+ */
+static s32 sGameTimed;
+static u32 sGameFrameCount;
+static unsigned long long sKindBuildNs[PROF_KINDS];
+static unsigned long long sKindStartNs, sOtherAtStartNs;
+static s32 sKindNow, sObjNow = PROF_OBJ_NONE;
+static unsigned long sGameTimedFrames;
+static ProfSceneCounts sScene;
+static ProfDrawMix sSecondMix, sWindowMix;
+static ProfSceneCounts sSecondScene, sWindowScene;
+static ProfObjMix sObjLive, sSecondObj, sWindowObj;
+
+static const char *const sKindNames[PORT_DRAW_KINDS] = {
+    "menus/other", "track", "racers", "objects", "sky", "see-through", "effects", "shadows", "HUD",
+};
+
+/* objects.h BHV_*, in order. */
+static const char *const sObjectNames[PROF_OBJ_PARTICLES] = {
+    "none", "racer", "scenery", "fish", "animator", "weapon", "smoke", "exit", "audio", "audio line",
+    "camera control", "setup point", "dino whale", "checkpoint", "door", "fog changer", "ainode", "weapon balloon",
+    "weapon 2", "audio line 2", "unk 14", "unk 15", "bomb explosion", "balloon pop", "unk 18", "unk 19",
+    "sky control", "audio reverb", "torch mist", "texture scroll", "modechange", "stopwatch man", "banana",
+    "light rgba", "unk 22", "unk 23", "buoy pirate ship", "weather", "bridge whale ramp", "ramp switch",
+    "sea monster", "bonus", "unk 2a", "lens flare", "lens flare switch", "collect egg", "egg creator",
+    "character flag", "unk 30", "animation", "animated object", "camera animation", "info point", "car animation",
+    "character select", "trigger", "vehicle animation", "zipper water", "timetrial ghost", "wave generator",
+    "wave power", "butterfly", "park warden", "unk 3f", "world key", "banana spawner", "treasure sucker", "log",
+    "lava spurt", "pos arrow", "hit tester", "midi fade", "hit tester 2", "effect box", "trophy cabinet", "bubbler",
+    "fly coin", "golden balloon", "laser bolt", "laser gun", "park warden 2", "animated object 2", "zipper ground",
+    "override pos", "wizpig ship", "animated object 3", "animated object 4", "taj telepoint", "silver coin", "boost",
+    "warden smoke", "unk 5b", "unk 5c", "zipper air", "unk 5e", "dynamic light object 2", "snowball", "snowball 2",
+    "teleport", "rocket signpost", "rocket signpost 2", "snowball 3", "snowball 4", "hit tester 3", "hit tester 4",
+    "range trigger", "unk 6a", "boss hazard trigger", "fireball octoweapon", "frog", "silver coin 2", "tt door",
+    "midi fade point", "door opener", "unk 72", "pig rocketeer", "fireball octoweapon 2", "level name",
+    "midi channel set", "wizpig ghosts", "unk 78", "unk 79", "unk 7a", "unk 7b", "unk 7c", "unk 7d", "unk 7e",
+    "unk 7f",
+};
+
+const char *prof_kind_name(int kind) {
+    return kind >= 0 && kind < PORT_DRAW_KINDS ? sKindNames[kind] : "?";
+}
+
+const char *prof_object_name(int bucket) {
+    return bucket == PROF_OBJ_PARTICLES ? "particles" : bucket >= 0 && bucket < PROF_OBJ_PARTICLES ? sObjectNames[bucket] : "?";
+}
+
+void port_draw_kind_game(int kind, int object) {
+    unsigned long long now;
+    if (object >= 0 && object < PROF_OBJ_BUCKETS) {
+        sObjLive.objs[object].drawn++;
+        sScene.objectsDrawn++;
+    }
+    if (sKindStartNs == 0) {
+        return; // Not a timed frame
+    }
+    now = plat_time_ns();
+    sKindBuildNs[sKindNow] += now - sKindStartNs;
+    if (sObjNow < PROF_OBJ_BUCKETS) {
+        sObjLive.objs[sObjNow].buildNs += now - sKindStartNs;
+    }
+    sKindStartNs = now;
+    sKindNow = kind & (PROF_KINDS - 1);
+    sObjNow = object >= 0 && object < PROF_OBJ_BUCKETS ? object : PROF_OBJ_NONE;
+}
+
+unsigned long long prof_object_logic_begin(void) {
+    return sGameTimed ? plat_time_ns() : 0;
+}
+
+void prof_object_logic_end(int bucket, unsigned long long start) {
+    ProfObjStats *o = &sObjLive.objs[bucket < PROF_OBJ_BUCKETS ? bucket : 0];
+    o->updates++;
+    if (start != 0) {
+        o->logicNs += plat_time_ns() - start;
+    }
+}
+
+void prof_kind_build_take(ProfDrawMix *out) {
+    s32 k;
+    for (k = 0; k < PROF_KINDS; k++) {
+        out->kinds[k].buildNs += sKindBuildNs[k];
+        sKindBuildNs[k] = 0;
+    }
+    out->gameTimedFrames += sGameTimedFrames;
+    sGameTimedFrames = 0;
+}
+
+void prof_scene_frame(int segments, int segmentsAllowed, int segmentsDrawn, int objects) {
+    sScene.frames++;
+    sScene.segments += segments;
+    sScene.segmentsAllowed += segmentsAllowed;
+    sScene.segmentsDrawn += segmentsDrawn;
+    sScene.objects += objects;
+}
+
+void prof_scene_take(ProfSceneCounts *out) {
+    *out = sScene;
+    bzero(&sScene, sizeof(sScene));
+}
+
+static void add_objects(ProfObjMix *to, const ProfObjMix *from) {
+    s32 k;
+    for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+        ProfObjStats *t = &to->objs[k];
+        const ProfObjStats *f = &from->objs[k];
+        t->updates += f->updates;
+        t->drawn += f->drawn;
+        t->tris += f->tris;
+        t->logicNs += f->logicNs;
+        t->buildNs += f->buildNs;
+        t->renderNs += f->renderNs;
+    }
+    to->frames += from->frames;
+    to->timedFrames += from->timedFrames;
+    to->renderTimedFrames += from->renderTimedFrames;
+}
+
+static void add_mix(ProfDrawMix *to, const ProfDrawMix *from) {
+    s32 k;
+    for (k = 0; k < PROF_KINDS; k++) {
+        ProfKindStats *t = &to->kinds[k];
+        const ProfKindStats *f = &from->kinds[k];
+        t->draws += f->draws;
+        t->tris += f->tris;
+        t->verts += f->verts;
+        t->renderNs += f->renderNs;
+        t->buildNs += f->buildNs;
+        t->audited += f->audited;
+        t->offscreen += f->offscreen;
+        t->backface += f->backface;
+        t->tiny += f->tiny;
+        t->areaPx += f->areaPx;
+    }
+    to->frames += from->frames;
+    to->timedFrames += from->timedFrames;
+    to->auditedFrames += from->auditedFrames;
+    to->gameTimedFrames += from->gameTimedFrames;
+}
+
+static void add_scene(ProfSceneCounts *to, const ProfSceneCounts *from) {
+    to->frames += from->frames;
+    to->segments += from->segments;
+    to->segmentsAllowed += from->segmentsAllowed;
+    to->segmentsDrawn += from->segmentsDrawn;
+    to->objects += from->objects;
+    to->objectsDrawn += from->objectsDrawn;
+}
+
+/* Once a second (show_overlay): the renderer's and the game's draw mix into the last second's and the window's. */
+static void take_draw_mix(void) {
+    bzero(&sSecondMix, sizeof(sSecondMix));
+    gfx_draw_mix_take(&sSecondMix);
+    prof_kind_build_take(&sSecondMix);
+    prof_scene_take(&sSecondScene);
+    add_mix(&sWindowMix, &sSecondMix);
+    add_scene(&sWindowScene, &sSecondScene);
+    sSecondObj = sObjLive;
+    bzero(&sObjLive, sizeof(sObjLive));
+    sSecondObj.frames = sSecondMix.frames;
+    sSecondObj.timedFrames = sSecondMix.gameTimedFrames;
+    sSecondObj.renderTimedFrames = sSecondMix.timedFrames;
+    gfx_object_mix_take(&sSecondObj);
+    add_objects(&sWindowObj, &sSecondObj);
+}
+
+const ProfObjMix *prof_object_mix_last_second(void) {
+    return &sSecondObj;
+}
+
+const ProfObjMix *prof_object_mix_window(void) {
+    return &sWindowObj;
+}
+
+void prof_draw_mix_last_second(ProfDrawMix *mix, ProfSceneCounts *scene) {
+    *mix = sSecondMix;
+    *scene = sSecondScene;
+}
+
+void prof_draw_mix_window(ProfDrawMix *mix, ProfSceneCounts *scene, int restart) {
+    if (mix != NULL) {
+        *mix = sWindowMix;
+        *scene = sWindowScene;
+    }
+    if (restart) {
+        bzero(&sWindowMix, sizeof(sWindowMix));
+        bzero(&sWindowScene, sizeof(sWindowScene));
+        bzero(&sWindowObj, sizeof(sWindowObj));
+    }
+}
+
+/* Per kind a frame: triangles/draws, renderer/game thread ms, of the audited triangles the share wasted (off screen /
+ * facing away / tiny) and the overdraw (screen area drawn over the screen's: x1.00 covers it once); then the scene
+ * counts. Short, to fit a log line. */
+void prof_format_draw_mix(const ProfDrawMix *m, const ProfSceneCounts *scene, char *out, int size) {
+    double frames = m->frames ? (double) m->frames : 1.0, timed = m->timedFrames ? (double) m->timedFrames : 1.0;
+    double gameTimed = m->gameTimedFrames ? (double) m->gameTimedFrames : 1.0;
+    double audited = m->auditedFrames ? (double) m->auditedFrames : 1.0;
+    s32 k, at = 0;
+    out[0] = '\0';
+    for (k = 0; k < PORT_DRAW_KINDS && at < size; k++) {
+        const ProfKindStats *s = &m->kinds[k];
+        double a = s->audited ? (double) s->audited : 1.0;
+        if (s->draws == 0) {
+            continue;
+        }
+        at += plat_snprintf(out + at, size - at, "%s%s %.0f/%.0f %.2f/%.2f %.0f/%.0f/%.0f%% x%.2f", at ? "; " : "",
+                            sKindNames[k], s->tris / frames, s->draws / frames, s->renderNs / 1e6 / timed,
+                            s->buildNs / 1e6 / gameTimed, s->offscreen * 100.0 / a, s->backface * 100.0 / a,
+                            s->tiny * 100.0 / a, s->areaPx / audited / (400.0 * 240.0));
+    }
+    if (scene->frames > 0 && at < size) {
+        plat_snprintf(out + at, size - at,
+                      "; segments %.1f of %.1f (visibility table %.1f), objects %.1f of %.1f",
+                      (double) scene->segmentsDrawn / scene->frames, (double) scene->segments / scene->frames,
+                      (double) scene->segmentsAllowed / scene->frames, (double) scene->objectsDrawn / scene->frames,
+                      (double) scene->objects / scene->frames);
+    }
+}
+
+/* The costliest object kinds, a frame each: updated/drawn/triangles, logic/build/renderer ms. Short, for a log line. */
+void prof_format_object_mix(const ProfObjMix *m, int top, char *out, int size) {
+    double frames = m->frames ? (double) m->frames : 1.0, timed = m->timedFrames ? (double) m->timedFrames : 1.0;
+    double renderTimed = m->renderTimedFrames ? (double) m->renderTimedFrames : 1.0;
+    double cost[PROF_OBJ_BUCKETS];
+    u8 picked[PROF_OBJ_BUCKETS];
+    s32 k, n, at = 0;
+    out[0] = '\0';
+    for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+        const ProfObjStats *o = &m->objs[k];
+        cost[k] = o->logicNs / timed + o->buildNs / timed + o->renderNs / renderTimed;
+        cost[k] += o->tris * 1e-3 / frames; // Orders the untimed by triangles
+        picked[k] = o->updates == 0 && o->drawn == 0 && o->tris == 0;
+    }
+    for (n = 0; n < top && at < size; n++) {
+        s32 best = -1;
+        for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+            if (!picked[k] && (best < 0 || cost[k] > cost[best])) {
+                best = k;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        picked[best] = TRUE;
+        {
+            const ProfObjStats *o = &m->objs[best];
+            at += plat_snprintf(out + at, size - at, "%s%s %.0f/%.0f/%.0f %.2f/%.2f/%.2f", at ? "; " : "",
+                                prof_object_name(best), o->updates / frames, o->drawn / frames, o->tris / frames,
+                                o->logicNs / 1e6 / timed, o->buildNs / 1e6 / timed, o->renderNs / 1e6 / renderTimed);
+        }
+    }
+}
+
 static void show_overlay(void) {
     ProfStats s;
     char text[512];
@@ -331,6 +590,7 @@ static void show_overlay(void) {
     double fps;
 
     prof_window_read(PROF_WINDOW_OVERLAY, &s);
+    take_draw_mix();
     fps = s.elapsedNs ? s.gameFrames * 1e9 / s.elapsedNs : 0.0;
     for (slow = 0, i = 4; i < PROF_RATE_BUCKETS; i++) {
         slow += s.rateFrames[i];
@@ -415,17 +675,11 @@ static void show_overlay(void) {
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
             }
             if (frames > 0) {
-                // What the draws are for (the game's tags, port_drawtag.h): where crowded moments cost the renderer.
-                static const char *const sKinds[4] = { "other", "track", "racers", "objects" };
-                unsigned long mix[4][3];
-                char line[256];
-                int k, at = 0;
-                gfx_draw_mix_take(mix);
-                for (k = 0; k < 4; k++) {
-                    at += plat_snprintf(line + at, sizeof(line) - at, "%s%s %lu draws %lu tris %lu verts", k ? ", " : "",
-                                        sKinds[k], mix[k][0] / frames, mix[k][1] / frames, mix[k][2] / frames);
-                }
-                port_log("draw mix a frame: %s", line);
+                char line[1024];
+                prof_format_draw_mix(&sSecondMix, &sSecondScene, line, sizeof(line));
+                port_log("draw mix a frame (tris/draws rdp/build ms, waste off/back/tiny, overdraw): %s", line);
+                prof_format_object_mix(&sSecondObj, 10, line, sizeof(line));
+                port_log("objects a frame (updated/drawn/tris logic/build/rdp ms): %s", line);
                 if (gfx_split_active()) {
                     unsigned long long walkWait, busy;
                     unsigned int backendFrames, wakes;
@@ -531,10 +785,26 @@ void prof_game_mark(int mark, int updateRate) {
     switch (mark) {
         case PROF_MARK_LOOP_START:
             sLogicNs = 0;
+            sKindNow = PORT_DRAW_OTHER;
+            sObjNow = PROF_OBJ_NONE;
+            sGameFrameCount++;
+            sGameTimed = prof_enabled() && (!plat_old_3ds() || sGameFrameCount % 8 == 0);
+            sGameTimedFrames += sGameTimed;
+            sKindStartNs = sGameTimed ? now : 0;
+            sOtherAtStartNs = sKindBuildNs[PORT_DRAW_OTHER];
             break;
         case PROF_MARK_BUILT: {
             unsigned long long build = now - sMarkNs[PROF_MARK_LOOP_START];
             sBuildUs = (u32) (build / 1000);
+            if (sKindStartNs != 0) {
+                // The last kind ends here; the logic ran under "menus/other" and is shown apart.
+                unsigned long long other;
+                port_draw_kind_game(PORT_DRAW_OTHER, -1);
+                other = sKindBuildNs[PORT_DRAW_OTHER];
+                other -= other >= sOtherAtStartNs ? sOtherAtStartNs : 0; // (A take may have emptied it since.)
+                sKindBuildNs[PORT_DRAW_OTHER] -= other > sLogicNs ? sLogicNs : other;
+                sKindStartNs = 0;
+            }
             prof_add(PROF_LOGIC, sLogicNs);
             prof_add(PROF_SCENE, build > sLogicNs ? build - sLogicNs : 0);
             for (w = 0; w < PROF_WINDOW_COUNT; w++) {
