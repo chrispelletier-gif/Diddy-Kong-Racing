@@ -11,6 +11,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <math.h>
+#include <malloc.h>
 #include <stdlib.h>
 #include <time.h>
 #include <errno.h>
@@ -451,4 +452,13 @@ void plat_fatal(const char *fmt, ...) {
     va_end(args);
     fputc('\n', stderr);
     abort();
+}
+
+void plat_log_memory(const char *when) {
+#if defined(__GLIBC__)
+    struct mallinfo2 info = mallinfo2();
+    plat_log("memory %s: heap in use %lu KB", when, (unsigned long) (info.uordblks / 1024));
+#else
+    (void) when;
+#endif
 }

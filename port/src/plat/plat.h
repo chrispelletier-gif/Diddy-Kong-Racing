@@ -170,6 +170,8 @@ void plat_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noret
 void plat_log_keep(void) __attribute__((cold));
 /* Also writes log lines to this file until called with NULL, which closes it (3DS only). */
 void plat_log_copy_to(const char *path) __attribute__((cold));
+/* Logs free memory (3DS: GPU-readable and heap) or memory in use (PC), so a leak shows from load to load. */
+void plat_log_memory(const char *when) __attribute__((cold));
 
 /*
  * 3DS only: closing the application. The game's threads keep running until the process ends, so the renderer stops

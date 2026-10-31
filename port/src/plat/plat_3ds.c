@@ -872,6 +872,14 @@ void plat_log_copy_to(const char *path) {
     }
 }
 
+void plat_log_memory(const char *when) {
+    struct mallinfo info = mallinfo();
+    plat_log("memory %s: gpu free %lu KB, heap free %lu KB (in use %lu KB), texture failures %u", when,
+             (unsigned long) (linearSpaceFree() / 1024),
+             (unsigned long) ((info.fordblks + (__ctru_heap_size - info.arena)) / 1024),
+             (unsigned long) (info.uordblks / 1024), gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]);
+}
+
 void plat_log(const char *fmt, ...) {
     char buffer[512];
     va_list args;
