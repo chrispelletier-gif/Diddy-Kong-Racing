@@ -1945,9 +1945,11 @@ void plat_save_file_later(const char *path, void *data, unsigned int size);
 #define HISTORY_PIXELS (HISTORY_W * HISTORY_H)
 #define HISTORY_FRAMES 180
 #define HISTORY_PICKS 3
-static u16 *sHistory; // sHistorySlots pictures, RGB565, in the screen's own orientation (rows top to bottom)
+// sHistorySlots pictures, RGB565, as the screen buffers hold them (each screen column bottom to top, left to right),
+// so that sampling writes them in order; turned upright when saved (history_save).
+static u16 *sHistory;
 static int sHistoryFrame[HISTORY_FRAMES], sHistorySlots, sHistoryNext, sHistoryOn = -1, sHistoryTest;
-static unsigned long long sHistoryNs;
+static unsigned long long sHistoryNs, sHistoryInvalidateNs;
 static int sHistorySampled;
 static struct {
     const u8 *buffer;
@@ -2006,31 +2008,40 @@ static void history_sample(void) {
         return; // In VRAM it is too slow to read from the CPU (not used for the top screen).
     }
     frame = history_buffer_frame(src, 0);
-    if (frame == NULL || *frame < 0) {
-        return; // Nothing drawn into it yet.
+    if (frame == NULL || *frame < 0 || sFrameCount - 1 - *frame > 6) {
+        // Nothing drawn into it yet, or not for a long time: a buffer back in use after frames went to others (our
+        // three and libctru's two take turns as the third buffer comes and goes), whose picture isn't a recent one.
+        return;
     }
     start = plat_time_ns();
-    GSPGPU_InvalidateDataCache(src, rows * TOP_HEIGHT * bpp);
+    // A system call, not a request to the GSP service (which costs a round trip to another process).
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) src, rows * TOP_HEIGHT * bpp);
+    sHistoryInvalidateNs += plat_time_ns() - start;
     out = sHistory + sHistoryNext * HISTORY_PIXELS;
-    // Each buffer row is a screen column, bottom to top.
+    // Each buffer row is a screen column, bottom to top; the next one sampled is fetched ahead while this one is read.
     for (x = 0; x < HISTORY_W; x++) {
-        const u8 *column = src + x * step * TOP_HEIGHT * bpp;
-        u16 *o = out + (HISTORY_H - 1) * HISTORY_W + x;
+        const u8 *column = src + x * step * TOP_HEIGHT * bpp, *next = column + step * TOP_HEIGHT * bpp;
+        u16 *o = out + x * HISTORY_H;
+        if (x + 1 < HISTORY_W) {
+            for (y = 0; y < TOP_HEIGHT * bpp; y += 32) {
+                __builtin_prefetch(next + y);
+            }
+        }
         if (bpp == 3) {
-            for (y = 0; y < HISTORY_H; y++, column += 6, o -= HISTORY_W) {
-                *o = ((column[2] >> 3) << 11) | ((column[1] >> 2) << 5) | (column[0] >> 3); // BGR8
+            for (y = 0; y < HISTORY_H; y++, column += 6) {
+                *o++ = ((column[2] >> 3) << 11) | ((column[1] >> 2) << 5) | (column[0] >> 3); // BGR8
             }
         } else {
-            for (y = 0; y < HISTORY_H; y++, column += 4, o -= HISTORY_W) {
-                *o = column[0] | (column[1] << 8);
+            for (y = 0; y < HISTORY_H; y++, column += 4) {
+                *o++ = column[0] | (column[1] << 8);
             }
         }
     }
     if (sHistoryTest && *frame >= 1200 && sHistoryTest == 1) {
         sHistoryTest = 2;
-        for (y = HISTORY_H / 3; y < HISTORY_H / 2; y++) {
-            for (x = HISTORY_W / 3; x < HISTORY_W / 2; x++) {
-                out[y * HISTORY_W + x] = 0xFFFF;
+        for (x = HISTORY_W / 3; x < HISTORY_W / 2; x++) {
+            for (y = HISTORY_H / 2; y < HISTORY_H * 2 / 3; y++) {
+                out[x * HISTORY_H + y] = 0xFFFF;
             }
         }
         plat_log("frame history test: white box in frame %d", *frame);
@@ -2042,7 +2053,9 @@ static void history_sample(void) {
     sHistoryNext = (sHistoryNext + 1) % sHistorySlots;
     sHistoryNs += plat_time_ns() - start;
     if (++sHistorySampled == 600) {
-        plat_log("frame history: %llu us a frame", sHistoryNs / 1000 / 600);
+        plat_log("frame history: %llu us a frame (%llu of it cache invalidate)", sHistoryNs / 1000 / 600,
+                 sHistoryInvalidateNs / 1000 / 600);
+        sHistoryInvalidateNs = 0;
         sHistorySampled = 0;
         sHistoryNs = 0;
     }
@@ -2176,8 +2189,15 @@ static void history_save(int snapshotFrame) {
             int j, at[3] = { pick[k] - gapOf[pick[k]], pick[k], pick[k] + gapOf[pick[k]] };
             for (j = 0; j < 3; j++) {
                 u32 frameNumber = (u32) sHistoryFrame[order[at[j]]];
+                const u16 *picture = sHistory + order[at[j]] * HISTORY_PIXELS;
+                u16 *upright = (u16 *) (p + 4);
+                int x, y;
                 memcpy(p, &frameNumber, 4);
-                memcpy(p + 4, sHistory + order[at[j]] * HISTORY_PIXELS, HISTORY_PIXELS * 2);
+                for (x = 0; x < HISTORY_W; x++) {
+                    for (y = 0; y < HISTORY_H; y++) {
+                        upright[(HISTORY_H - 1 - y) * HISTORY_W + x] = picture[x * HISTORY_H + y];
+                    }
+                }
                 p += 4 + HISTORY_PIXELS * 2;
             }
         }

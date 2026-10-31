@@ -5,7 +5,8 @@
  * of making them, and a second renderer thread on the other core (plat.h PLAT_THREAD_RCP2) makes them in the same
  * order: the walk of frame N+1 runs while the backend builds frame N. An Old 3DS, whose one core held the whole
  * renderer and the game (bench #258: renderer 31 ms a frame), has the system core for the other half. On by default
- * there since switch bench #263 (Jungle Falls 21.0 to 29.0 fps, Crescent Island 20.0 to 29.1); off elsewhere.
+ * there since switch bench #263 (Jungle Falls 21.0 to 29.0 fps, Crescent Island 20.0 to 29.1), and on a New 3DS since
+ * switch bench #286 (renderer 7.4-8.4 to 3.7-4.3 ms; Haunted Woods' 1% low 30 to 58 fps).
  *
  * The queue is a byte ring of records, each a backend call with its arguments copied (the walk reuses its batch
  * buffers as soon as a call returns). One thread writes it (the walk's, sHead) and one reads it (sTail). The walk is
@@ -253,7 +254,7 @@ void gfx_split_drain(void) {
 }
 
 int gfx_split_frame_start(int direct) {
-    int want = !direct && plat_switch("DKR_SPLIT_RENDER", plat_old_3ds()) != 0;
+    int want = !direct && plat_switch("DKR_SPLIT_RENDER", 1) != 0;
     if (want && !sActive) {
         // The other core's share comes first: without it the second thread can't be made there.
         plat_split_render_cores(TRUE);
