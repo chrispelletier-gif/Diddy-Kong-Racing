@@ -1,3 +1,4 @@
+#include "port_drawtag.h"
 #include "objects.h"
 #include "memory.h"
 
@@ -3702,11 +3703,16 @@ void render_object(Gfx **dList, Mtx **mtx, Vertex **verts, Object *obj) {
     if (port_portrait_hides(obj)) {
         return;
     }
+    // The N64 logo of the intro (the port is not an N64; the Rareware logo stays).
+    if (obj->objectID == ASSET_OBJECT_ID_N64LOGO) {
+        return;
+    }
 #endif
     update_object_stack_trace(OBJECT_DRAW, obj->objectID);
     gObjectCurrDisplayList = *dList;
     gObjectCurrMatrix = *mtx;
     gObjectCurrVertexList = *verts;
+    port_draw_tag(gObjectCurrDisplayList++, obj->behaviorId == BHV_RACER ? PORT_DRAW_RACERS : PORT_DRAW_OBJECTS);
     scale = obj->trans.scale;
     render_object_parts(obj);
     obj->trans.scale = scale;

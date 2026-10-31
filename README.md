@@ -49,10 +49,11 @@ portraits yourself: six 40x40 PNG files in `sdmc:/3ds/dkr/portraits/` named `tri
 | L | Use item (N64 Z) |
 | R or ZR | Hop / drift |
 | ZL | Look behind |
-| X / Y | C-Up / C-Left |
-| C-Stick (New 3DS) | C buttons |
+| X | Camera view (N64 C-Up) |
+| Y | Nothing (N64 C-Left, unused by the game) |
+| C-Stick (New 3DS) | Up: camera view, down: track arrows, right: HUD toggle |
 | D-Pad | D-Pad |
-| SELECT | N64 L |
+| SELECT | Nothing (N64 L, unused by the game) |
 | START | Pause |
 
 Buttons can be remapped, and the circle pad's deadzone, sensitivity and response curve changed, in **Settings >

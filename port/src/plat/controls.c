@@ -51,11 +51,11 @@ static const Action sActions[] = {
     { CTRL_N64_B, "B", "Brake" },
     { CTRL_N64_Z, "Z", "Use item" },
     { CTRL_N64_R, "R", "Hop, drift" },
-    { CTRL_N64_L, "L", "N64 L" },
-    { CTRL_N64_CU, "CU", "C-Up" },
-    { CTRL_N64_CD, "CD", "C-Down" },
-    { CTRL_N64_CL, "CL", "C-Left" },
-    { CTRL_N64_CR, "CR", "C-Right" },
+    { CTRL_N64_L, "L", "No effect" },
+    { CTRL_N64_CU, "CU", "Camera view" },
+    { CTRL_N64_CD, "CD", "Track arrows" },
+    { CTRL_N64_CL, "CL", "No effect" },
+    { CTRL_N64_CR, "CR", "HUD toggle" },
     { CTRL_N64_START, "START", "Start" },
     { CTRL_N64_LOOK_BACK, "LOOK", "Look back" },
     { 0, "NONE", "Nothing" },
@@ -139,6 +139,14 @@ static int action_index(unsigned short n64) {
         }
     }
     return ACTION_COUNT - 1;
+}
+
+/*
+ * The game never reads the N64's L or C-Left, so they are not offered when remapping (an old controls.txt that has
+ * them still loads, and shows them as "No effect").
+ */
+static int action_offered(int a) {
+    return sActions[a].n64 != CTRL_N64_L && sActions[a].n64 != CTRL_N64_CL;
 }
 
 /* The layout the current mapping matches, or -1 for a custom one. */
@@ -453,7 +461,14 @@ void controls_option_change(int index, int step) {
     index = option_at(index);
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
         unsigned short *slot = &sSettings.map[index - OPT_KEY_FIRST];
-        *slot = sActions[wrap_step(action_index(*slot), step, 0, ACTION_COUNT - 1, 1)].n64;
+        int a = action_index(*slot), tries;
+        for (tries = 0; tries < ACTION_COUNT; tries++) {
+            a = wrap_step(a, step, 0, ACTION_COUNT - 1, 1);
+            if (action_offered(a)) {
+                break;
+            }
+        }
+        *slot = sActions[a].n64;
     } else {
         switch (index) {
             case OPT_LAYOUT:

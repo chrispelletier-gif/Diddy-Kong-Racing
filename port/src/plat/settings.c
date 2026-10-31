@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "plat.h"
+#include "recorder.h"
 #include "settings.h"
 
 #define MAX_SETTINGS 64
@@ -147,15 +148,37 @@ void settings_set(const char *key, int value) {
         }
         setting = &sSettings[sCount++];
         snprintf(setting->key, sizeof(setting->key), "%s", key);
+        rec_event("setting %s = %d (new)", key, value);
     } else if (setting->value == value) {
         unlock(); // Nothing to write.
         return;
+    } else {
+        rec_event("setting %s = %d (was %d)", key, value, setting->value);
     }
     setting->value = value;
     if (sDeferred) {
         sDeferredDirty = 1;
     } else {
         write_file();
+    }
+    unlock();
+}
+
+void settings_describe(char *out, int size) {
+    int i, length = 0;
+    if (size <= 0) {
+        return;
+    }
+    out[0] = '\0';
+    lock();
+    if (sCount < 0) {
+        unlock();
+        settings_get("", 0); // Loads the file.
+        lock();
+    }
+    for (i = 0; i < sCount && length < size - 1; i++) {
+        length += snprintf(out + length, size - length, "%s%s=%d", i > 0 ? ", " : "", sSettings[i].key,
+                           sSettings[i].value);
     }
     unlock();
 }

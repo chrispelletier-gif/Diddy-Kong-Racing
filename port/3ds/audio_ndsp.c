@@ -270,6 +270,11 @@ int sound_option_in_race(int i) {
 
 /* The mixing core, rate and buffer rows are the CPU mixer's: with the DSP voices they say so and do nothing. */
 static int cpu_mixer_only(int i) {
+    // On an Old 3DS the mixing core moves the DSP voices' own CPU work too (the audio manager and the event thread,
+    // see plat_init), so it is a choice there either way.
+    if (i == SOUND_CORE && plat_old_3ds()) {
+        return 0;
+    }
     return (i == SOUND_CORE || i == SOUND_RATE || i == SOUND_BUFFER) && settings_get("sound_dsp", 1);
 }
 
@@ -339,7 +344,7 @@ const char *plat_audio_setup(void) {
     int systemCore = plat_3ds_audio_on_system_core();
     load_settings();
     if (pv_active()) {
-        snprintf(sText, sizeof(sText), "%s/%s", pv_describe(), sSmooth ? "smooth" : "linear");
+        snprintf(sText, sizeof(sText), "%s/%s%s", pv_describe(), sSmooth ? "smooth" : "linear", systemCore ? "/sys" : "");
         return sText;
     }
     snprintf(sText, sizeof(sText), "%s/%uk/%s%s", systemCore ? "sys" : "rdp", (unsigned) (sFrequency / 1000),

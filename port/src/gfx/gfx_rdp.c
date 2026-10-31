@@ -13,6 +13,8 @@
 #include "plat/plat.h"
 #include "plat/profile.h"
 #include "gfx_backend.h"
+#include "gfx_split.h"
+#include "port_drawtag.h"
 
 #define MAX_VERTICES 64
 #define MAX_BATCH_TRIANGLES GFX_MAX_BATCH_TRIANGLES
@@ -23,10 +25,21 @@
 
 typedef struct RspVertex {
     float x, y, z, w; // Clip space, already including the viewport transform (see gfx_backend.h)
-    u8 r, g, b, a;
-    u8 fog;
-    u8 fogValid; // The fog factor is only worked out while G_FOG is set (see load_vertices)
-    u8 flat;     // Loaded with an orthographic matrix: drawn flat on the screen (1, or GFX_FLAT_PLACED for a sprite)
+    union {
+        struct {
+            u8 r, g, b, a;
+        };
+        u32 rgba; // The four together, as GfxVertex holds them: copied as one word (draw_dkr_triangles)
+    };
+    union {
+        struct {
+            u8 fog;
+            u8 fogValid; // The fog factor is only worked out while G_FOG is set (see load_vertices)
+            u8 flat;     // Loaded with an orthographic matrix: drawn flat on the screen (1, or GFX_FLAT_PLACED for a sprite)
+            u8 unused;
+        };
+        u32 fogFlat; // The same as one word, written at once by load_vertices (fog in the low byte)
+    };
 } RspVertex;
 
 typedef struct Tile {
@@ -57,6 +70,7 @@ static struct {
     RspVertex verts[MAX_VERTICES];
     s32 vertexIndex;
     s32 vertsWithoutFog; // Some vertices were loaded with G_FOG off, so they have no fog factor yet
+    u64 flatVerts;       // Bit i: verts[i] may be flat (DKR_WALK_LEAN; a load with no flat vertices clears its bits)
     u32 geometryMode;
     float vpScale[3], vpTrans[3];
     s16 fogMul, fogOffset;
@@ -76,6 +90,7 @@ static struct {
         const u8 *addr;
     } timg;
     TmemLoad tmem[512 / 8 + 1]; // Indexed by TMEM address in units of 8 words (64 bytes)
+    u64 tmemValid;              // Bit i: tmem[i].valid, so that a load can forget the ones it covers at once
     const u8 *tlutAddr;
     u32 tlutCount;
     s32 tlutFirst; // The TLUT entry tlutAddr is (TMEM word - 256).
@@ -86,6 +101,15 @@ static struct {
 } g;
 
 static s32 sTraceFrame = -1;
+static s32 sTracing; // This frame is the traced one (DKR_TRACE_FRAME, or a snapshot): one flag for the walk to test
+
+/* Code the walk rarely or never runs (logging, tracing, diagnostics) is kept out of its hot functions, so that
+ * what runs every frame stays within the Old 3DS's 16 KB instruction cache (roadmap O9), and the per-draw functions
+ * are HOT: laid out together on the 3DS (plat.h PLAT_HOT). */
+#define COLD PLAT_COLD
+#define NOINLINE PLAT_NOINLINE
+#define HOT PLAT_HOT
+#define UNLIKELY(x) __builtin_expect((x) != 0, 0)
 
 /*
  * Differential testing (DKR_DIFF_EVERY=n, 3DS build): every nth frame is also drawn by the software reference renderer
@@ -108,7 +132,7 @@ static s32 sRefActive;
 static s32 sRefInitialised;
 #define REF_CALL(call)                                                                                                 \
     do {                                                                                                               \
-        if (sRefActive) {                                                                                              \
+        if (UNLIKELY(sRefActive)) {                                                                                    \
             call;                                                                                                      \
         }                                                                                                              \
     } while (0)
@@ -121,7 +145,7 @@ static s32 sRefInitialised;
 #define REF_ACTIVE() 0
 #endif
 #define TRACE(...)                        \
-    if (sFrameCount == sTraceFrame) {     \
+    if (UNLIKELY(sTracing)) {             \
         plat_log(__VA_ARGS__);            \
     }
 
@@ -147,7 +171,7 @@ static u32 sBatchGeneration;
 /*
  * The draw state of the last triangle command. Between two triangle commands DKR usually only loads vertices or
  * matrices, so the next one can reuse it instead of building it (and looking up its textures) again. Any command that
- * can change the draw state clears sTriStateValid (see state_command).
+ * can change the draw state clears sTriStateValid (see sOpInfo).
  */
 static GfxDrawState sTriState;
 static s32 sTriStateValid;
@@ -159,6 +183,13 @@ static s32 sFrameCount;
  * one. Each span between two reads also holds about one read's own cost, which is taken back out of its part (and,
  * through PROF_PART_WALK_TIMER, out of the renderer's time). Draws and texture decodes are timed elsewhere, so their
  * parts here only keep them out of the others.
+ *
+ * On the 3DS a clock read is a system call (svcGetSystemTick), and the walk makes 1,400-1,900 of them in a race frame
+ * (one per command that changes the part, two per texture lookup, draw state and draw): on an Old 3DS they are about
+ * 2 ms of a frame as calibrated, and each one also evicts the renderer's code and data from the 16 KB caches, which
+ * the calibration does not see. DKR_WALK_PARTS=0 (the Old 3DS's default) leaves the breakdown off: the walk then
+ * reads nothing, and the renderer's time (PROF_RDP, one read at each end of the display list) still counts. The
+ * reads sit out of line and cold, so the hot loop carries one load and branch per command.
  */
 enum WalkPart {
     WALK_COMMANDS,
@@ -175,17 +206,19 @@ enum WalkPart {
 };
 #define WALK_REPORTED WALK_DRAWS // Parts before this one are reported, in the order of the PROF_PART_WALK ones
 
-static s32 sWalkTimed;
+static s32 sWalkParts; // DKR_WALK_PARTS: time the walk's parts while the profiler is on (read_switches)
+static s32 sWalkTimed; // This display list's parts are being timed (walk_begin)
 static u32 sWalkPart;
 static unsigned long long sWalkLast;
 static unsigned long long sWalkTicks[WALK_PART_COUNT];
 static u32 sWalkSpans[WALK_PART_COUNT];
 static unsigned long long sWalkReadCost; // Ticks one clock read takes, in 1/256ths
 
-/* Switches the walk's timing to this part. Returns the part it was in, to switch back to. */
-static inline u32 walk_switch(u32 part) {
+/* The timed walk's switch to this part (walk_switch): the clock read and bookkeeping, out of line and cold, as only
+ * the profiler takes them. Callers test for a change of part first, so that runs of commands in one part cost no call. */
+static COLD u32 walk_switch_timed(u32 part) {
     u32 old = sWalkPart;
-    if (sWalkTimed && part != old) {
+    if (part != old) {
         unsigned long long now = plat_ticks();
         sWalkTicks[old] += now - sWalkLast;
         sWalkSpans[old]++;
@@ -195,9 +228,17 @@ static inline u32 walk_switch(u32 part) {
     return old;
 }
 
+/* Switches the walk's timing to this part. Returns the part it was in, to switch back to (nothing while untimed). */
+static inline u32 walk_switch(u32 part) {
+    if (!sWalkTimed) {
+        return 0;
+    }
+    return part != sWalkPart ? walk_switch_timed(part) : part;
+}
+
 static void walk_begin(void) {
     s32 i;
-    sWalkTimed = prof_enabled();
+    sWalkTimed = sWalkParts && prof_enabled();
     if (!sWalkTimed) {
         return;
     }
@@ -261,6 +302,7 @@ typedef struct TexCacheEntry {
     u16 width, height;
     u8 fmt, siz, lineSwapped, used;
     u8 wrapS, wrapT, tlutType;
+    u8 gen; // Moves on when the entry is freed, so that the lookup memo notices (tex_memo_check)
     u32 lastFrame;
     GfxTexture tex;
     GfxTexture otherFilter; // The same texture with the other filter, sharing its GPU copy (when hasOtherFilter)
@@ -274,7 +316,8 @@ static s32 sPrewarming;       // Decoding textures the game has just loaded, out
 static u32 sRecentEvictions;  // Entries replaced although drawn in the last 60 frames (should stay 0)
 
 /* A cheap hash of the texture data, used to notice when memory has been reused for something else. */
-static u32 sample_hash(const u8 *data, u32 size) {
+/* Out of line: a texture is hashed once in DKR_TEX_REHASH frames, so the lookups' code doesn't carry the loop. */
+static NOINLINE u32 sample_hash(const u8 *data, u32 size) {
     u32 h = 2166136261u ^ size;
     u32 step = (size > 256) ? size / 64 : 1;
     u32 i;
@@ -318,7 +361,9 @@ static inline u32 tile_row_bytes(const Tile *tile) {
     return tile->line * ((tile->siz == G_IM_SIZ_32b) ? 16 : 8);
 }
 
-static void decode_texture(u32 *out, const TmemLoad *load, const Tile *tile, u32 width, u32 height, const u8 *tlut) {
+/* Out of line (see decode_into_cache). */
+__attribute__((noinline)) static void decode_texture(u32 *out, const TmemLoad *load, const Tile *tile, u32 width,
+                                                     u32 height, const u8 *tlut) {
     u32 x, y;
     u32 rowBytes = tile_row_bytes(tile);
     u8 swapMask = (tile->siz == G_IM_SIZ_32b) ? 8 : 4;
@@ -424,15 +469,21 @@ static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
                                other == sBatchState.textures[0] || other == sBatchState.textures[1]);
 }
 
+static void tex_memo_forget(void);
+
 /* Frees a cache entry's textures. */
 static void free_entry(TexCacheEntry *e) {
     if (e->hasOtherFilter) {
-        gfxb_texture_free(&e->otherFilter);
+        gfx_split_texture_free(&e->otherFilter);
         e->hasOtherFilter = FALSE;
     }
-    gfxb_texture_free(&e->tex);
+    gfx_split_texture_free(&e->tex);
     plat_free((void *) e->tex.pixels);
     e->used = FALSE;
+    e->gen++;
+    if (e->gen == 0) {
+        tex_memo_forget(); // The 8-bit generation wrapped: a memo entry from 256 frees ago must not match it again
+    }
     sTexCacheAddr[e - sTexCache] = NULL;
 }
 
@@ -442,23 +493,32 @@ static void free_entry(TexCacheEntry *e) {
  * filter is a second texture object sharing the decoded pixels and GPU copy, so it costs no decode or upload; it
  * can't be the same object, since changing the filter in place would also change it for triangles already batched.
  */
-static GfxTexture *texture_with_filter(TexCacheEntry *e, u8 filter) {
+__attribute__((noinline)) static GfxTexture *share_other_filter(TexCacheEntry *e, u8 filter) {
+    e->otherFilter = e->tex;
+    e->otherFilter.filter = filter;
+    e->otherFilter.backendData = NULL;
+    gfx_split_texture_share(&e->otherFilter, &e->tex);
+    e->hasOtherFilter = TRUE;
+    return &e->otherFilter;
+}
+
+static inline GfxTexture *texture_with_filter(TexCacheEntry *e, u8 filter) {
     if (e->tex.filter == filter) {
         return &e->tex;
     }
     if (!e->hasOtherFilter) {
-        e->otherFilter = e->tex;
-        e->otherFilter.filter = filter;
-        e->otherFilter.backendData = NULL;
-        gfxb_texture_share(&e->otherFilter, &e->tex);
-        e->hasOtherFilter = TRUE;
+        return share_other_filter(e, filter); // Once a texture: kept out of the lookups' code
     }
     return &e->otherFilter;
 }
 
 /*
  * sample_hash() for this frame. The same texture is often loaded many times in a frame, and RDRAM doesn't change
- * while a display list runs, so its hash is only worked out the first time.
+ * while a display list runs, so its hash is only worked out the first time. With DKR_TEX_REHASH=n (Old 3DS work,
+ * roadmap O8) a texture's hash is kept for n frames: its samples are cache misses all over memory, which an Old 3DS,
+ * without a second level cache, pays dearly for (texture lookups were ~3.5 ms of its frame, #223). Textures the game
+ * frees are dropped from the cache anyway (prewarm_textures); a texture rewritten in place would show up to n - 1
+ * frames late. Palettes are always hashed every frame.
  */
 typedef struct HashCacheEntry {
     const u8 *data;
@@ -469,9 +529,12 @@ typedef struct HashCacheEntry {
 
 static HashCacheEntry sHashCache[HASH_CACHE_SIZE];
 
-static u32 frame_hash(const u8 *data, u32 size) {
+static s32 sTexRehash = 1; // DKR_TEX_REHASH: frames a texture's hash is kept
+
+/* Out of line: one copy, not one for the texture and one for the palette in each caller. */
+static NOINLINE HOT u32 frame_hash(const u8 *data, u32 size, u32 keepFrames) {
     HashCacheEntry *h = &sHashCache[(((uintptr_t) data >> 3) ^ size) % HASH_CACHE_SIZE];
-    if (h->frame != (u32) sFrameCount || h->data != data || h->size != size) {
+    if ((u32) sFrameCount - h->frame >= keepFrames || h->data != data || h->size != size) {
         h->data = data;
         h->size = size;
         h->frame = (u32) sFrameCount;
@@ -484,17 +547,237 @@ static inline u32 cycle_type(void) {
     return g.omH & (3 << G_MDSFT_CYCLETYPE);
 }
 
-/* Returns the texture for the given tile, decoding it if it isn't in the cache. */
-static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
+/* The filter the other mode draws textures with. Copy mode never filters. */
+static inline u8 tex_filter(void) {
+    return ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT || cycle_type() == G_CYC_COPY) ? GFX_FILTER_POINT
+                                                                                            : GFX_FILTER_BILINEAR;
+}
+
+/*
+ * The palette a tile's texture is decoded with: NULL unless it is colour indexed, and its bytes that can change the
+ * texture (for the hash). Returns FALSE when a colour indexed tile has no palette loaded.
+ */
+static inline s32 tile_palette(const Tile *tile, const u8 **tlut, u32 *hashBytes) {
+    *tlut = NULL;
+    *hashBytes = 0;
+    if (tile->fmt == G_IM_FMT_CI) {
+        // The palette's first entry: CI4 tiles pick one of 16 palettes of 16, CI8 uses all 256 entries. The TLUT
+        // load put entries from g.tlutFirst on, g.tlutCount of them.
+        s32 first = (tile->siz == G_IM_SIZ_4b ? tile->palette * 16 : 0) - g.tlutFirst;
+        s32 entries = tile->siz == G_IM_SIZ_4b ? 16 : 256;
+        if (g.tlutAddr == NULL || first < 0 || first >= (s32) g.tlutCount) {
+            return FALSE;
+        }
+        if (entries > (s32) g.tlutCount - first) {
+            // CI8 with a short palette (DKR loads 64 entries): only those can change the texture.
+            entries = (s32) g.tlutCount - first;
+        }
+        *tlut = g.tlutAddr + first * 2;
+        *hashBytes = entries * 2;
+    }
+    return TRUE;
+}
+
+/*
+ * A memo of texture lookups (DKR_TEX_MEMO, Old 3DS work, roadmap O8): a draw's texture is nearly always the one the
+ * same tile and TMEM state resolved to a moment ago, so the answer is remembered under everything find_texture goes
+ * by apart from the texture bytes and the cache itself. An answer confirmed earlier in this frame is returned as it
+ * is (a texture's hash doesn't change within a frame, and a freed entry shows in its generation); one from an earlier
+ * frame is confirmed the way find_texture would, by the entry's hash against frame_hash (cheap: the hash cache mostly
+ * still holds it). Anything else goes through find_texture, which refreshes the memo. The lookups were 3.3-4.1 ms of
+ * an Old 3DS frame (#223), mostly find_texture's 7 KB of code and the cache entries it probes missing the caches; a
+ * memo hit runs a few dozen instructions over a set of two 32 byte memo entries and the cache entry's first line.
+ * Two way: a Jungle Falls race frame looks up ~130 textures under ~77 keys, of which a direct mapped memo of 256
+ * entries lost ~17 a frame to collisions, the two way one ~4 (PC, 900 frames).
+ */
+#define TEX_MEMO_SETS 256
+#define TEX_MEMO_WAYS 2
+
+typedef struct TexMemoEntry {
+    // The key: the TMEM load, the palette as tile_palette derives it, the tile (of its coordinates only the size
+    // matters to the lookup, so a texture that scrolls keeps its key) and the other mode's texture bits.
+    const u8 *addr;
+    const u8 *tlut;
+    u32 load;  // size | rowStride << 16 (tex_memo_key skips loads that don't fit)
+    u32 dims;  // lrs - uls | (lrt - ult) << 16
+    u32 tileA; // line | tmem << 9 | the palette bytes hashed << 18
+    u32 tileB; // fmt, siz, palette, cms, cmt, masks, maskt, lineSwapped and the other mode's bits (tex_memo_key)
+    // The answer.
+    u32 frame; // The frame it was last confirmed in
+    u32 entry; // The cache entry's index | its gen << 11 | the texture's height as bounded by the load << 19
+} __attribute__((aligned(32))) TexMemoEntry;
+
+static TexMemoEntry sTexMemo[TEX_MEMO_SETS * TEX_MEMO_WAYS];
+static s32 sTexMemoOn; // DKR_TEX_MEMO
+
+/* Empties the memo (a zeroed entry has no load address, which no key has). */
+static COLD void tex_memo_forget(void) {
+    u32 *w = (u32 *) sTexMemo, n = sizeof(sTexMemo) / (sizeof(u32));
+    while (n--) {
+        *w++ = 0;
+    }
+}
+
+/* The other mode bits the lookup goes by, as tex_memo_key packs them: filter, TLUT type and cycle type (copy mode). */
+static inline u32 tex_memo_mode_bits(void) {
+    return ((g.omH >> G_MDSFT_TEXTFILT) & 0xF) | ((g.omH >> (G_MDSFT_CYCLETYPE - 4)) & 0x30);
+}
+
+/* Builds the key for a tile, or returns FALSE when it isn't memoed: the tile's TMEM slot isn't a load's own (then
+ * find_texture searches the others), the load is too big for the key, or it is colour indexed without a palette. */
+static inline s32 tex_memo_key(TexMemoEntry *k, const Tile *tile) {
+    const TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63];
+    u32 tlutHashBytes;
+    if (!load->valid || (load->size | load->rowStride) > 0xFFFF || !tile_palette(tile, &k->tlut, &tlutHashBytes)) {
+        return FALSE;
+    }
+    k->addr = load->addr;
+    k->load = load->size | (load->rowStride << 16);
+    k->dims = ((tile->lrs - tile->uls) & 0xFFFF) | ((u32) (tile->lrt - tile->ult) << 16);
+    k->tileA = tile->line | (tile->tmem << 9) | (tlutHashBytes << 18);
+    k->tileB = tile->fmt | (tile->siz << 3) | (tile->palette << 5) | (tile->cms << 9) | (tile->cmt << 11) |
+               (tile->masks << 13) | (tile->maskt << 17) | ((u32) load->lineSwapped << 21) |
+               (tex_memo_mode_bits() << 22);
+    return TRUE;
+}
+
+/* The set a key lives in: TEX_MEMO_WAYS entries. */
+static inline TexMemoEntry *tex_memo_set(const TexMemoEntry *k) {
+    u32 h = (u32) (uintptr_t) k->addr ^ (u32) (uintptr_t) k->tlut ^ k->load ^ k->dims ^ k->tileA ^ k->tileB;
+    return &sTexMemo[((h * 2654435761u) >> 24) * TEX_MEMO_WAYS];
+}
+
+static inline s32 tex_memo_same_key(const TexMemoEntry *m, const TexMemoEntry *k) {
+    return m->addr == k->addr && m->tlut == k->tlut && m->load == k->load && m->dims == k->dims &&
+           m->tileA == k->tileA && m->tileB == k->tileB;
+}
+
+/* Confirms a memo entry from an earlier frame: the cache entry still holds the texture, with the hash the bytes have
+ * now. The frame_hash calls keep this out of the hit path's code. */
+static NOINLINE HOT GfxTexture *tex_memo_confirm(TexMemoEntry *m, const TexMemoEntry *k, TexCacheEntry *e) {
+    u32 rowStride = k->load >> 16, height = m->entry >> 19;
+    u32 size = rowStride ? rowStride * height : (k->load & 0xFFFF);
+    u32 hash = frame_hash(k->addr, size, (u32) sTexRehash);
+    if (k->tlut != NULL) {
+        hash ^= frame_hash(k->tlut, k->tileA >> 18, 1) * 31;
+    }
+    if (!e->used || e->addr != k->addr || e->hash != hash) {
+        return NULL;
+    }
+    e->lastFrame = sFrameCount;
+    m->frame = (u32) sFrameCount;
+    return texture_with_filter(e, tex_filter());
+}
+
+/* The texture a memo entry (whose key matched) remembers, or NULL when it needs the full lookup again. */
+static inline GfxTexture *tex_memo_check(TexMemoEntry *m, const TexMemoEntry *k) {
+    TexCacheEntry *e = &sTexCache[m->entry & (TEX_CACHE_SIZE - 1)];
+    if (e->gen != ((m->entry >> 11) & 0xFF) || e->addr != k->addr) {
+        return NULL; // Freed since (and perhaps reused)
+    }
+    if (m->frame != (u32) sFrameCount) {
+        return tex_memo_confirm(m, k, e);
+    }
+    return texture_with_filter(e, tex_filter());
+}
+
+/* The entry of a set that holds the key, or else the one for find_texture's answer: the one confirmed longest ago. */
+static inline TexMemoEntry *tex_memo_find(TexMemoEntry *set, const TexMemoEntry *k, s32 *found) {
+    TexMemoEntry *m, *oldest = set;
+    for (m = set; m < set + TEX_MEMO_WAYS; m++) {
+        if (tex_memo_same_key(m, k)) {
+            *found = TRUE;
+            return m;
+        }
+        if (m->frame < oldest->frame) {
+            oldest = m;
+        }
+    }
+    *found = FALSE;
+    return oldest;
+}
+
+/* find_texture's answer, for the memo (when the lookup is memoed). */
+static inline void tex_memo_note(TexMemoEntry *k, const TexCacheEntry *e, u32 height) {
+    if (k != NULL) {
+        k->frame = (u32) sFrameCount;
+        k->entry = (u32) (e - sTexCache) | ((u32) e->gen << 11) | (height << 19);
+    }
+}
+
+/*
+ * Decodes a tile's texture into a cache entry (freeing what it held) and uploads it, or returns NULL when there is no
+ * memory for it. Out of line, and with the backend's upload inlined into it rather than into find_texture: a lookup
+ * that misses the memo but hits the cache then only fetches find_texture's own code (roadmap O8).
+ */
+__attribute__((noinline)) static TexCacheEntry *decode_into_cache(TexCacheEntry *e, const TmemLoad *load,
+                                                                  const Tile *tile, u32 width, u32 height,
+                                                                  const u8 *tlut, u32 hash) {
+    u8 tlutType = (tlut != NULL) ? (g.omH >> G_MDSFT_TEXTLUT) & 3 : 0;
+    u8 wrapS = wrap_mode(tile->cms, tile->masks);
+    u8 wrapT = wrap_mode(tile->cmt, tile->maskt);
+    u32 *pixels;
+    unsigned long long texStart;
+
+    walk_switch(WALK_DECODE); // Timed as PROF_TEXTURE instead
+    texStart = plat_time_ns();
+    if (e->used) {
+        if (sFrameCount - (s32) e->lastFrame < 60) {
+            sRecentEvictions++;
+        }
+        free_entry(e);
+    }
+    pixels = plat_malloc(width * height * 4);
+    if (pixels == NULL) {
+        gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
+        e->used = FALSE;
+        prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+        walk_switch(WALK_TEXTURES);
+        return NULL;
+    }
+    decode_texture(pixels, load, tile, width, height, tlut);
+    e->used = TRUE;
+    e->addr = load->addr;
+    sTexCacheAddr[e - sTexCache] = load->addr;
+    e->tlut = tlut;
+    e->hash = hash;
+    e->width = width;
+    e->height = height;
+    e->fmt = tile->fmt;
+    e->siz = tile->siz;
+    e->lineSwapped = load->lineSwapped;
+    e->wrapS = wrapS;
+    e->wrapT = wrapT;
+    e->tlutType = tlutType;
+    e->lastFrame = sFrameCount;
+    e->tex.width = width;
+    e->tex.height = height;
+    e->tex.pixels = (const unsigned int *) pixels;
+    e->tex.format = texture_format(tile, tlutType);
+    e->tex.filter = tex_filter();
+    e->tex.wrapS = wrapS;
+    e->tex.wrapT = wrapT;
+    e->tex.backendData = NULL;
+    gfx_split_texture_upload(&e->tex);
+    prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+    walk_switch(WALK_TEXTURES);
+    if (!sPrewarming) {
+        // Only the decodes that interrupt a frame: these are the hitches.
+        prof_count(PROF_TEXTURE_UPLOADS, 1);
+    }
+    return e;
+}
+
+/* Returns the texture for the given tile, decoding it if it isn't in the cache. memo, when not NULL, takes what it
+ * resolved to. Out of line, so that lookup_texture's memo path doesn't carry its code. */
+__attribute__((noinline)) static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned, TexMemoEntry *memo) {
     Tile *tile = &g.tiles[tileIndex & 7];
     TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63], shifted;
     u32 width, height, size, hash, i, slot, oldest;
-    const u8 *tlut = NULL;
-    u32 tlutHashBytes = 0;
+    const u8 *tlut;
+    u32 tlutHashBytes;
     u8 filter, wrapS, wrapT, tlutType;
     TexCacheEntry *e;
-    u32 *pixels;
-    unsigned long long texStart;
 
     if (!load->valid) {
         // Loaded at an unaligned TMEM address, or inside a bigger load. Search for the load covering it, and start
@@ -543,29 +826,15 @@ static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
             height = rows;
         }
     }
-    if (tile->fmt == G_IM_FMT_CI) {
-        // The palette's first entry: CI4 tiles pick one of 16 palettes of 16, CI8 uses all 256 entries. The TLUT
-        // load put entries from g.tlutFirst on, g.tlutCount of them.
-        s32 first = (tile->siz == G_IM_SIZ_4b ? tile->palette * 16 : 0) - g.tlutFirst;
-        s32 entries = tile->siz == G_IM_SIZ_4b ? 16 : 256;
-        if (g.tlutAddr == NULL || first < 0 || first >= (s32) g.tlutCount) {
-            return NULL;
-        }
-        if (entries > (s32) g.tlutCount - first) {
-            // CI8 with a short palette (DKR loads 64 entries): only those can change the texture.
-            entries = (s32) g.tlutCount - first;
-        }
-        tlut = g.tlutAddr + first * 2;
-        tlutHashBytes = entries * 2;
+    if (!tile_palette(tile, &tlut, &tlutHashBytes)) {
+        return NULL;
     }
     size = load->rowStride ? load->rowStride * height : load->size;
-    hash = frame_hash(load->addr, size);
+    hash = frame_hash(load->addr, size, (u32) sTexRehash);
     if (tlut != NULL) {
-        hash ^= frame_hash(tlut, tlutHashBytes) * 31;
+        hash ^= frame_hash(tlut, tlutHashBytes, 1) * 31;
     }
-    // Copy mode never filters.
-    filter = ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT || cycle_type() == G_CYC_COPY) ? GFX_FILTER_POINT
-                                                                                            : GFX_FILTER_BILINEAR;
+    filter = tex_filter();
     tlutType = (tlut != NULL) ? (g.omH >> G_MDSFT_TEXTLUT) & 3 : 0;
     wrapS = wrap_mode(tile->cms, tile->masks);
     wrapT = wrap_mode(tile->cmt, tile->maskt);
@@ -580,6 +849,7 @@ static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
             e->siz == tile->siz && e->tlut == tlut && e->hash == hash && e->lineSwapped == load->lineSwapped &&
             e->wrapS == wrapS && e->wrapT == wrapT && e->tlutType == tlutType) {
             e->lastFrame = sFrameCount;
+            tex_memo_note(memo, e, height);
             return texture_with_filter(e, filter);
         }
         if (!e->used) {
@@ -594,60 +864,34 @@ static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
         return NULL; // Can't happen: at most three of the eight entries are in use.
     }
 
-    walk_switch(WALK_DECODE); // Timed as PROF_TEXTURE instead
-    texStart = plat_time_ns();
-    e = &sTexCache[oldest];
-    if (e->used) {
-        if (sFrameCount - (s32) e->lastFrame < 60) {
-            sRecentEvictions++;
-        }
-        free_entry(e);
-    }
-    pixels = plat_malloc(width * height * 4);
-    if (pixels == NULL) {
-        gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
-        e->used = FALSE;
-        prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
-        walk_switch(WALK_TEXTURES);
+    e = decode_into_cache(&sTexCache[oldest], load, tile, width, height, tlut, hash);
+    if (e == NULL) {
         return NULL;
     }
-    decode_texture(pixels, load, tile, width, height, tlut);
-    e->used = TRUE;
-    e->addr = load->addr;
-    sTexCacheAddr[e - sTexCache] = load->addr;
-    e->tlut = tlut;
-    e->hash = hash;
-    e->width = width;
-    e->height = height;
-    e->fmt = tile->fmt;
-    e->siz = tile->siz;
-    e->lineSwapped = load->lineSwapped;
-    e->wrapS = wrapS;
-    e->wrapT = wrapT;
-    e->tlutType = tlutType;
-    e->lastFrame = sFrameCount;
-    e->tex.width = width;
-    e->tex.height = height;
-    e->tex.pixels = (const unsigned int *) pixels;
-    e->tex.format = texture_format(tile, tlutType);
-    e->tex.filter = filter;
-    e->tex.wrapS = wrapS;
-    e->tex.wrapT = wrapT;
-    e->tex.backendData = NULL;
-    gfxb_texture_upload(&e->tex);
-    prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
-    walk_switch(WALK_TEXTURES);
-    if (!sPrewarming) {
-        // Only the decodes that interrupt a frame: these are the hitches.
-        prof_count(PROF_TEXTURE_UPLOADS, 1);
-    }
+    tex_memo_note(memo, e, height);
     return &e->tex;
 }
 
-/* The texture the tile shows: from the cache, or decoded into it. */
-static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
+/* The texture the tile shows: from the memo, the cache, or decoded into it. Out of line: one copy of the memo's code
+ * instead of one per call in make_draw_state. The memo sits out prewarm_textures, whose lookups are one-offs against
+ * a scratch tile and TMEM state. */
+static NOINLINE HOT GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     u32 part = walk_switch(WALK_TEXTURES);
-    GfxTexture *tex = find_texture(tileIndex, pinned);
+    TexMemoEntry key, *m = NULL;
+    GfxTexture *tex = NULL;
+    if (sTexMemoOn && !sPrewarming && tex_memo_key(&key, &g.tiles[tileIndex & 7])) {
+        s32 found;
+        m = tex_memo_find(tex_memo_set(&key), &key, &found);
+        if (found) {
+            tex = tex_memo_check(m, &key);
+        }
+    }
+    if (tex == NULL) {
+        tex = find_texture(tileIndex, pinned, m != NULL ? &key : NULL);
+        if (m != NULL && tex != NULL) {
+            *m = key;
+        }
+    }
     walk_switch(part);
     return tex;
 }
@@ -656,10 +900,13 @@ static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
  * Converts texture coordinates in 10.5 texels to normalised coordinates of the tile's texture. The per-draw part is
  * worked out once, so there are no divisions per vertex (slow on the 3DS's VFP), and the results are the same as
  * dividing each time: the shift and the 1/32 are powers of two, so one combined factor is exact, and so is the
- * reciprocal of a power of two texture size (other sizes still divide).
+ * reciprocal of a power of two texture size (other sizes still divide). For a power of two size the reciprocal is
+ * folded into the factor and the offset too, so a coordinate costs one multiply and one subtract: both products are
+ * exact (powers of two scale a float's bits without rounding, and no value gets near the subnormals), and the one
+ * rounding, the subtraction's, lands on the same bits whether the operands were scaled before it or the result after.
  */
 typedef struct TexAxis {
-    float scale, offset, size, invSize;
+    float scale, offset, size;
     s32 divide;
 } TexAxis;
 
@@ -670,23 +917,31 @@ static inline float texel_centre_shift(const GfxTexture *tex) {
     return (tex->filter == GFX_FILTER_BILINEAR) ? 0.5f : 0.0f;
 }
 
-static void tex_axis_init(TexAxis *a, u8 shift, u16 tileStart, u32 size, float centreShift) {
+static NOINLINE HOT void tex_axis_init(TexAxis *a, u8 shift, u16 tileStart, u32 size, float centreShift) {
     float scale = 1.0f / 32.0f;
+    float offset = tileStart * 0.25f - centreShift;
     if (shift > 10) {
         scale *= (float) (1 << (16 - shift));
     } else if (shift > 0) {
         scale /= (float) (1 << shift);
     }
-    a->scale = scale;
-    a->offset = tileStart * 0.25f - centreShift;
     a->size = (float) size;
     a->divide = (size & (size - 1)) != 0;
-    a->invSize = 1.0f / (float) size;
+    if (!a->divide) {
+        float invSize = 1.0f / (float) size;
+        scale *= invSize;
+        offset *= invSize;
+    }
+    a->scale = scale;
+    a->offset = offset;
 }
 
 static inline float tex_axis_coord(const TexAxis *a, s32 coord) {
     float c = coord * a->scale - a->offset;
-    return a->divide ? c / a->size : c * a->invSize;
+    if (UNLIKELY(a->divide)) {
+        c /= a->size;
+    }
+    return c;
 }
 
 /******************************** Combiner and blender ********************************/
@@ -711,10 +966,20 @@ static const u8 sCCAlphaABD[8] = { GFX_CC_COMBINED, GFX_CC_TEXEL0, GFX_CC_TEXEL1
 static const u8 sCCAlphaC[8] = { GFX_CC_LOD_FRACTION, GFX_CC_TEXEL0, GFX_CC_TEXEL1,            GFX_CC_PRIM,
                                  GFX_CC_SHADE,        GFX_CC_ENV,    GFX_CC_PRIM_LOD_FRACTION, GFX_CC_ZERO };
 
-static void decode_combiner(void) {
+/* Which texel a combiner input reads: bit 0 texel 0, bit 1 texel 1. */
+static const u8 sCCTexelUse[GFX_CC_INPUT_COUNT] = {
+    [GFX_CC_TEXEL0] = 1, [GFX_CC_TEXEL0_ALPHA] = 1, [GFX_CC_TEXEL1] = 2, [GFX_CC_TEXEL1_ALPHA] = 2,
+};
+
+static inline u8 equation_texel_use(const GfxCCEquation *eq) {
+    return sCCTexelUse[eq->a] | sCCTexelUse[eq->b] | sCCTexelUse[eq->c] | sCCTexelUse[eq->d];
+}
+
+/* Not HOT: it runs for a G_SETCOMBINE, a third as often as a draw. */
+static NOINLINE void decode_combiner(void) {
     u32 w0 = g.combineW0, w1 = g.combineW1;
     GfxCombiner *cc = &g.combiner;
-    s32 i;
+    u8 uses;
 
     cc->rgb[0].a = sCCRgbA[(w0 >> 20) & 0xF];
     cc->rgb[0].b = sCCRgbB[(w1 >> 28) & 0xF];
@@ -735,24 +1000,10 @@ static void decode_combiner(void) {
 
     // Which textures the combiner reads, so draws don't have to work it out each time.
     g.combinerTextures[0] = 0;
-    for (i = 0; i < 2; i++) {
-        const GfxCCEquation *eqs[2] = { &cc->rgb[i], &cc->alpha[i] };
-        u8 uses = 0;
-        s32 j;
-        for (j = 0; j < 2; j++) {
-            u8 in[4] = { eqs[j]->a, eqs[j]->b, eqs[j]->c, eqs[j]->d };
-            s32 k;
-            for (k = 0; k < 4; k++) {
-                if (in[k] == GFX_CC_TEXEL0 || in[k] == GFX_CC_TEXEL0_ALPHA) {
-                    uses |= 1;
-                }
-                if (in[k] == GFX_CC_TEXEL1 || in[k] == GFX_CC_TEXEL1_ALPHA) {
-                    uses |= 2;
-                }
-            }
-        }
-        g.combinerTextures[i + 1] = g.combinerTextures[i] | uses;
-    }
+    uses = equation_texel_use(&cc->rgb[0]) | equation_texel_use(&cc->alpha[0]);
+    g.combinerTextures[1] = uses;
+    uses |= equation_texel_use(&cc->rgb[1]) | equation_texel_use(&cc->alpha[1]);
+    g.combinerTextures[2] = uses;
 }
 
 /* The scissor's right edge for rectangles: exclusive, except in fill and copy modes, where the RDP also draws the
@@ -765,14 +1016,13 @@ static inline s32 scissor_right(u32 cyc) {
     return right;
 }
 
-/* Builds the draw state for the current RSP/RDP state. */
-static void make_draw_state(GfxDrawState *s, s32 isRect) {
+/* Builds the draw state for the current RSP/RDP state. Out of line: one copy, for triangles and rectangles. */
+static NOINLINE HOT void make_draw_state(GfxDrawState *s, s32 isRect) {
     u32 cyc = cycle_type();
     u32 omL = g.omL;
     u32 blendBits;
     u32 p, a, m, b;
     s32 usesTex0 = FALSE, usesTex1 = FALSE;
-    s32 i;
 
     s->combiner = g.combiner;
     s->combiner.numCycles = (cyc == G_CYC_2CYCLE) ? 2 : 1;
@@ -785,11 +1035,9 @@ static void make_draw_state(GfxDrawState *s, s32 isRect) {
         s->combiner.alpha[0] = s->combiner.rgb[0];
         s->combiner.numCycles = 1;
     }
-    for (i = 0; i < 4; i++) {
-        s->prim[i] = g.prim[i];
-        s->env[i] = g.env[i];
-        s->fog[i] = g.fogColor[i];
-    }
+    __builtin_memcpy(s->prim, g.prim, 4);
+    __builtin_memcpy(s->env, g.env, 4);
+    __builtin_memcpy(s->fog, g.fogColor, 4);
     s->fogMul = g.fogMul;
     s->fogOffset = g.fogOffset;
     s->primLodFrac = g.primLodFrac;
@@ -860,9 +1108,7 @@ static void make_draw_state(GfxDrawState *s, s32 isRect) {
         s->decal = (omL & ZMODE_DEC) == ZMODE_DEC;
         s->cullMode = 0;
     }
-    for (i = 0; i < 4; i++) {
-        s->scissor[i] = g.scissor[i];
-    }
+    __builtin_memcpy(s->scissor, g.scissor, sizeof(s->scissor));
     s->flat = isRect; // Triangles set it per triangle (draw_dkr_triangles).
     if (isRect) {
         s->scissor[2] = scissor_right(cyc);
@@ -884,8 +1130,19 @@ static void build_draw_state(GfxDrawState *s, s32 isRect) {
     walk_switch(part);
 }
 
-static s32 draw_states_equal(const GfxDrawState *a, const GfxDrawState *b) {
-    return __builtin_memcmp(a, b, sizeof(GfxDrawState)) == 0;
+/* Compared a word at a time in place: a library memcmp is a call into code that is otherwise never in the
+ * instruction cache, which is what a triangle command pays for here. The state's size is whole words. */
+static inline s32 draw_states_equal(const GfxDrawState *a, const GfxDrawState *b) {
+    const u32 *wa = (const u32 *) a, *wb = (const u32 *) b;
+    u32 i;
+    _Static_assert(sizeof(GfxDrawState) % 4 == 0 && _Alignof(GfxDrawState) >= 4, "draw states are compared as words");
+#pragma GCC unroll 1
+    for (i = 0; i < sizeof(GfxDrawState) / 4; i++) {
+        if (wa[i] != wb[i]) {
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 static void trace_state(const GfxDrawState *st, s32 count) {
@@ -900,34 +1157,52 @@ static void trace_state(const GfxDrawState *st, s32 count) {
           st->alphaRef, st->depthTest, st->depthWrite, st->fogEnabled, st->cullMode);
 }
 
-static void flush_model_batch(void);
-static void flush_mesh_batch(void);
+/* The traced frame's log of a batch about to be drawn. */
+static COLD void trace_batch(void) {
+    const GfxVertex *v = &sBatchVerts[0];
+    float minU = v->u0, maxU = v->u0, minV = v->v0, maxV = v->v0, minW = v->w, maxW = v->w;
+    s32 i;
+    for (i = 1; i < sBatchVertices; i++) {
+        const GfxVertex *o = &sBatchVerts[i];
+        minU = (o->u0 < minU) ? o->u0 : minU;
+        maxU = (o->u0 > maxU) ? o->u0 : maxU;
+        minV = (o->v0 < minV) ? o->v0 : minV;
+        maxV = (o->v0 > maxV) ? o->v0 : maxV;
+        minW = (o->w < minW) ? o->w : minW;
+        maxW = (o->w > maxW) ? o->w : maxW;
+    }
+    trace_state(&sBatchState, sBatchCount);
+    plat_log("    %d vertices, v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d", (int) sBatchVertices, v->x, v->y,
+             v->z, v->w, v->u0, v->v0, v->r, v->g, v->b, v->a);
+    plat_log("    u %.3f..%.3f v %.3f..%.3f w %.1f..%.1f", minU, maxU, minV, maxV, minW, maxW);
+}
+
+static COLD void flush_model_batch(void);
+static COLD void flush_mesh_batch(void);
+
+/* The draw mix (profiler "draw mix" line): what the draws are for, from the game's tags (port_drawtag.h), and per kind
+ * the draws, triangles and vertices since the profiler last took them. Plain counters: the walk's thread writes them. */
+static u8 sDrawKind;
+static unsigned long sDrawMix[4][3];
+
+void gfx_draw_mix_take(unsigned long out[4][3]) {
+    __builtin_memcpy(out, sDrawMix, sizeof(sDrawMix));
+    __builtin_memset(sDrawMix, 0, sizeof(sDrawMix));
+}
 
 /* Draws the batch of transformed triangles. */
-static void flush_cpu_batch(void) {
+static NOINLINE HOT void flush_cpu_batch(void) {
     if (sBatchCount > 0) {
-        if (sFrameCount == sTraceFrame) {
-            const GfxVertex *v = &sBatchVerts[0];
-            float minU = v->u0, maxU = v->u0, minV = v->v0, maxV = v->v0, minW = v->w, maxW = v->w;
-            s32 i;
-            for (i = 1; i < sBatchVertices; i++) {
-                const GfxVertex *o = &sBatchVerts[i];
-                minU = (o->u0 < minU) ? o->u0 : minU;
-                maxU = (o->u0 > maxU) ? o->u0 : maxU;
-                minV = (o->v0 < minV) ? o->v0 : minV;
-                maxV = (o->v0 > maxV) ? o->v0 : maxV;
-                minW = (o->w < minW) ? o->w : minW;
-                maxW = (o->w > maxW) ? o->w : maxW;
-            }
-            trace_state(&sBatchState, sBatchCount);
-            plat_log("    %d vertices, v0 %.3f %.3f %.3f %.3f uv %.3f %.3f rgba %d %d %d %d", (int) sBatchVertices, v->x,
-                     v->y, v->z, v->w, v->u0, v->v0, v->r, v->g, v->b, v->a);
-            plat_log("    u %.3f..%.3f v %.3f..%.3f w %.1f..%.1f", minU, maxU, minV, maxV, minW, maxW);
+        u32 part;
+        if (UNLIKELY(sTracing)) {
+            trace_batch();
         }
-        u32 part = walk_switch(WALK_DRAWS);
-        gfxb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
+        part = walk_switch(WALK_DRAWS);
+        gfx_split_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
+        sDrawMix[sDrawKind][0]++;
+        sDrawMix[sDrawKind][1] += sBatchCount;
         REF_CALL(refb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount));
         walk_switch(part);
         sBatchCount = 0;
@@ -937,9 +1212,13 @@ static void flush_cpu_batch(void) {
 }
 
 /* Draws whichever batch holds triangles. */
-static void flush_batch(void) {
-    flush_mesh_batch();
-    flush_model_batch();
+static inline void flush_batch(void) {
+    if (sMeshPartCount > 0) {
+        flush_mesh_batch();
+    }
+    if (sModelCount > 0) {
+        flush_model_batch();
+    }
     flush_cpu_batch();
 }
 
@@ -979,27 +1258,32 @@ static inline u16 batch_vertex(GfxVertex **out) {
 
 /******************************** RSP ********************************/
 
-static void load_matrix(const Mtx *mtx, s32 index) {
+/* Kept a loop (not unrolled into 8 copies) so that it takes a few cache lines: it runs between draws. */
+static NOINLINE HOT void load_matrix(const Mtx *mtx, s32 index) {
     const s32 *m = (const s32 *) mtx;
-    s32 i, j;
-    for (i = 0; i < 4; i++) {
-        for (j = 0; j < 4; j += 2) {
-            s32 intPart = m[i * 2 + j / 2];
-            s32 fracPart = m[8 + i * 2 + j / 2];
-            s32 a = (intPart & 0xFFFF0000) | ((fracPart >> 16) & 0xFFFF);
-            s32 b = ((intPart << 16) & 0xFFFF0000) | (fracPart & 0xFFFF);
-            g.matrices[index][i][j] = a * (1.0f / 65536.0f);
-            g.matrices[index][i][j + 1] = b * (1.0f / 65536.0f);
-        }
+    float *out = &g.matrices[index][0][0];
+    s32 k;
+#pragma GCC unroll 1
+    for (k = 0; k < 8; k++) {
+        s32 intPart = m[k];
+        s32 fracPart = m[8 + k];
+        s32 a = (intPart & 0xFFFF0000) | ((fracPart >> 16) & 0xFFFF);
+        s32 b = ((intPart << 16) & 0xFFFF0000) | (fracPart & 0xFFFF);
+        out[2 * k] = a * (1.0f / 65536.0f);
+        out[2 * k + 1] = b * (1.0f / 65536.0f);
     }
 }
 
-/* Fog, as the RSP computes it from the normalised depth. */
-static void vertex_fog(RspVertex *v) {
+/* Fog, as the RSP computes it from the normalised depth. fogMul and fogOffset are g's (exact as floats). */
+static inline u8 fog_factor(const RspVertex *v, float fogMul, float fogOffset) {
     float w = (v->w != 0.0f) ? v->w : 0.0001f;
     // Clamp before converting: out of range float to int conversions differ between CPUs.
-    float fog = (v->z / w) * g.fogMul + g.fogOffset;
-    v->fog = (fog < 0.0f) ? 0 : (fog > 255.0f) ? 255 : (u8) fog;
+    float fog = (v->z / w) * fogMul + fogOffset;
+    return (fog < 0.0f) ? 0 : (fog > 255.0f) ? 255 : (u8) fog;
+}
+
+static void vertex_fog(RspVertex *v) {
+    v->fog = fog_factor(v, g.fogMul, g.fogOffset);
 }
 
 #if defined(__arm__) && defined(__VFP_FP__) && !defined(__SOFTFP__)
@@ -1049,7 +1333,14 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 #endif
 
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
+static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
+static s32 sCpuCullSwitch; // DKR_CPU_CULL (see sCpuCull)
+/* Back faces culled here rather than by the GPU (DKR_CPU_CULL, on by default on an Old 3DS only), this frame: a
+ * command's double sided triangles no longer split its draw from the one sided ones (about one draw in eight), and
+ * back faces cost no vertices, indices or GPU time. Off for 3D (stereo) frames, whose eye offset the test leaves out,
+ * and for the host's clipping sweep, which looks at back faces. */
+static s32 sCpuCull;
 static s32 sSwitchEpoch = -1;
 
 /* Reads the renderer's experimental switches when they change (see plat_switch). */
@@ -1058,9 +1349,28 @@ static void read_switches(void) {
         return;
     }
     sSwitchEpoch = gPlatSwitchEpoch;
-    sVfpVectors = plat_switch("DKR_VFP_VECTORS", 0) != 0;
+    // On by default on an Old 3DS only: switch bench #238 there, 8% less renderer time per triangle (the New 3DS's
+    // #176 showed nothing). Bit-identical to the C loop.
+    sVfpVectors = plat_switch("DKR_VFP_VECTORS", plat_old_3ds()) != 0;
+    // 8 frames on an Old 3DS (switch bench #241, with the system-call flush the best of its switches together).
+    sTexRehash = plat_switch("DKR_TEX_REHASH", plat_old_3ds() ? 8 : 1);
+    if (sTexRehash < 1) {
+        sTexRehash = 1;
+    }
+    // Remembers what each tile's texture lookup resolved to (tex_memo_check). Stale entries are checked, so it can
+    // be switched either way between frames.
+    sTexMemoOn = plat_switch("DKR_TEX_MEMO", plat_old_3ds()) != 0;
+    // Old 3DS work (roadmap O9): the walk skips what it can show it doesn't need (draw_dkr_triangles): the per
+    // triangle flatness checks while no loaded vertex is flat, and zeroing the second texture's coordinates in draws
+    // that have none. The frames are the same either way.
+    sWalkLean = plat_switch("DKR_WALK_LEAN", plat_old_3ds()) != 0;
+    // The profiler's breakdown of the walk (see sWalkTimed): off on an Old 3DS, where its clock reads are system calls
+    // that cost the walk a few milliseconds a frame.
+    sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;
+    // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
+    sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -1068,78 +1378,112 @@ static void read_switches(void) {
 int gGfxSweep, gGfxSweepLevel;
 extern s32 port_sweep_level_vertex(const void *vertices);
 
-/* How billboard vertices are placed and sized next to their anchor, g.verts[0] (see load_vertices). */
-static void billboard_scales(u8 *flatOut, float *scaleX, float *scaleY, float *scaleZ) {
-    *flatOut = g.verts[0].flat ? GFX_FLAT_PLACED : 0;
-    *scaleX = *scaleY = *scaleZ = 1.0f;
-    if (g.billboard && !*flatOut) {
-        *scaleY = 1.0f / plat_fov_tan_scale();
-        *scaleX = *scaleY / plat_aspect_scale();
-        *scaleZ = plat_camera_near() / 10.0f;
+/* The vertex transform in C: the VFP's short vectors (transform_vertices_vfp) do the same on the 3DS. */
+static NOINLINE void transform_vertices(const Vertex *src, s32 count, RspVertex *dst, float (*m)[4]) {
+    s32 i;
+    for (i = 0; i < count; i++) {
+        float x = src[i].x, y = src[i].y, z = src[i].z;
+        dst[i].x = x * m[0][0] + y * m[1][0] + z * m[2][0] + m[3][0];
+        dst[i].y = x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1];
+        dst[i].z = x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2];
+        dst[i].w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
     }
 }
 
-/* Transforms the vertices into g.verts, with the matrix m and the fog and billboard settings they were loaded with. */
-static void load_vertices_now(const Vertex *src, s32 count, s32 dest, float (*m)[4], s32 fog, s32 billboard) {
+/* The host's sweep (gGfxSweep): a draw of the other kind of geometry starts a new batch. */
+static COLD void sweep_vertices(const Vertex *src) {
+    int level = port_sweep_level_vertex(src) != 0;
+    if (level != gGfxSweepLevel) {
+        flush_batch();
+        gGfxSweepLevel = level;
+    }
+}
+
+/*
+ * Places the billboard (sprite) vertices just loaded (count of them, from RSP vertex dest) next to their anchor,
+ * g.verts[0], and returns their flatness. Their coordinates are offsets from the anchor in clip space, sized for
+ * the N64's camera; on the port's wider (G3) or narrower (the widescreen style's field of view) camera they are scaled
+ * to keep their size next to the 3D world. Their matrix has no perspective, but they belong with their anchor: the 3D
+ * world's, or, anchored by the HUD's or a menu's orthographic matrix (the Save Options balloons, the banana counter),
+ * the flat 4:3 picture, where they never stretch to a wide screen's edge as they pass the N64 one (GFX_FLAT_PLACED).
+ * Their depth offsets too are sized for the N64's camera, whose near plane is at 10: widescreen's nearer one (2.5,
+ * plat_camera_near) maps the same clip-space offset to 4 times the depth, which stood Player Select's bushes in front
+ * of the log they grow behind. So the offset past the anchor's depth (the depth offset less the matrix's z scale,
+ * about 1, that comes with the vertex's extra w of 1) is scaled by the near plane / 10.
+ * A load from vertex 0 brings a new anchor (its first vertex, flat as its matrix is: anchorFlat), which places the
+ * ones after it.
+ */
+static NOINLINE u8 place_billboard(RspVertex *verts, s32 count, s32 dest, u8 anchorFlat) {
+    const RspVertex *anchor = &g.verts[0];
+    float scaleX = 1.0f, scaleY = 1.0f, scaleZ = 1.0f;
+    u8 flat = (dest == 0 ? anchorFlat : anchor->flat) ? GFX_FLAT_PLACED : 0;
     s32 i;
-    s32 vectors = FALSE;
+    if (!flat) {
+        scaleY = 1.0f / plat_fov_tan_scale();
+        scaleX = scaleY / plat_aspect_scale();
+        scaleZ = plat_camera_near() / 10.0f;
+    }
+    for (i = (dest == 0) ? 1 : 0; i < count; i++) {
+        RspVertex *v = &verts[i];
+        v->x = v->x * scaleX + anchor->x;
+        v->y = v->y * scaleY + anchor->y;
+        v->z = (v->z - 1.0f) * scaleZ + 1.0f + anchor->z;
+        v->w += anchor->w;
+    }
+    return flat;
+}
+
+/* Transforms the vertices into g.verts, with the matrix m and the fog and billboard settings they were loaded with. */
+static NOINLINE HOT void load_vertices_now(const Vertex *src, s32 count, s32 dest, float (*m)[4], s32 fog,
+                                           s32 billboard) {
+    RspVertex *verts = &g.verts[dest];
+    s32 i, n = MIN(count, MAX_VERTICES - dest);
     // An orthographic matrix (the HUD's, menus', fades') gives every vertex the same w.
     u8 flat = m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f;
-    // Billboard (sprite) vertices are offsets in clip space, sized for the N64's camera; on the port's wider (G3) or
-    // narrower (the widescreen style's field of view) camera they are scaled to keep their size next to the 3D world.
-    // Their matrix has no perspective, but they belong with their anchor: the 3D world's, or, anchored by the HUD's
-    // or a menu's orthographic matrix (the Save Options balloons, the banana counter), the flat 4:3 picture, where
-    // they never stretch to a wide screen's edge as they pass the N64 one (GFX_FLAT_PLACED).
-    // Their depth offsets too are sized for the N64's camera, whose near plane is at 10: widescreen's nearer one (2.5,
-    // plat_camera_near) maps the same clip-space offset to 4 times the depth, which stood Player Select's bushes in
-    // front of the log they grow behind. So the offset past the anchor's depth (the depth offset less the matrix's z
-    // scale, about 1, that comes with the vertex's extra w of 1) is scaled by the near plane / 10.
-    float bbScaleY, bbScaleX, bbScaleZ;
-    u8 bbFlat;
-    billboard_scales(&bbFlat, &bbScaleX, &bbScaleY, &bbScaleZ);
+    u8 restFlat = flat; // Of the vertices after the first, which may be a billboard's anchor (place_billboard)
+    float fogMul = g.fogMul, fogOffset = g.fogOffset;
+    u32 fogFlat;
+    u64 loaded;
 
+    if (n <= 0) {
+        return;
+    }
 #ifdef HAVE_VFP_VECTORS
     if (sVfpVectors) {
-        s32 n = MIN(count, MAX_VERTICES - dest);
-        if (n > 0) {
-            transform_vertices_vfp(src, n, &g.verts[dest], m);
-            vectors = TRUE;
-        }
-    }
+        transform_vertices_vfp(src, n, verts, m);
+    } else
 #endif
-    for (i = 0; i < count && dest + i < MAX_VERTICES; i++) {
-        RspVertex *v = &g.verts[dest + i];
-        if (!vectors) {
-            float x = src[i].x, y = src[i].y, z = src[i].z;
-            v->x = x * m[0][0] + y * m[1][0] + z * m[2][0] + m[3][0];
-            v->y = x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1];
-            v->z = x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2];
-            v->w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
-        }
-        v->flat = flat;
-        if (billboard && dest + i == 0) {
-            // A new anchor: the vertices after it are placed and sized by this one.
-            billboard_scales(&bbFlat, &bbScaleX, &bbScaleY, &bbScaleZ);
-        } else if (billboard) {
-            // Billboard vertices are offsets from the anchor vertex, in clip space.
-            v->x = v->x * bbScaleX + g.verts[0].x;
-            v->y = v->y * bbScaleY + g.verts[0].y;
-            v->z = (v->z - 1.0f) * bbScaleZ + 1.0f + g.verts[0].z;
-            v->w += g.verts[0].w;
-            v->flat = bbFlat;
-        }
-        v->r = src[i].r;
-        v->g = src[i].g;
-        v->b = src[i].b;
-        v->a = src[i].a;
-        // The fog factor costs a divide, so it is only worked out for vertices loaded with fog on (all fogged
-        // geometry, in practice); draw_dkr_triangles catches any others if fog is turned on before they are drawn.
-        v->fogValid = fog;
+    {
+        transform_vertices(src, n, verts, m);
+    }
+    if (UNLIKELY(billboard)) {
+        restFlat = place_billboard(verts, n, dest, flat);
+    }
+    // The fog factor costs a divide, so it is only worked out for vertices loaded with fog on (all fogged geometry,
+    // in practice); draw_dkr_triangles catches any others if fog is turned on before they are drawn.
+    fogFlat = (fog ? 0x100u : 0u) | ((u32) restFlat << 16);
+    if (!fog) {
+        g.vertsWithoutFog = TRUE;
+    }
+    for (i = 0; i < n; i++) {
+        RspVertex *v = &verts[i];
+        u32 word = fogFlat;
+        __builtin_memcpy(&v->rgba, &src[i].r, 4);
         if (fog) {
-            vertex_fog(v);
-        } else {
-            g.vertsWithoutFog = TRUE;
+            word |= fog_factor(v, fogMul, fogOffset);
         }
+        v->fogFlat = word;
+    }
+    if (dest == 0) {
+        verts[0].flat = flat;
+    }
+    // Which of the RSP's vertices may be flat, for DKR_WALK_LEAN (kept up either way, so that it is right when the
+    // switch is turned on).
+    loaded = ((n >= 64) ? ~0ULL : ((1ULL << n) - 1)) << dest;
+    if (flat | restFlat) {
+        g.flatVerts |= loaded;
+    } else {
+        g.flatVerts &= ~loaded;
     }
 }
 
@@ -1173,7 +1517,7 @@ static u8 sSlotLoad[MAX_VERTICES]; // The load each slot waits for, or NO_LOAD
 static s32 sAnyPending;
 
 /* Transforms the slots still waiting for load l (as load_vertices did when it came), in runs of neighbours. */
-static void resolve_load(u32 l) {
+static COLD void resolve_load(u32 l) {
     PendingLoad *pl = &sLoads[l];
     s16 fogMul = g.fogMul, fogOffset = g.fogOffset;
     s32 i = pl->dest, end = pl->dest + pl->count;
@@ -1228,16 +1572,12 @@ static void forget_all_loads(void) {
     sAnyPending = FALSE;
 }
 
-static void load_vertices(const Vertex *src, s32 count, s32 dest) {
+static NOINLINE HOT void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float(*m)[4] = g.matrices[g.curMatrix];
     s32 fog = (g.geometryMode & G_FOG) != 0, end = MIN(dest + count, MAX_VERTICES);
 
-    if (gGfxSweep) {
-        int level = port_sweep_level_vertex(src) != 0;
-        if (level != gGfxSweepLevel) {
-            flush_batch();
-            gGfxSweepLevel = level;
-        }
+    if (UNLIKELY(gGfxSweep)) {
+        sweep_vertices(src);
     }
     if (sAnyPending) {
         if (g.billboard && dest > 0) {
@@ -1264,6 +1604,8 @@ static void load_vertices(const Vertex *src, s32 count, s32 dest) {
         for (i = dest; i < (u32) end; i++) {
             sSlotLoad[i] = l;
         }
+        // Deferred loads have perspective, so none of their vertices is flat (see load_vertices_now, DKR_WALK_LEAN).
+        g.flatVerts &= ~(((end - dest >= 64) ? ~0ULL : ((1ULL << (end - dest)) - 1)) << dest);
         sAnyPending = TRUE;
         return;
     }
@@ -1283,34 +1625,49 @@ static void viewport_init(Viewport *vp) {
     vp->transY = 1.0f - g.vpTrans[1] / halfH;
 }
 
-/* With G_FOG set the RSP replaces the shade alpha with the fog factor. */
-static void finish_vertex(GfxVertex *out, const RspVertex *in, const Viewport *vp, s32 fog) {
-    out->x = in->x * vp->scaleX + in->w * vp->transX;
-    out->y = in->y * vp->scaleY + in->w * vp->transY;
-    out->z = in->z;
-    out->w = in->w;
-    out->r = in->r;
-    out->g = in->g;
-    out->b = in->b;
-    out->a = fog ? in->fog : in->a;
+/* Vertices loaded with fog off get their fog factor now that fog is on (rare: load_vertices does the rest). */
+static NOINLINE void fog_late_vertices(void) {
+    s32 i;
+    for (i = 0; i < MAX_VERTICES; i++) {
+        if (!g.verts[i].fogValid) {
+            vertex_fog(&g.verts[i]);
+            g.verts[i].fogValid = TRUE;
+        }
+    }
+    g.vertsWithoutFog = FALSE;
 }
 
 /*
  * The batch vertices made so far for each of the RSP's vertices in the triangle command being drawn: a DKR triangle
  * carries its own texture coordinates for each corner, so a vertex is shared only between corners with the same
  * ones. In the game's models about half the corners are such repeats, nearly always among the last few uses.
+ * The entries are only valid for the batch generation they were made in (sBatchGeneration): the counts are cleared
+ * when a triangle command starts and again when its batch is flushed (shared_vertices_clear), which costs less than
+ * a generation check at every corner.
  */
 #define SHARED_PER_VERTEX 4
 typedef struct SharedVertex {
-    u32 generation; // sBatchGeneration the entries were made in
-    u32 key[SHARED_PER_VERTEX]; // Texture coordinates (u << 16 | v)
+    u32 key[SHARED_PER_VERTEX]; // Texture coordinates, as the triangle holds them
     u16 index[SHARED_PER_VERTEX];
-    u8 count;
 } SharedVertex;
-static SharedVertex sShared[MAX_VERTICES];
+/* One object, so that the corner loop reaches the entries and the counts from one base register. */
+static struct {
+    SharedVertex entries[MAX_VERTICES];
+    u32 countWords[MAX_VERTICES / 4]; // The counts (a byte each), as words for clearing
+} sShared;
+#define sSharedCount ((u8 *) sShared.countWords)
+
+/* Word stores rather than a library memset (see draw_states_equal); out of line, so that there is one copy. */
+static NOINLINE HOT void shared_vertices_clear(void) {
+    u32 i;
+#pragma GCC unroll 16
+    for (i = 0; i < ARRAY_COUNT(sShared.countWords); i++) {
+        sShared.countWords[i] = 0;
+    }
+}
 
 /* Whether a flat triangle reaches both sides of the N64 screen (a full screen picture), as gfx_flat_x sees them. */
-static s32 flat_triangle_spans_screen(const u8 idx[3], const Viewport *vp) {
+static NOINLINE s32 flat_triangle_spans_screen(const u8 idx[3], const Viewport *vp) {
     s32 k, left = FALSE, right = FALSE;
     for (k = 0; k < 3; k++) {
         const RspVertex *v = &g.verts[idx[k]];
@@ -1338,7 +1695,7 @@ void refb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
                      const unsigned short *indices, int numTriangles);
 #endif
 
-static void flush_model_batch(void) {
+static COLD void flush_model_batch(void) {
     u32 part;
     if (sModelCount == 0) {
         return;
@@ -1402,7 +1759,7 @@ static void pending_box(PendingLoad *pl) {
 
 /* The texture factors of the model parameters for one texture axis (see tex_axis_coord). */
 static void tex_axis_factors(const TexAxis *a, float *scale, float *offset) {
-    float inv = a->divide ? 1.0f / a->size : a->invSize;
+    float inv = a->divide ? 1.0f / a->size : 1.0f; // A power-of-two size is already folded in (tex_axis_init)
     *scale = a->scale * inv;
     *offset = -a->offset * inv;
 }
@@ -1486,6 +1843,17 @@ static void mesh_drop(MeshEntry *e) {
     __builtin_memset(e, 0, sizeof(*e));
 }
 
+/* Drops every mesh at once: with meshes off their memory is better left to textures (the switch bench turns them off
+ * between races, and an Old 3DS has little linear memory to spare). */
+static COLD void mesh_drop_all(void) {
+    u32 i;
+    for (i = 0; i < MESH_TABLE_SIZE; i++) {
+        if (sMeshes[i].used) {
+            mesh_drop(&sMeshes[i]);
+        }
+    }
+}
+
 /* Frees the meshes of commands not drawn for a while (a level left, an object gone), a part of the table a frame. */
 static void mesh_age(void) {
     static u32 sNext;
@@ -1503,7 +1871,8 @@ static void mesh_age(void) {
  * more runs than an entry holds. */
 static s32 mesh_build(const Triangle *tris, s32 count, const PendingLoad *pl, MeshEntry *e, s32 *numVerts) {
     s32 i, k, verts = 0, indices = 0;
-    u32 generation = ++sBatchGeneration;
+    sBatchGeneration++;
+    shared_vertices_clear();
     e->numRuns = 0;
     for (i = 0; i < count; i++) {
         const Triangle *t = &tris[i];
@@ -1521,16 +1890,12 @@ static s32 mesh_build(const Triangle *tris, s32 count, const PendingLoad *pl, Me
         }
         e->runs[e->numRuns - 1].numTriangles++;
         for (k = 0; k < 3; k++) {
-            SharedVertex *shared = &sShared[idx[k]];
+            SharedVertex *shared = &sShared.entries[idx[k]];
             u32 key = ((u32) (u16) uv[k]->u << 16) | (u16) uv[k]->v;
             const Vertex *s = &pl->src[idx[k] - pl->dest];
             GfxModelVertex *v;
             s32 q, n;
-            if (shared->generation != generation) {
-                shared->generation = generation;
-                shared->count = 0;
-            }
-            n = shared->count;
+            n = sSharedCount[idx[k]];
             for (q = 0; q < n; q++) {
                 if (shared->key[q] == key) {
                     break;
@@ -1543,7 +1908,7 @@ static s32 mesh_build(const Triangle *tris, s32 count, const PendingLoad *pl, Me
             if (n < SHARED_PER_VERTEX) {
                 shared->key[n] = key;
                 shared->index[n] = (u16) verts;
-                shared->count = n + 1;
+                sSharedCount[idx[k]] = n + 1;
             }
             v = &sModelVerts[verts];
             v->x = s->x;
@@ -1571,7 +1936,7 @@ static s32 mesh_build(const Triangle *tris, s32 count, const PendingLoad *pl, Me
 static GfxMeshPart sMeshParts[GFX_MAX_MESH_PARTS];
 static s32 sMeshTriangles;
 
-static void flush_mesh_batch(void) {
+static COLD void flush_mesh_batch(void) {
     u32 part;
     if (sMeshPartCount == 0) {
         return;
@@ -1713,12 +2078,13 @@ static s32 mesh_triangles(const Triangle *tris, s32 count, const PendingLoad *pl
  * backend takes the load's box (else returns FALSE, for the CPU path). Returns TRUE when it is done: drawn, or wholly
  * outside the guard band, which the CPU path would have dropped too.
  */
-static s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
+static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     GfxModelParams params;
     Viewport vp;
     PendingLoad *pl;
     s32 i, k, first, verdict;
+    u32 generation;
     u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1, batchedCull = 0xFF, l;
 
     if (count <= 0 || (l = sSlotLoad[tris[0].vi0]) == NO_LOAD) {
@@ -1791,6 +2157,8 @@ static s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     }
 
     sBatchGeneration++;
+    generation = sBatchGeneration;
+    shared_vertices_clear();
     for (i = 0; i < count; i++) {
         const Triangle *t = &tris[i];
         const TexCoords *uv[3] = { &t->uv0, &t->uv1, &t->uv2 };
@@ -1804,19 +2172,19 @@ static s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
         } else {
             out = model_triangle(&state, &params);
             batchedCull = state.cullMode;
+            if (sBatchGeneration != generation) { // A batch was flushed: its vertices are gone
+                generation = sBatchGeneration;
+                shared_vertices_clear();
+            }
         }
         for (k = 0; k < 3; k++) {
-            SharedVertex *shared = &sShared[idx[k]];
+            SharedVertex *shared = &sShared.entries[idx[k]];
             u32 key = ((u32) (u16) uv[k]->u << 16) | (u16) uv[k]->v;
             const Vertex *s = &pl->src[idx[k] - first];
             GfxModelVertex *v;
             s32 q, n;
 
-            if (shared->generation != sBatchGeneration) {
-                shared->generation = sBatchGeneration;
-                shared->count = 0;
-            }
-            n = shared->count;
+            n = sSharedCount[idx[k]];
             for (q = 0; q < n; q++) {
                 if (shared->key[q] == key) {
                     break;
@@ -1830,7 +2198,7 @@ static s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
             if (n < SHARED_PER_VERTEX) {
                 shared->key[n] = key;
                 shared->index[n] = out[k];
-                shared->count = n + 1;
+                sSharedCount[idx[k]] = n + 1;
             }
             v = &sModelVerts[sModelVertices++];
             v->x = s->x;
@@ -1848,16 +2216,17 @@ static s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     return TRUE;
 }
 
-static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
+static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
     Tile *tile0 = &g.tiles[0], *tile1 = &g.tiles[1];
-    float w0 = 1.0f, h0 = 1.0f, w1 = 1.0f, h1 = 1.0f;
     TexAxis u0, v0, u1, v1;
     Viewport vp;
     u8 batchedKey = 0xFF; // The batch's culling and flatness
     u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
-    s32 tex0, tex1;
+    s32 tex0, tex1, anyFlat, zeroTex1;
+    u32 generation;
+    float keepSign; // The sign of a kept triangle's determinant, for the culling below
 
     if (sAnyPending) {
         if (model_triangles(tris, count, textured)) {
@@ -1881,48 +2250,52 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         sTriStateValid = TRUE;
     }
     state = sTriState;
-    if (fog && g.vertsWithoutFog) {
-        for (i = 0; i < MAX_VERTICES; i++) {
-            if (!g.verts[i].fogValid) {
-                vertex_fog(&g.verts[i]);
-                g.verts[i].fogValid = TRUE;
-            }
-        }
-        g.vertsWithoutFog = FALSE;
+    if (UNLIKELY(fog && g.vertsWithoutFog)) {
+        fog_late_vertices();
     }
     if (!textured) {
         state.textures[0] = NULL;
         state.textures[1] = NULL;
     }
-    if (state.textures[0] != NULL) {
-        w0 = state.textures[0]->width;
-        h0 = state.textures[0]->height;
-    }
-    if (state.textures[1] != NULL) {
-        w1 = state.textures[1]->width;
-        h1 = state.textures[1]->height;
-    }
     viewport_init(&vp);
+    // The GPU (and the host's renderer) culls by the sign of a triangle's area on the screen. For the finished
+    // vertices' x, y and w (with the viewport folded in, see below) that is the sign of the 3x3 determinant of their
+    // (x, y, w) rows wherever all three w are positive, and of the part in front of the camera of one that crosses it
+    // (clipping keeps the winding). Folding the viewport scales the determinant by scaleX * scaleY. Culling mode 1
+    // drops triangles clockwise on the screen, whose determinant is negative, and mode 2 counter clockwise ones.
+    keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
     // Texture coordinates are only worked out for the textures the draw uses; the others are left at zero.
     tex0 = state.textures[0] != NULL;
     tex1 = state.textures[1] != NULL;
     if (tex0) {
-        float shift = texel_centre_shift(state.textures[0]);
-        tex_axis_init(&u0, tile0->shifts, tile0->uls, (u32) w0, shift);
-        tex_axis_init(&v0, tile0->shiftt, tile0->ult, (u32) h0, shift);
+        const GfxTexture *tex = state.textures[0];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&u0, tile0->shifts, tile0->uls, tex->width, shift);
+        tex_axis_init(&v0, tile0->shiftt, tile0->ult, tex->height, shift);
     }
     if (tex1) {
-        float shift = texel_centre_shift(state.textures[1]);
-        tex_axis_init(&u1, tile1->shifts, tile1->uls, (u32) w1, shift);
-        tex_axis_init(&v1, tile1->shiftt, tile1->ult, (u32) h1, shift);
+        const GfxTexture *tex = state.textures[1];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
+        tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
     }
+    // While no loaded vertex is flat (the 3D world) no triangle is, so DKR_WALK_LEAN skips the checks per triangle.
+    anyFlat = !sWalkLean || g.flatVerts != 0;
+    // The second texture's coordinates are only read by draws that bind one (gfx_c3d.c's write_vertices, the
+    // software renderers), so with DKR_WALK_LEAN the others leave the batch's old, finite values in them.
+    zeroTex1 = !tex1 && !sWalkLean;
     // Vertices of earlier commands (or loads) can't be shared: the vertex data, viewport and fog may have changed.
     sBatchGeneration++;
+    generation = sBatchGeneration;
+    shared_vertices_clear();
     for (i = 0; i < count; i++) {
         const Triangle *t = &tris[i];
-        const TexCoords *uv[3] = { &t->uv0, &t->uv1, &t->uv2 };
-        u8 idx[3] = { t->vi0, t->vi1, t->vi2 };
-        u8 flat0, flat1, flat2;
+        TexCoords uv[3]; // uv0, uv1 and uv2, copied out as the three loads they are (not indexed past uv0)
+        uv[0] = t->uv0;
+        uv[1] = t->uv1;
+        uv[2] = t->uv2;
+        const u8 *idx = &t->verticesArray[1]; // vi0, vi1 and vi2
+        u8 flat = 0, batchKey;
         u16 *out;
 
         if (idx[0] >= MAX_VERTICES || idx[1] >= MAX_VERTICES || idx[2] >= MAX_VERTICES) {
@@ -1930,34 +2303,50 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
         }
         // Backface culling: flag 0x40 means double sided. The game mirrors the viewport for mirror mode.
         state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : frontCull;
-        flat0 = g.verts[idx[0]].flat;
-        flat1 = g.verts[idx[1]].flat;
-        flat2 = g.verts[idx[2]].flat;
-        state.flat = (flat0 && flat1 && flat2) ? (flat0 | flat1 | flat2) : 0; // 1, or GFX_FLAT_PLACED (3) if a sprite
-        if (state.flat == 1 && tex0 && !flat_triangle_spans_screen(idx, &vp)) {
-            // Textured and narrower than the screen (a menu's wooden box): on a wide screen it keeps its shape as it
-            // slides past the N64 edge, rather than a corner near the edge snapping out to the wide one's.
-            state.flat = GFX_FLAT_PLACED;
+        if (anyFlat) {
+            u8 flat0 = g.verts[idx[0]].flat, flat1 = g.verts[idx[1]].flat, flat2 = g.verts[idx[2]].flat;
+            flat = (flat0 && flat1 && flat2) ? (flat0 | flat1 | flat2) : 0; // 1, or GFX_FLAT_PLACED (3) if a sprite
+            if (flat == 1 && tex0 && !flat_triangle_spans_screen(idx, &vp)) {
+                // Textured and narrower than the screen (a menu's wooden box): on a wide screen it keeps its shape
+                // as it slides past the N64 edge, rather than a corner near the edge snapping out to the wide one's.
+                flat = GFX_FLAT_PLACED;
+            }
         }
-        if ((state.cullMode | (state.flat << 2)) == batchedKey && sBatchCount > 0 && batch_has_room()) {
+        state.flat = flat;
+        if (sCpuCull && state.cullMode != 0 && !flat) {
+            // Flat draws keep the GPU's culling: on a wide screen gfx_flat_x moves their corners unevenly.
+            const RspVertex *a = &g.verts[idx[0]], *b = &g.verts[idx[1]], *c = &g.verts[idx[2]];
+            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
+                        a->w * (b->x * c->y - c->x * b->y);
+            if (!(det * keepSign > 0.0f)) {
+                continue; // A back face, or edge on (no area: nothing would be drawn)
+            }
+            state.cullMode = 0;
+        }
+        batchKey = state.cullMode | (flat << 2);
+        if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
             // Only the culling and flatness change from one triangle to the next, so the batch's state is still this
             // one.
             out = &sBatchIndices[sBatchCount++ * 3];
         } else {
             out = batch_triangle(&state);
-            batchedKey = state.cullMode | (state.flat << 2);
+            batchedKey = batchKey;
+            if (sBatchGeneration != generation) {
+                // The batch was flushed: its vertices are gone.
+                generation = sBatchGeneration;
+                shared_vertices_clear();
+            }
         }
         for (k = 0; k < 3; k++) {
-            SharedVertex *shared = &sShared[idx[k]];
-            u32 key = ((u32) (u16) uv[k]->u << 16) | (u16) uv[k]->v;
+            SharedVertex *shared = &sShared.entries[idx[k]];
+            u32 key = uv[k].texCoords; // Both coordinates, as the table's key
+            const RspVertex *in;
             GfxVertex *v;
             s32 q, n;
+            u32 rgba;
+            u16 index;
 
-            if (shared->generation != sBatchGeneration) {
-                shared->generation = sBatchGeneration;
-                shared->count = 0;
-            }
-            n = shared->count;
+            n = sSharedCount[idx[k]];
             for (q = 0; q < n; q++) {
                 if (shared->key[q] == key) {
                     break;
@@ -1967,23 +2356,36 @@ static void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
                 out[k] = shared->index[q];
                 continue;
             }
-            out[k] = batch_vertex(&v);
+            index = (u16) sBatchVertices++;
+            v = &sBatchVerts[index];
+            out[k] = index;
             if (n < SHARED_PER_VERTEX) {
                 shared->key[n] = key;
-                shared->index[n] = out[k];
-                shared->count = n + 1;
+                shared->index[n] = index;
+                sSharedCount[idx[k]] = n + 1;
             }
-            finish_vertex(v, &g.verts[idx[k]], &vp, fog);
+            // The finished vertex: the N64 viewport folded in, and with G_FOG set the RSP replaces the shade alpha
+            // with the fog factor.
+            in = &g.verts[idx[k]];
+            v->x = in->x * vp.scaleX + in->w * vp.transX;
+            v->y = in->y * vp.scaleY + in->w * vp.transY;
+            v->z = in->z;
+            v->w = in->w;
+            rgba = in->rgba;
+            if (fog) {
+                rgba = (rgba & 0x00FFFFFFu) | (in->fogFlat << 24);
+            }
+            __builtin_memcpy(&v->r, &rgba, 4);
             if (tex0) {
-                v->u0 = tex_axis_coord(&u0, uv[k]->u);
-                v->v0 = tex_axis_coord(&v0, uv[k]->v);
+                v->u0 = tex_axis_coord(&u0, uv[k].u);
+                v->v0 = tex_axis_coord(&v0, uv[k].v);
             } else {
                 v->u0 = v->v0 = 0.0f;
             }
             if (tex1) {
-                v->u1 = tex_axis_coord(&u1, uv[k]->u);
-                v->v1 = tex_axis_coord(&v1, uv[k]->v);
-            } else {
+                v->u1 = tex_axis_coord(&u1, uv[k].u);
+                v->v1 = tex_axis_coord(&v1, uv[k].v);
+            } else if (zeroTex1) {
                 v->u1 = v->v1 = 0.0f;
             }
         }
@@ -2068,7 +2470,7 @@ static inline float rect_x(u32 field) {
     return (s32) ((field & 0xFFF) ^ 0x800) - 0x800;
 }
 
-static void texture_rectangle(u32 w0, u32 w1, s32 flip) {
+static NOINLINE void texture_rectangle(u32 w0, u32 w1, s32 flip) {
     float ulx = rect_x(w1 >> 12) * 0.25f;
     // The width, not the right edge, read as is: a rectangle across 512 pixels (the HUD sliding in from the right)
     // would otherwise turn around and cover the screen.
@@ -2105,7 +2507,7 @@ static void texture_rectangle(u32 w0, u32 w1, s32 flip) {
     draw_rect(ulx, uly, lrx, lry, s, t, s1, t1, flip, TRUE);
 }
 
-static void fill_rectangle(u32 w0, u32 w1) {
+static NOINLINE void fill_rectangle(u32 w0, u32 w1) {
     s32 lrx = (w0 >> 14) & 0x3FF, lry = (w0 >> 2) & 0x3FF;
     s32 ulx = (w1 >> 14) & 0x3FF, uly = (w1 >> 2) & 0x3FF;
     s16 rect[4];
@@ -2133,11 +2535,11 @@ static void fill_rectangle(u32 w0, u32 w1) {
         flush_batch();
         part = walk_switch(WALK_DRAWS);
         if (g.colorImage == g.depthImage) {
-            gfxb_clear_depth(rect);
+            gfx_split_clear_depth(rect);
             REF_CALL(refb_clear_depth(rect));
         } else {
             u32 c = rgba5551_to_8888(g.fillColor >> 16);
-            gfxb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255);
+            gfx_split_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255);
             REF_CALL(refb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255));
         }
         walk_switch(part);
@@ -2161,49 +2563,39 @@ static void set_other_mode(u32 *mode, u32 shift, u32 len, u32 data) {
 }
 
 static void run_dl(const Gfx *dl, s32 maxCommands);
+static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth);
 
-/* Whether a command can change what build_draw_state builds. Viewport and matrix changes don't (culling is set per
- * triangle). */
-static inline s32 state_command(u32 op) {
-    switch (op) {
-        case OP(G_VTX):
-        case OP(G_TRIN):
-        case OP(G_MTX):
-        case OP(G_POPMTX):
-        case OP(G_DL):
-        case OP(G_DMADL):
-        case OP(G_ENDDL):
-        case OP(G_MOVEMEM):
-        case OP(G_SPNOOP):
-        case OP(G_NOOP):
-        case OP(G_RDPLOADSYNC):
-        case OP(G_RDPPIPESYNC):
-        case OP(G_RDPTILESYNC):
-        case OP(G_RDPFULLSYNC):
-            return FALSE;
-        case OP(G_MOVEWORD):
-            return FALSE; // Checked below: only G_MW_FOG matters.
-        default:
-            return TRUE;
-    }
-}
+/*
+ * Per opcode: the walk part its time goes to (bits 0-2, WALK_COMMANDS unless listed) and whether it leaves what
+ * build_draw_state builds alone (OP_KEEPS_STATE), so the walk reads one byte a command instead of running two
+ * switches. Viewport and matrix changes don't change the draw state (culling is set per triangle), and of
+ * G_MOVEWORD only G_MW_FOG does, which its case handles.
+ */
+#define OP_KEEPS_STATE 8
+static const u8 sOpInfo[256] = {
+    [OP(G_SPNOOP)] = OP_KEEPS_STATE,
+    [OP(G_NOOP)] = OP_KEEPS_STATE,
+    [OP(G_RDPLOADSYNC)] = OP_KEEPS_STATE,
+    [OP(G_RDPPIPESYNC)] = OP_KEEPS_STATE,
+    [OP(G_RDPTILESYNC)] = OP_KEEPS_STATE,
+    [OP(G_RDPFULLSYNC)] = OP_KEEPS_STATE,
+    [OP(G_MOVEMEM)] = OP_KEEPS_STATE,
+    [OP(G_POPMTX)] = OP_KEEPS_STATE,
+    [OP(G_DL)] = OP_KEEPS_STATE,
+    [OP(G_DMADL)] = OP_KEEPS_STATE,
+    [OP(G_ENDDL)] = OP_KEEPS_STATE,
+    [OP(G_MOVEWORD)] = OP_KEEPS_STATE,
+    [OP(G_MTX)] = OP_KEEPS_STATE | WALK_MATRICES,
+    [OP(G_VTX)] = OP_KEEPS_STATE | WALK_VERTICES,
+    [OP(G_TRIN)] = OP_KEEPS_STATE | WALK_TRIANGLES,
+    [OP(G_TEXRECT)] = WALK_RECTS,
+    [OP(G_TEXRECTFLIP)] = WALK_RECTS,
+    [OP(G_FILLRECT)] = WALK_RECTS,
+};
 
-/* The walk part a command's time goes to. */
-static inline u32 walk_part(u32 op) {
-    switch (op) {
-        case OP(G_MTX):
-            return WALK_MATRICES;
-        case OP(G_VTX):
-            return WALK_VERTICES;
-        case OP(G_TRIN):
-            return WALK_TRIANGLES;
-        case OP(G_TEXRECT):
-        case OP(G_TEXRECTFLIP):
-        case OP(G_FILLRECT):
-            return WALK_RECTS;
-        default:
-            return WALK_COMMANDS;
-    }
+/* The traced frame's log of a command. */
+static COLD void trace_command(s32 depth, u32 w0, u32 w1) {
+    plat_log("%*s%08X %08X", (int) (depth * 2), "", (unsigned) w0, (unsigned) w1);
 }
 
 /*
@@ -2211,48 +2603,83 @@ static inline u32 walk_part(u32 op) {
  * N64 masks such an address and reads whatever is there; here it would be a crash (bug reports #178 and #181, both on
  * the first frame after a menu level load). The list holding the call is garbage too, so the caller stops reading it.
  */
-static s32 bad_list_address(u32 addr, const Gfx *where) {
+static inline s32 bad_list_address(u32 addr) {
+    return (addr & 3) != 0 || addr < 0x10000;
+}
+
+static COLD void log_bad_list_address(u32 addr, const Gfx *where) {
     static s32 sLastLogged = -1;
-    if ((addr & 3) == 0 && addr >= 0x10000) {
-        return FALSE;
-    }
     if (sLastLogged != sFrameCount) {
         sLastLogged = sFrameCount;
         plat_log("renderer: skipped a display list at bad address %08X, called from %p (%08X %08X), frame %d",
                  (unsigned) addr, (const void *) where, (unsigned) where->words.w0, (unsigned) where->words.w1,
                  (int) sFrameCount);
     }
-    return TRUE;
 }
 
-/* A load at TMEM word tmem of bytes bytes overwrote the later 64 byte slots it covers: earlier loads there are gone. */
-static void forget_covered_loads(u32 tmem, u32 bytes) {
-    u32 first = (tmem / 8) & 63, end = (tmem + (bytes + 7) / 8 + 7) / 8, i;
-    for (i = first + 1; i < end && i < ARRAY_COUNT(g.tmem); i++) {
-        g.tmem[i].valid = FALSE;
+/*
+ * G_DL and G_DMADL: runs the called list (up to DL_STACK_SIZE deep) and returns whether the calling list is done
+ * (G_DL without a push, or a call to an address that can't be a list). Out of line so that the command loop holds
+ * no test of the depth, which never changes within it: the compiler would otherwise unswitch the loop on it, into
+ * two copies of the whole loop.
+ */
+static NOINLINE HOT s32 call_display_list(u32 w0, u32 w1, const Gfx *where, s32 depth) {
+    u32 op = w0 >> 24;
+    if (UNLIKELY(bad_list_address(w1))) {
+        log_bad_list_address(w1, where);
+        return TRUE;
     }
+    if (depth < DL_STACK_SIZE) {
+        s32 maxCommands = (op == OP(G_DMADL)) ? (s32) ((w0 >> 16) & 0xFF) : -1;
+        run_command_list((const Gfx *) seg_addr(w1), maxCommands, depth + 1);
+    }
+    return op == OP(G_DL) && ((w0 >> 16) & G_DL_NOPUSH);
 }
 
-static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
-    s32 executed = 0;
+/* A load at TMEM word tmem of bytes bytes overwrote the later 64 byte slots it covers: earlier loads there are gone.
+ * Most of them are already gone, so only the valid ones (g.tmemValid) are visited. The load itself is marked valid. */
+static HOT void forget_covered_loads(u32 tmem, u32 bytes) {
+    u32 first = (tmem / 8) & 63, end = (tmem + (bytes + 7) / 8 + 7) / 8;
+    u64 covered, m;
+    if (end > 64) {
+        end = 64;
+    }
+    covered = (end > first + 1) ? ((end >= 64 ? ~0ULL : (1ULL << end) - 1) & ~((2ULL << first) - 1)) : 0;
+    for (m = g.tmemValid & covered; m != 0; m &= m - 1) {
+        g.tmem[__builtin_ctzll(m)].valid = FALSE;
+    }
+    g.tmemValid = (g.tmemValid & ~covered) | (1ULL << first);
+}
 
-    while (maxCommands < 0 || executed < maxCommands) {
+static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
+    // Commands left to run: a G_DMADL's count, or (no list is that long) as good as no limit, so that the loop tests
+    // one count rather than the limit and the count.
+    s32 remaining = (maxCommands < 0) ? 0x7FFFFFFF : maxCommands;
+
+    while (remaining > 0) {
         u32 w0 = dl->words.w0;
         u32 w1 = dl->words.w1;
         u32 op = w0 >> 24;
+        u32 info = sOpInfo[op];
         dl++;
-        executed++;
-        TRACE("%*s%08X %08X", (int) (depth * 2), "", (unsigned) w0, (unsigned) w1);
-        if (sWalkTimed) {
-            walk_switch(walk_part(op));
+        remaining--;
+        if (UNLIKELY(sTracing)) {
+            trace_command(depth, w0, w1);
         }
-        if (state_command(op)) {
+        if (sWalkTimed && (info & 7) != sWalkPart) {
+            walk_switch_timed(info & 7);
+        }
+        if (!(info & OP_KEEPS_STATE)) {
             sTriStateValid = FALSE;
         }
 
         switch (op) {
-            case OP(G_SPNOOP):
             case OP(G_NOOP):
+                if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
+                    sDrawKind = w1 & 3;
+                }
+                break;
+            case OP(G_SPNOOP):
             case OP(G_RDPLOADSYNC):
             case OP(G_RDPPIPESYNC):
             case OP(G_RDPTILESYNC):
@@ -2291,6 +2718,7 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 }
                 load_vertices((const Vertex *) seg_addr(w1), count, g.vertexIndex);
                 g.vertexIndex += count;
+                sDrawMix[sDrawKind][2] += count;
                 break;
             }
 
@@ -2300,23 +2728,9 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 break;
 
             case OP(G_DL):
-                if (bad_list_address(w1, dl - 1)) {
-                    return;
-                }
-                if (depth < DL_STACK_SIZE) {
-                    run_command_list((const Gfx *) seg_addr(w1), -1, depth + 1);
-                }
-                if ((w0 >> 16) & G_DL_NOPUSH) {
-                    return;
-                }
-                break;
-
             case OP(G_DMADL):
-                if (bad_list_address(w1, dl - 1)) {
+                if (call_display_list(w0, w1, dl - 1, depth)) {
                     return;
-                }
-                if (depth < DL_STACK_SIZE) {
-                    run_command_list((const Gfx *) seg_addr(w1), (w0 >> 16) & 0xFF, depth + 1);
                 }
                 break;
 
@@ -2384,7 +2798,7 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 g.rdpHalf1 = h1->words.w1;
                 g.rdpHalf2 = h2->words.w1;
                 dl += 2;
-                executed += 2;
+                remaining -= 2;
                 texture_rectangle(w0, w1, op == G_TEXRECTFLIP);
                 break;
             }
@@ -2633,6 +3047,7 @@ static void prewarm_textures(void) {
     u32 head = __atomic_load_n(&sTexQueueHead, __ATOMIC_ACQUIRE);
     u32 tail = sTexQueueTail;
     u32 savedOmH;
+    u64 savedTmemValid;
     const u8 *savedTlut;
     u32 savedTlutCount;
     s32 savedTlutFirst;
@@ -2657,6 +3072,7 @@ static void prewarm_textures(void) {
     for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
         savedTmem[i] = g.tmem[i];
     }
+    savedTmemValid = g.tmemValid;
     savedOmH = g.omH;
     savedTlut = g.tlutAddr;
     savedTlutCount = g.tlutCount;
@@ -2672,6 +3088,7 @@ static void prewarm_textures(void) {
             for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
                 g.tmem[i] = noLoad;
             }
+            g.tmemValid = 0;
             run_command_list(e->cmd, e->numCommands, 0);
             if (lookup_texture(G_TX_RENDERTILE, NULL) != NULL) {
                 decoded++;
@@ -2686,6 +3103,7 @@ static void prewarm_textures(void) {
     for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
         g.tmem[i] = savedTmem[i];
     }
+    g.tmemValid = savedTmemValid;
     g.omH = savedOmH;
     g.tlutAddr = savedTlut;
     g.tlutCount = savedTlutCount;
@@ -2723,43 +3141,72 @@ void port_gfx_init(void) {
     }
 }
 
+#ifdef PORT_GFX_REFERENCE
+/* A snapshot: the frame is also drawn by the reference renderer, both images are saved as for DKR_DIFF_EVERY, and
+ * every draw is logged. */
+static COLD void start_snapshot(void) {
+    char path[256];
+    gPlatSnapshotRequested = 0;
+    if (!sRefInitialised) {
+        refb_init();
+        sRefInitialised = TRUE;
+    }
+    sRefActive = TRUE;
+    sTraceFrame = sFrameCount;
+    plat_log_keep();
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_log.txt", plat_data_dir(), (int) sFrameCount);
+    plat_log_copy_to(path);
+    gfxb_log_draws((int) sFrameCount);
+    plat_log("snapshot of frame %d", (int) sFrameCount);
+}
+
+/* Saves the reference renderer's and the GPU's pictures of a snapshot or DKR_DIFF_EVERY frame. */
+static COLD void end_reference_frame(void) {
+    char path[256];
+    refb_end_frame();
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_ref.png", plat_data_dir(), (int) sFrameCount);
+    refb_save_png(path);
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_gpu.bin", plat_data_dir(), (int) sFrameCount);
+    gfxb_capture_frame(path);
+    sRefActive = FALSE;
+    // The renderer closes the snapshot's log once the GPU has drawn the frame.
+}
+#endif
+
 void port_gfx_run_task(void *taskPtr) {
     OSTask *task = (OSTask *) taskPtr;
+    int snapshot;
     port_gfx_init();
     sFrameCount++;
+    sDrawKind = PORT_DRAW_OTHER;
 #ifdef PORT_GFX_REFERENCE
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
 #endif
-    gfxb_start_frame();
+    // A frame the walk needs drawn at once (a snapshot, a traced frame, the reference renderer's) is made directly;
+    // so are frames with GPU vertex maths, whose walk asks the backend about each model (gfxb_model_check).
+    snapshot = gPlatSnapshotRequested; // Read once: another thread sets it
+    gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame ||
+                          plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1));
 #ifdef PORT_GFX_REFERENCE
-    if (gPlatSnapshotRequested) {
-        // A snapshot: the frame is also drawn by the reference renderer, both images are saved as for DKR_DIFF_EVERY,
-        // and every draw is logged.
-        gPlatSnapshotRequested = 0;
-        if (!sRefInitialised) {
-            refb_init();
-            sRefInitialised = TRUE;
-        }
-        sRefActive = TRUE;
-        sTraceFrame = sFrameCount;
-        plat_log_keep();
-        {
-            char path[256];
-            plat_snprintf(path, sizeof(path), "%s/diff_%05d_log.txt", plat_data_dir(), (int) sFrameCount);
-            plat_log_copy_to(path);
-        }
-        gfxb_log_draws((int) sFrameCount);
-        plat_log("snapshot of frame %d", (int) sFrameCount);
+    if (UNLIKELY(snapshot)) {
+        start_snapshot();
     }
 #endif
     REF_CALL(refb_start_frame());
+    sTracing = sFrameCount == sTraceFrame;
     read_switches();
     prewarm_textures();
     forget_all_loads();
-    sGpuTransform = gfxb_gpu_transform();
+    sGpuTransform = !gfx_split_active() && gfxb_gpu_transform();
+    sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;
-    if (sGpuTransform) {
+    if (!sTrackMesh && !sModelMesh) {
+        if (sMeshBytes > 0) {
+            gfx_split_drain(); // Frees go through the backend's frame slot, which the second renderer thread may be using
+            mesh_drop_all();
+        }
+    } else {
         mesh_age();
         if (sFrameCount % 600 == 0) {
             plat_log("meshes: %u KB, %u draws, %u made, %u not recorded, %u data changes", (unsigned) (sMeshBytes / 1024),
@@ -2780,18 +3227,11 @@ void port_gfx_run_task(void *taskPtr) {
     flush_batch();
     gPlatGfxStage = "ending the frame";
     walk_switch(WALK_FRAMEEND);
-    gfxb_end_frame();
+    gfx_split_frame_end();
     walk_end();
 #ifdef PORT_GFX_REFERENCE
-    if (sRefActive) {
-        char path[256];
-        refb_end_frame();
-        plat_snprintf(path, sizeof(path), "%s/diff_%05d_ref.png", plat_data_dir(), (int) sFrameCount);
-        refb_save_png(path);
-        plat_snprintf(path, sizeof(path), "%s/diff_%05d_gpu.bin", plat_data_dir(), (int) sFrameCount);
-        gfxb_capture_frame(path);
-        sRefActive = FALSE;
-        // The renderer closes the snapshot's log once the GPU has drawn the frame.
+    if (UNLIKELY(sRefActive)) {
+        end_reference_frame();
     }
 #endif
 }

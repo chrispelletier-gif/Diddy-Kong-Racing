@@ -49,7 +49,7 @@ PORT_GAME_SRC := $(wildcard src/*.c src/os/*.c src/game/*.c src/gfx/*.c src/audi
 # Port sources that use the platform's own headers.
 PORT_SYS_SRC := src/plat/plat_common.c src/plat/input_script.c $(wildcard src/gfx/sys/*.c src/audio/sys/*.c)
 PORT_SYS_SRC += src/plat/settings.c src/plat/controls.c src/plat/bottom_screen.c src/plat/options.c \
-                src/plat/save_backups.c
+                src/plat/save_backups.c src/plat/recorder.c
 
 ifeq ($(TARGET),3ds)
   PORT_SYS_SRC += src/plat/plat_3ds.c src/plat/bugreport.c $(wildcard 3ds/*.c)
@@ -60,9 +60,9 @@ endif
 # A player's build (RELEASE=1) leaves the debug tools out: the profiler, the test runs, bug reports (crash.txt is still
 # written), the updater and the reference renderer. src/release/ stands in for what the rest of the port calls.
 ifeq ($(RELEASE),1)
-  PORT_GAME_SRC := $(filter-out src/game/port_autorun.c src/game/port_profile.c,$(PORT_GAME_SRC)) \
+  PORT_GAME_SRC := $(filter-out src/game/port_autorun.c src/game/port_profile.c src/game/port_recorder.c,$(PORT_GAME_SRC)) \
                    src/release/debug_stubs.c
-  PORT_SYS_SRC  := $(filter-out src/plat/bugreport.c 3ds/net_3ds.c 3ds/gfx_ref.c,$(PORT_SYS_SRC))
+  PORT_SYS_SRC  := $(filter-out src/plat/bugreport.c src/plat/recorder.c 3ds/net_3ds.c 3ds/gfx_ref.c,$(PORT_SYS_SRC))
 endif
 
 #### Flags ####
@@ -108,7 +108,8 @@ HOT_SRC := src/gfx/gfx_rdp.c src/audio/audio_rsp.c 3ds/gfx_c3d.c
 # infinity, signed zero and errno handling, which the ARM11's slow VFP compares and divides pay for. Game code keeps
 # strict float maths so physics stays bit-identical. FAST_MATH=0 gives the old build.
 FAST_MATH ?= 1
-HOT_FLAGS := $(if $(HOT_OPT),-O$(HOT_OPT) $(if $(filter 1,$(FAST_MATH)),-ffast-math))
+# HOT_EXTRA_FLAGS adds to the hot files' flags (for trying optimisation options on them alone).
+HOT_FLAGS := $(if $(HOT_OPT),-O$(HOT_OPT) $(if $(filter 1,$(FAST_MATH)),-ffast-math) $(HOT_EXTRA_FLAGS))
 
 ifeq ($(TARGET),3ds)
   ifeq ($(strip $(DEVKITARM)),)
@@ -143,6 +144,9 @@ ifeq ($(TARGET),3ds)
                 -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
   LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers -Wl,--wrap=gfxGetFramebuffer
+  # One link-time partition, so that the renderer's per-draw functions (plat.h PLAT_HOT) come out in one .text.hot
+  # section: with several, each partition's .text.hot lands among the others' cold code (roadmap O9).
+  LDFLAGS   += $(if $(filter 1,$(LTO)),-flto-partition=one)
   # curl and mbedtls (devkitPro's 3ds-curl) send bug reports and download updates, so a player's build has neither.
   LIBS      := -lcitro3d $(if $(filter 1,$(RELEASE)),,-lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz) -lctru -lm
   EXE       := $(BUILD_DIR)/dkr.elf

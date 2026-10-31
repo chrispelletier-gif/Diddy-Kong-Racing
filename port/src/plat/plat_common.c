@@ -1,5 +1,6 @@
 /* Platform helpers shared by every target (plain C library). */
 #include "plat.h"
+#include "recorder.h"
 #include "settings.h"
 
 #include <stdarg.h>
@@ -116,7 +117,26 @@ static FILE *open_for_reading(const char *path) {
     return f;
 }
 
+/* SD card use goes on the flight recorder's timeline with how long it took, as it is a usual cause of hitches. */
+static const char *base_name(const char *path) {
+    const char *slash = strrchr(path, '/');
+    return slash != NULL ? slash + 1 : path;
+}
+
+static void record_file_use(const char *what, const char *path, long bytes, unsigned long long startNs) {
+    rec_event("SD %s %s: %ld bytes, %.1f ms", what, base_name(path), bytes, (plat_time_ns() - startNs) / 1e6);
+}
+
+static void *load_file(const char *path, unsigned int *size);
+
 void *plat_load_file(const char *path, unsigned int *size) {
+    unsigned long long start = plat_time_ns();
+    void *data = load_file(path, size);
+    record_file_use(data != NULL ? "read" : "read (none)", path, data != NULL ? (long) *size : 0, start);
+    return data;
+}
+
+static void *load_file(const char *path, unsigned int *size) {
     FILE *f = open_for_reading(path);
     long len;
     void *data;
@@ -143,14 +163,17 @@ void *plat_load_file(const char *path, unsigned int *size) {
 }
 
 int plat_load_file_start(const char *path, void *data, unsigned int size) {
+    unsigned long long start = plat_time_ns();
     FILE *f = open_for_reading(path);
     size_t got;
 
     if (f == NULL) {
+        record_file_use("read (none)", path, 0, start);
         return -1;
     }
     got = fread(data, 1, size, f);
     fclose(f);
+    record_file_use("read", path, (long) got, start);
     return (int) got;
 }
 
@@ -158,7 +181,16 @@ int plat_load_file_start(const char *path, void *data, unsigned int size) {
  * Written to a temporary file which then replaces the old one, so that losing power or crashing part way leaves either
  * the old file or the new one, never a cut-off one. Returns 0 if anything failed (the old file is then kept).
  */
+static int save_file(const char *path, const void *data, unsigned int size);
+
 int plat_save_file(const char *path, const void *data, unsigned int size) {
+    unsigned long long start = plat_time_ns();
+    int ok = save_file(path, data, size);
+    record_file_use(ok ? "write" : "write FAILED", path, (long) size, start);
+    return ok;
+}
+
+static int save_file(const char *path, const void *data, unsigned int size) {
     char temp[300];
     FILE *f;
     int ok;
@@ -179,6 +211,7 @@ int plat_save_file(const char *path, const void *data, unsigned int size) {
 }
 
 int plat_append_file(const char *path, const void *data, unsigned int size) {
+    unsigned long long start = plat_time_ns();
     FILE *f = fopen(path, "ab");
     int ok;
 
@@ -187,6 +220,7 @@ int plat_append_file(const char *path, const void *data, unsigned int size) {
     }
     ok = fwrite(data, 1, size, f) == size;
     ok = fclose(f) == 0 && ok;
+    record_file_use(ok ? "append" : "append FAILED", path, (long) size, start);
     return ok;
 }
 
@@ -368,11 +402,25 @@ static volatile int sRenderAhead = -1;
 int plat_render_ahead(void) {
     if (sRenderAhead < 0) {
         const char *env = plat_getenv("DKR_RENDER_AHEAD");
+        // 1 everywhere. An Old 3DS rendered ahead by 2 while its renderer and game took turns on one core (switch
+        // benches #244, #245); with the two-core renderer, 1 kept 97% of frames at 30 like 2 did (#266), a frame
+        // sooner.
         int frames = settings_get("renderahead", env != NULL ? atoi(env) : 1);
         sRenderAhead = frames == 2 ? 2 : 1;
         plat_log("render ahead: %d frame%s", sRenderAhead, sRenderAhead == 1 ? "" : "s");
     }
     return plat_switch("BENCH_RENDER_AHEAD", sRenderAhead); // The switch bench may set its own
+}
+
+// Per thread: the walk sets it for the frame it walks, the two-core renderer's second thread for the frame it ends.
+static __thread int sFrameStep;
+
+void plat_set_frame_step(int retraces) {
+    sFrameStep = retraces;
+}
+
+int plat_frame_step(void) {
+    return sFrameStep;
 }
 
 void plat_set_render_ahead(int frames) {
@@ -409,7 +457,8 @@ void plat_set_stereo_once_setting(int on) {
 
 /* The 60 fps setting (see plat_frame_retraces): -1 until first read. sFps60 is what frames use now. sFps20 is the
  * steady 20 fps cap (settings.txt "fps20", else DKR_20FPS) for an Old 3DS that can't keep 30: every frame then takes
- * three retraces instead of jumping between two and three; 60 fps wins over it. */
+ * three retraces instead of jumping between two and three; 60 fps wins over it. It was an Old 3DS's default until the
+ * two-core renderer (P21, switch bench #263: 29 fps, 93% of frames at 30) made 30 the Old 3DS's target. */
 static volatile int sFps60Setting = -1, sFps60, sFps20;
 
 static void read_60fps_setting(void) {
@@ -424,7 +473,11 @@ static void read_60fps_setting(void) {
 }
 
 int plat_frame_retraces(void) {
+    int pinned = plat_switch("DKR_FPS_PIN", 0); // The switch bench's own frame rate (20, 30 or 60).
     read_60fps_setting();
+    if (pinned == 20 || pinned == 30 || pinned == 60) {
+        return 60 / pinned;
+    }
     return sFps60 ? 1 : sFps20 ? 3 : 2;
 }
 

@@ -44,6 +44,12 @@ enum ProfMark { PROF_MARK_LOOP_START, PROF_MARK_BUILT, PROF_MARK_WAITED, PROF_MA
 #define PROF_RATE_BUCKETS 7
 
 int prof_enabled(void);
+/*
+ * Whether the stages and counters are being collected: always in a debug build, for the flight recorder
+ * (plat/recorder.h), whether or not the profiler's readout is on. Only the renderer's parts (prof_part) wait for
+ * prof_enabled.
+ */
+int prof_recording(void);
 /* The Settings menu's Profiler row on the bottom screen: on or off, remembered across launches. */
 int prof_user_enabled(void);
 void prof_set_user_enabled(int on);
@@ -59,7 +65,9 @@ void prof_render_task(unsigned long long totalNs);
 /*
  * Parts of the renderer's time (PROF_RDP) on the 3DS, for finding where it goes: the backend's draw calls as a whole
  * (what is left of PROF_RDP is the display list walk), and within them the guard band clipping, the GPU settings and
- * the vertex and index writes. Logged with the profile line as averages per rendered frame.
+ * the vertex and index writes. Logged with the profile line as averages per rendered frame. Each breakdown has a
+ * switch, DKR_DRAW_PARTS for the draws' and DKR_WALK_PARTS for the walk's, off by default on an Old 3DS: there each
+ * of their clock reads is a system call, a few thousand a frame, while PROF_RDP needs two.
  */
 enum ProfPart {
     PROF_PART_BACKEND,
@@ -130,6 +138,7 @@ void prof_set_status(const char *text);
 #ifdef PORT_RELEASE
 #include <string.h>
 #define prof_enabled() 0
+#define prof_recording() 0
 #define prof_user_enabled() 0
 #define prof_set_user_enabled(on) ((void) (on))
 #define prof_add(stage, ns) ((void) (stage), (void) (ns))
@@ -149,5 +158,8 @@ void prof_set_status(const char *text);
 #ifdef __cplusplus
 }
 #endif
+
+/* The renderer's draw mix since the last call (gfx_rdp.c): per kind (port_drawtag.h) draws, triangles, vertices. */
+void gfx_draw_mix_take(unsigned long out[4][3]);
 
 #endif

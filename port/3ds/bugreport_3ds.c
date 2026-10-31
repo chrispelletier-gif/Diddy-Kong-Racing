@@ -21,6 +21,8 @@
 #include <time.h>
 
 #include "plat/plat.h"
+#include "plat/recorder.h"
+#include "plat/settings.h"
 #include "audio/voices.h"
 #if PLAT_DEBUG_TOOLS
 #include "plat/bugreport.h"
@@ -38,7 +40,7 @@
 #define REPORT_LABEL "3ds-bug-report"
 /* Compressed size of all the files of one report; each 45 KB is one comment on the issue. */
 #define MAX_ATTACHMENT_BYTES (900 * 1024)
-#define MAX_FILES 10
+#define MAX_FILES 18
 
 extern u32 __ctru_heap_size;
 int port_gfx_frame_count(void);
@@ -186,6 +188,10 @@ static void crash_handler(ERRF_ExceptionInfo *info, CpuRegisters *regs) {
         length = sizeof(sCrashText) - 1;
     }
     crash_write_file("/3ds/dkr/crash.txt", sCrashText, length);
+#if PLAT_DEBUG_TOOLS
+    // The flight recorder as it is, for the next start's report to turn into a timeline.
+    crash_write_file("/3ds/dkr/crash_rec.bin", (const char *) rec_state(), sizeof(RecState));
+#endif
     // Silence the DSP's voices (audio_ndsp.c), then back to the Homebrew Launcher; the next start offers to send
     // the report.
     plat_audio_crash_silence();
@@ -209,6 +215,8 @@ typedef struct Report {
     char title[160];
     char *body;
     const char *extra; /* REPORT_TEST_RUN: the run's summary. */
+    char *recSummary;  /* The flight recorder's summary (rec_format_summary), or NULL. */
+    char game[512];    /* What the game was doing, in words (REPORT_BUTTON). */
     BugReportFile files[MAX_FILES];
     int fileCount;
 } Report;
@@ -282,8 +290,45 @@ static void free_report(Report *report) {
         free((void *) report->files[i].data);
     }
     free(report->body);
+    free(report->recSummary);
     report->body = NULL;
+    report->recSummary = NULL;
     report->fileCount = 0;
+}
+
+/*
+ * A flight recorder state (plat/recorder.h) as timeline.csv among the files, and its summary in the body. A state
+ * saved by a crash or a hang is checked first: one from another build's layout is skipped.
+ */
+static void attach_recording(Report *report, const RecState *state, const char *fileName) {
+    char path[160];
+    char *csv;
+    if (state == NULL || state->magic != REC_MAGIC || state->version != REC_VERSION || state->size != sizeof(RecState)) {
+        return;
+    }
+    csv = rec_format_csv(state);
+    if (csv != NULL) {
+        snprintf(path, sizeof(path), "%s/%s", DATA_DIR, fileName);
+        if (plat_save_file(path, csv, strlen(csv))) {
+            add_file(report, fileName);
+        }
+        free(csv);
+    }
+    free(report->recSummary);
+    report->recSummary = rec_format_summary(state);
+}
+
+/* A recorder state that a crash or a hang wrote to the SD card, as attach_recording takes it. */
+static void attach_saved_recording(Report *report, const char *savedName, const char *fileName) {
+    char path[160];
+    unsigned int size = 0;
+    RecState *state;
+    snprintf(path, sizeof(path), "%s/%s", DATA_DIR, savedName);
+    state = plat_load_file(path, &size);
+    if (state != NULL && size == sizeof(RecState)) {
+        attach_recording(report, state, fileName);
+    }
+    free(state);
 }
 
 /* The last lines of text, at most maxLength bytes, starting at a whole line. */
@@ -344,9 +389,22 @@ static void build_body(Report *report, const char *crashText, const char *recent
         if (pv_active()) {
             ADD("**Voices:** %s\n", pv_status());
         }
+        if (report->game[0] != '\0') {
+            ADD("**Game:** %s\n", report->game);
+        }
+    }
+    {
+        static char settings[2048];
+        settings_describe(settings, sizeof(settings));
+        ADD("**Settings now:** %s\n", settings[0] != '\0' ? settings : "(none saved: all defaults)");
+        ADD("**Up:** %llu s; debug build\n", plat_time_ns() / 1000000000ULL);
     }
     if (report->extra != NULL) {
         ADD("\n### Test run\n\n%s\n", report->extra);
+    }
+    if (report->recSummary != NULL) {
+        ADD("\n### Before the report (flight recorder; every frame is in `timeline.csv`)\n\n%s",
+            tail(report->recSummary, 6000));
     }
     if (crashText != NULL) {
         ADD("\n### Crash\n\n```\n%s\n```\n", tail(crashText, 12000));
@@ -484,12 +542,18 @@ int bugreport_boot(void) {
         move_file(DATA_DIR "/hang_log.txt", DATA_DIR "/last_hang_log.txt");
         move_file(DATA_DIR "/gpu_hang.txt", DATA_DIR "/last_gpu_hang.txt");
         move_file(DATA_DIR "/gpu_hang_cmd.bin", DATA_DIR "/last_gpu_hang_cmd.bin");
+        move_file(DATA_DIR "/crash_rec.bin", DATA_DIR "/last_crash_rec.bin");
+        move_file(DATA_DIR "/hang_rec.bin", DATA_DIR "/last_hang_rec.bin");
     } else {
         remove(DATA_DIR "/crash.txt");
         remove(DATA_DIR "/last_hang_log.txt");
         remove(DATA_DIR "/last_gpu_hang.txt");
         remove(DATA_DIR "/last_gpu_hang_cmd.bin");
+        remove(DATA_DIR "/last_crash_rec.bin");
+        remove(DATA_DIR "/last_hang_rec.bin");
     }
+    remove(DATA_DIR "/crash_rec.bin");
+    remove(DATA_DIR "/hang_rec.bin");
     remove(DATA_DIR "/hang_log.txt");
     remove(DATA_DIR "/gpu_hang.txt");
     remove(DATA_DIR "/gpu_hang_cmd.bin");
@@ -559,6 +623,12 @@ int bugreport_boot(void) {
             snprintf(first, sizeof(first), "%s", crashText);
             first[strcspn(first, "\n")] = '\0';
             snprintf(report.title, sizeof(report.title), "[3DS bug report] crash: %s", first);
+        }
+        // The flight recorder as the crash or the hang left it (the crash's is the later one).
+        if (file_exists(DATA_DIR "/last_crash_rec.bin")) {
+            attach_saved_recording(&report, "last_crash_rec.bin", "last_timeline.csv");
+        } else {
+            attach_saved_recording(&report, "last_hang_rec.bin", "last_timeline.csv");
         }
         add_file(&report, "last_log.txt");
         add_file(&report, "last_crash.txt");
@@ -649,12 +719,21 @@ static void report_now(void) {
     unsigned int logged;
     static char recent[32 * 1024];
 
+    static RecState sRecording;
+    char game[512];
+
+    rec_press("bug report requested");
     show_status(haveToken ? "Bug report: taking a snapshot"
                           : "Bug report: no token in sdmc:/3ds/dkr/bugreport.txt; saving a snapshot only");
     plat_log("bug report requested");
     // The log as it was before the snapshot, which fills it with the frame's draws (those are in its own file).
     plat_log_recent(recent, sizeof(recent));
     gPlatSnapshotRequested = 1;
+    // What the game is doing, and the flight recorder half a second on (a few frames past the press, before the
+    // snapshot's slow frames push the time before it out).
+    rec_describe_game(game, sizeof(game), 500);
+    svcSleepThread(500 * 1000 * 1000);
+    rec_copy(&sRecording);
     // A snapshot writes a line for every display list command and draw, which takes the SD card some 20 seconds. So
     // the report waits as long as the log keeps growing (up to two minutes), and gives up after 5 quiet seconds: then
     // the renderer is stuck and the report goes without a snapshot.
@@ -679,6 +758,9 @@ static void report_now(void) {
     memset(&report, 0, sizeof(report));
     report.kind = REPORT_BUTTON;
     plat_log_drain(); // The snapshot's files are written behind the renderer's back.
+    snprintf(report.game, sizeof(report.game), "%s", game);
+    // First, as it is small and usually tells the most.
+    attach_recording(&report, &sRecording, "timeline.csv");
     if (gPlatSnapshotSaved != before) {
         char name[64];
         int frame = gPlatSnapshotSaved, largeRecent;
@@ -698,6 +780,10 @@ static void report_now(void) {
         add_file(&report, name);
         snprintf(name, sizeof(name), "diff_%05d_cmd.bin", frame);
         add_file(&report, name);
+        // The frames of the last few seconds most like a flash (gfx_c3d.c, history_save): a glitch seen for a moment
+        // is over before the snapshot. After the snapshot's own files, so it can't push them out of the budget.
+        snprintf(name, sizeof(name), "diff_%05d_flash.bin", frame);
+        add_file(&report, name);
         if (largeRecent) {
             snprintf(name, sizeof(name), "diff_%05d_recent1.bin", frame);
             add_file(&report, name);
@@ -713,6 +799,7 @@ static void report_now(void) {
         add_file(&report, name);
     }
     add_file(&report, "env.txt");
+    add_file(&report, "settings.txt");
     add_file(&report, "gpu_hang.txt");
     add_file(&report, "gpu_hang_cmd.bin");
     build_body(&report, NULL, recent);
@@ -772,6 +859,14 @@ static void send_test_results(void) {
     add_file(&report, "switch_bench_results.csv");
     add_file(&report, "autorun_problems.txt");
     add_file(&report, "env.txt");
+    add_file(&report, "settings.txt");
+    {
+        // The flight recorder's last half minute (the end of the last race), and its hitch counts since start-up.
+        static RecState sRecording;
+        rec_copy(&sRecording);
+        attach_recording(&report, &sRecording, "timeline.csv");
+    }
+    add_file(&report, "autorun_hitches.txt"); // Last: the largest after a long run.
     plat_log_recent(recent, sizeof(recent));
     build_body(&report, NULL, recent);
     sShow = show_status;

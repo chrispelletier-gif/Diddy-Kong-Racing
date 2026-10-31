@@ -980,7 +980,7 @@ static void draw_messages(const State *s, int y0, int y1) {
  * names itself in the corner and lists the bug report (plat.h PLAT_DEBUG_TOOLS).
  */
 static void draw_controls(int y0, int y1) {
-    enum { MAX_ROWS = 10 };
+    enum { MAX_ROWS = 11, BUG_ROW = 10 };
     static const struct {
         unsigned short actions; // 0: a fixed key.
         const char *key, *what;
@@ -991,9 +991,10 @@ static void draw_controls(int y0, int y1) {
         { CTRL_N64_R, NULL, "Hop / drift" },
         { CTRL_N64_Z, NULL, "Use item" },
         { CTRL_N64_LOOK_BACK, NULL, "Look back" },
-        { CTRL_N64_CU | CTRL_N64_CD | CTRL_N64_CL | CTRL_N64_CR, NULL, "C buttons" },
+        { CTRL_N64_CU, NULL, "Camera view" },
+        { CTRL_N64_CD, NULL, "Track arrows" },
+        { CTRL_N64_CR, NULL, "HUD toggle" },
         { 0, "START", "Pause" },
-        { CTRL_N64_L, NULL, "N64 L" },
         { 0, "SELECT+touch", "Bug report" },
     };
     char keys[MAX_ROWS][24];
@@ -1001,7 +1002,7 @@ static void draw_controls(int y0, int y1) {
     int i, count = 0, lineHeight = font_ready(FONT_SMALL) ? 12 : 10, keyWidth[2] = { 0, 0 }, top = y0 + 4;
     box(4, y0, BS_WIDTH - 4, y1, BOX_FILL, BOX_EDGE);
     for (i = 0; i < (int) (sizeof(sRows) / sizeof(sRows[0])); i++) {
-        if (i == 9 && !PLAT_DEBUG_TOOLS) {
+        if (i == BUG_ROW && !PLAT_DEBUG_TOOLS) {
             continue; // A player's build has no bug reports.
         }
         if (sRows[i].actions != 0) {

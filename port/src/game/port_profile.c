@@ -5,7 +5,9 @@
  *                   few seconds. The Settings menu's Profiler row on the bottom screen does the same, and is
  *                   remembered in profiler.txt in the data directory. The unattended test run (DKR_AUTORUN) profiles
  *                   and logs too, but only shows the readout if one of those is on.
- * While it is off, every hook returns after one check.
+ * While it is off, the stages and counters are still collected (prof_recording) for the flight recorder
+ * (port/src/plat/recorder.c), which keeps every frame's row; only the readout, the log lines and the renderer's parts
+ * (prof_part, which reads the clock around every draw) wait for it.
  *
  * Each stage has exactly one writer thread, which keeps a running total in microseconds; readers take the difference
  * between two snapshots, so nothing is ever reset under a writer's feet. 32-bit totals are read and written in one
@@ -16,12 +18,15 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "plat/recorder.h"
+#include "gfx/gfx_split.h"
 
 #define USER_FILE "profiler.txt"
 
 static s32 sEnabled = -1;      // DKR_PROFILE.
 static volatile s32 sUserOn;   // The bottom screen button.
-static s32 sGameThreadOn;      // Whether the game thread is profiling (it starts and stops at the top of a frame).
+static s32 sGameThreadOn;      // Whether the game thread is timing its frames (from the top of one): 2 while the
+                               // readout is on too.
 
 /* Running totals (only ever increased, by the stage's own thread). */
 static volatile u32 sTotalUs[PROF_STAGE_COUNT];
@@ -42,6 +47,7 @@ static unsigned long long sTaskTextureNs;
 static unsigned long long sMarkNs[4];
 static unsigned long long sLogicStartNs;
 static unsigned long long sLogicNs; // Logic time of the current frame.
+static u32 sBuildUs;                // Logic + scene time of the current frame.
 static unsigned long long sLastFrameEndNs;
 static u32 sGameFrames;
 
@@ -79,19 +85,30 @@ static void user_file_path(char *path, s32 size) {
     plat_snprintf(path, size, "%s/" USER_FILE, plat_data_dir());
 }
 
-/* On with DKR_PROFILE, the Settings menu's Profiler row, and during the unattended test run (which can start and stop at any time). */
-int prof_enabled(void) {
-    if (sEnabled < 0) {
-        char path[256];
-        char text[16];
-        int length;
-        user_file_path(path, sizeof(path));
-        length = plat_load_file_start(path, text, sizeof(text) - 1);
-        text[length > 0 ? length : 0] = '\0';
-        sUserOn = PLAT_DEBUG_TOOLS && text[0] == '1'; // A player's build has no Profiler row to turn it off.
-        sEnabled = plat_getenv("DKR_PROFILE") != NULL;
+/* The first call's read of the Profiler row's file and DKR_PROFILE, out of prof_enabled: the renderer asks it at
+ * every draw. */
+static PLAT_COLD void read_profile_setting(void) {
+    char path[256];
+    char text[16];
+    int length;
+    user_file_path(path, sizeof(path));
+    length = plat_load_file_start(path, text, sizeof(text) - 1);
+    text[length > 0 ? length : 0] = '\0';
+    sUserOn = PLAT_DEBUG_TOOLS && text[0] == '1'; // A player's build has no Profiler row to turn it off.
+    sEnabled = plat_getenv("DKR_PROFILE") != NULL;
+}
+
+/* On with DKR_PROFILE, the Settings menu's Profiler row, and during the unattended test run (which can start and stop at any time).
+ * Out of line: one copy next to the renderer's per-draw code, rather than one in each of its callers. */
+PLAT_HOT PLAT_NOINLINE int prof_enabled(void) {
+    if (__builtin_expect(sEnabled < 0, 0)) {
+        read_profile_setting();
     }
     return sEnabled || sUserOn || port_autorun_enabled();
+}
+
+int prof_recording(void) {
+    return TRUE;
 }
 
 int prof_user_enabled(void) {
@@ -108,11 +125,10 @@ void prof_set_user_enabled(int on) {
 }
 
 void prof_add(int stage, unsigned long long ns) {
-    if (!prof_enabled()) {
-        return;
-    }
     if (stage == PROF_GPU_WAIT) {
-        sTaskGpuWaitNs += ns;
+        if (!gfx_split_active()) { // Else the waits are the second renderer thread's, not the walk's
+            sTaskGpuWaitNs += ns;
+        }
     } else if (stage == PROF_TEXTURE) {
         sTaskTextureNs += ns;
     }
@@ -130,9 +146,7 @@ void prof_add(int stage, unsigned long long ns) {
 }
 
 void prof_count(int counter, unsigned int n) {
-    if (prof_enabled()) {
-        sCounters[counter] += n;
-    }
+    sCounters[counter] += n;
 }
 
 static unsigned long long sPartNs[PROF_PART_COUNT];
@@ -173,9 +187,6 @@ unsigned long long prof_clock_read_cost(void) {
 void prof_render_task(unsigned long long totalNs) {
     unsigned long long busyNs;
     s32 w;
-    if (!prof_enabled()) {
-        return;
-    }
     // Whatever the task spent neither waiting for the GPU nor on textures was display list work.
     busyNs = totalNs > sTaskGpuWaitNs ? totalNs - sTaskGpuWaitNs : 0;
     // Nor timing the walk's parts, so the renderer's time reads the same with or without them.
@@ -199,15 +210,11 @@ void prof_render_task(unsigned long long totalNs) {
 }
 
 void prof_logic_begin(void) {
-    if (prof_enabled()) {
-        sLogicStartNs = plat_time_ns();
-    }
+    sLogicStartNs = plat_time_ns();
 }
 
 void prof_logic_end(void) {
-    if (prof_enabled()) {
-        sLogicNs += plat_time_ns() - sLogicStartNs;
-    }
+    sLogicNs += plat_time_ns() - sLogicStartNs;
 }
 
 void prof_window_start(int window) {
@@ -359,6 +366,20 @@ static void show_overlay(void) {
         plat_overlay_show("");
     }
     if (++sLogCounter % 4 == 0) {
+        static unsigned long long sScreenLoggedNs;
+        static unsigned long sScreenLoggedDraws;
+        static u32 sScreenLoggedFrames;
+        unsigned long long screenNs = plat_screen_busy_ns();
+        unsigned long screenDraws = plat_screen_draws();
+        u32 frames = sRenderedFrames - sScreenLoggedFrames;
+        if (screenDraws != sScreenLoggedDraws && frames > 0) {
+            // P36: what drawing the bottom screen costs (on an Old 3DS it shares the game's core).
+            port_log("bottom screen: %.2f ms a frame at most, %.1f areas drawn a frame",
+                     (screenNs - sScreenLoggedNs) / 1e6 / frames, (double) (screenDraws - sScreenLoggedDraws) / frames);
+        }
+        sScreenLoggedNs = screenNs;
+        sScreenLoggedDraws = screenDraws;
+        sScreenLoggedFrames = sRenderedFrames;
         port_log("profile: %.1f fps (30fps %d%%), worst %u ms, logic %.2f scene %.2f rdp %.2f tex %.2f gpu %.2f "
                  "audio %.2f ms, limit %s, idle game core %d%% render core %d%%",
                  fps, percent(s.rateFrames[2] + s.rateFrames[1], s.gameFrames), s.worstFrameUs / 1000,
@@ -367,15 +388,21 @@ static void show_overlay(void) {
                  per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames), per_frame_ms(&s, PROF_AUDIO, s.gameFrames),
                  prof_limit(&s), percent((u32) (s.idleNs / 1000), (u32) (s.elapsedNs / 1000)),
                  percent((u32) (s.renderIdleNs / 1000), (u32) (s.elapsedNs / 1000)));
-        if (sPartNs[PROF_PART_WALK_TIMER] != sPartLoggedNs[PROF_PART_WALK_TIMER]) {
+        {
             // The renderer's parts since the last log line (the counters are the renderer's, read without a lock:
-            // a part caught mid-update is off by one draw). The backend's are only timed on the 3DS.
+            // a part caught mid-update is off by one draw). The backend's are only timed on the 3DS, and either
+            // breakdown can be off (DKR_WALK_PARTS, DKR_DRAW_PARTS: the Old 3DS's defaults, as their clock reads are
+            // system calls there), which leaves the renderer's time above whole.
             u32 frames = sRenderedFrames - sPartLoggedFrames;
             double perFrame[PROF_PART_COUNT];
-            s32 p, backendTimed = sPartNs[PROF_PART_BACKEND] != sPartLoggedNs[PROF_PART_BACKEND];
+            s32 p, walkTimed = FALSE;
+            s32 backendTimed = sPartNs[PROF_PART_BACKEND] != sPartLoggedNs[PROF_PART_BACKEND];
             for (p = 0; p < PROF_PART_COUNT; p++) {
                 unsigned long long now = sPartNs[p];
                 perFrame[p] = frames ? (now - sPartLoggedNs[p]) / 1e6 / frames : 0.0;
+                if (p >= PROF_PART_WALK_COMMANDS && p <= PROF_PART_WALK_FRAMEEND && now != sPartLoggedNs[p]) {
+                    walkTimed = TRUE;
+                }
                 sPartLoggedNs[p] = now;
             }
             sPartLoggedFrames = sRenderedFrames;
@@ -387,47 +414,113 @@ static void show_overlay(void) {
                          s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
             }
+            if (frames > 0) {
+                // What the draws are for (the game's tags, port_drawtag.h): where crowded moments cost the renderer.
+                static const char *const sKinds[4] = { "other", "track", "racers", "objects" };
+                unsigned long mix[4][3];
+                char line[256];
+                int k, at = 0;
+                gfx_draw_mix_take(mix);
+                for (k = 0; k < 4; k++) {
+                    at += plat_snprintf(line + at, sizeof(line) - at, "%s%s %lu draws %lu tris %lu verts", k ? ", " : "",
+                                        sKinds[k], mix[k][0] / frames, mix[k][1] / frames, mix[k][2] / frames);
+                }
+                port_log("draw mix a frame: %s", line);
+                if (gfx_split_active()) {
+                    unsigned long long walkWait, busy;
+                    unsigned int backendFrames, wakes;
+                    gfx_split_take_times(&walkWait, &busy, &backendFrames, &wakes);
+                    port_log("two-core renderer: backend busy %.2f ms a frame, woken %.1f times a frame; the walk "
+                             "waited %.2f ms a frame for it",
+                             backendFrames ? busy / 1e6 / backendFrames : 0.0,
+                             backendFrames ? (double) wakes / backendFrames : 0.0, walkWait / 1e6 / frames);
+                }
+            }
             // The frame end's waits are shown apart from its work.
             perFrame[PROF_PART_WALK_FRAMEEND] -=
                 perFrame[PROF_PART_END_GPU_WAIT] + perFrame[PROF_PART_PRESENT_WAIT];
             if (perFrame[PROF_PART_WALK_FRAMEEND] < 0.0) {
                 perFrame[PROF_PART_WALK_FRAMEEND] = 0.0;
             }
-            port_log("display list walk: %.2f ms (commands %.2f, matrices %.2f, vertices %.2f, triangles %.2f, "
-                     "rectangles %.2f, draw state %.2f, texture lookups %.2f, frame end %.2f), waits at the frame "
-                     "end: GPU %.2f, screen %.2f ms, timer %.2f ms taken out",
-                     perFrame[PROF_PART_WALK_COMMANDS] + perFrame[PROF_PART_WALK_MATRICES] +
-                         perFrame[PROF_PART_WALK_VERTICES] + perFrame[PROF_PART_WALK_TRIANGLES] +
-                         perFrame[PROF_PART_WALK_RECTS] + perFrame[PROF_PART_WALK_DRAWSTATE] +
-                         perFrame[PROF_PART_WALK_TEXTURES] + perFrame[PROF_PART_WALK_FRAMEEND],
-                     perFrame[PROF_PART_WALK_COMMANDS], perFrame[PROF_PART_WALK_MATRICES],
-                     perFrame[PROF_PART_WALK_VERTICES], perFrame[PROF_PART_WALK_TRIANGLES],
-                     perFrame[PROF_PART_WALK_RECTS], perFrame[PROF_PART_WALK_DRAWSTATE],
-                     perFrame[PROF_PART_WALK_TEXTURES], perFrame[PROF_PART_WALK_FRAMEEND],
-                     perFrame[PROF_PART_END_GPU_WAIT], perFrame[PROF_PART_PRESENT_WAIT],
-                     perFrame[PROF_PART_WALK_TIMER]);
+            if (!walkTimed) {
+                port_log("%s: not timed in parts (DKR_WALK_PARTS=0%s), waits at the frame end: GPU %.2f, screen "
+                         "%.2f ms, timer %.2f ms taken out",
+                         backendTimed ? "display list walk" : "renderer parts",
+                         backendTimed ? "" : ", DKR_DRAW_PARTS=0", perFrame[PROF_PART_END_GPU_WAIT],
+                         perFrame[PROF_PART_PRESENT_WAIT], perFrame[PROF_PART_WALK_TIMER]);
+            } else {
+                port_log("display list walk: %.2f ms (commands %.2f, matrices %.2f, vertices %.2f, triangles %.2f, "
+                         "rectangles %.2f, draw state %.2f, texture lookups %.2f, frame end %.2f), waits at the frame "
+                         "end: GPU %.2f, screen %.2f ms, timer %.2f ms taken out",
+                         perFrame[PROF_PART_WALK_COMMANDS] + perFrame[PROF_PART_WALK_MATRICES] +
+                             perFrame[PROF_PART_WALK_VERTICES] + perFrame[PROF_PART_WALK_TRIANGLES] +
+                             perFrame[PROF_PART_WALK_RECTS] + perFrame[PROF_PART_WALK_DRAWSTATE] +
+                             perFrame[PROF_PART_WALK_TEXTURES] + perFrame[PROF_PART_WALK_FRAMEEND],
+                         perFrame[PROF_PART_WALK_COMMANDS], perFrame[PROF_PART_WALK_MATRICES],
+                         perFrame[PROF_PART_WALK_VERTICES], perFrame[PROF_PART_WALK_TRIANGLES],
+                         perFrame[PROF_PART_WALK_RECTS], perFrame[PROF_PART_WALK_DRAWSTATE],
+                         perFrame[PROF_PART_WALK_TEXTURES], perFrame[PROF_PART_WALK_FRAMEEND],
+                         perFrame[PROF_PART_END_GPU_WAIT], perFrame[PROF_PART_PRESENT_WAIT],
+                         perFrame[PROF_PART_WALK_TIMER]);
+            }
         }
     }
     prof_window_start(PROF_WINDOW_OVERLAY);
 }
 
+/* The flight recorder's row for the frame just ended: the game thread's stages, and what the renderer, the GPU and
+ * the sound did since the row before (from the running totals). */
+static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned long long now) {
+    static u32 sLastTotalUs[PROF_STAGE_COUNT], sLastCounters[PROF_COUNTER_COUNT];
+    u32 totals[PROF_STAGE_COUNT], counters[PROF_COUNTER_COUNT];
+    u32 logicUs = (u32) (sLogicNs / 1000);
+    RecFrame row;
+    s32 i;
+
+    for (i = 0; i < PROF_STAGE_COUNT; i++) {
+        totals[i] = sTotalUs[i];
+    }
+    for (i = 0; i < PROF_COUNTER_COUNT; i++) {
+        counters[i] = sCounters[i];
+    }
+    bzero(&row, sizeof(row));
+    row.periodUs = periodUs;
+    row.logicUs = logicUs;
+    row.sceneUs = buildUs > logicUs ? buildUs - logicUs : 0;
+    row.renderWaitUs = (u32) ((sMarkNs[PROF_MARK_WAITED] - sMarkNs[PROF_MARK_BUILT]) / 1000);
+    row.vsyncUs = (u32) ((now - sMarkNs[PROF_MARK_WAITED]) / 1000);
+    row.rdpUs = totals[PROF_RDP] - sLastTotalUs[PROF_RDP];
+    row.texUs = totals[PROF_TEXTURE] - sLastTotalUs[PROF_TEXTURE];
+    row.gpuUs = totals[PROF_GPU_DRAW] - sLastTotalUs[PROF_GPU_DRAW];
+    row.gpuWaitUs = totals[PROF_GPU_WAIT] - sLastTotalUs[PROF_GPU_WAIT];
+    row.audioUs = totals[PROF_AUDIO] - sLastTotalUs[PROF_AUDIO];
+    row.tris = counters[PROF_TRIANGLES] - sLastCounters[PROF_TRIANGLES];
+    row.draws = (unsigned short) (counters[PROF_DRAWS] - sLastCounters[PROF_DRAWS]);
+    row.texDecodes = (unsigned short) (counters[PROF_TEXTURE_UPLOADS] - sLastCounters[PROF_TEXTURE_UPLOADS]);
+    row.rate = (signed char) updateRate;
+    row.flags = prof_enabled() ? REC_FLAG_PROFILER : 0;
+    for (i = 0; i < PROF_STAGE_COUNT; i++) {
+        sLastTotalUs[i] = totals[i];
+    }
+    for (i = 0; i < PROF_COUNTER_COUNT; i++) {
+        sLastCounters[i] = counters[i];
+    }
+    rec_game_frame(&row);
+}
+
 void prof_game_mark(int mark, int updateRate) {
     unsigned long long now;
-    s32 w;
+    s32 w, shown = prof_enabled();
 
-    if (!prof_enabled()) {
-        if (sGameThreadOn) {
-            // Turned off: clear the readout, and start afresh if it is turned on again.
-            sGameThreadOn = FALSE;
-            sWindows[PROF_WINDOW_OVERLAY].startNs = 0;
-            sLastFrameEndNs = 0;
-            sOverlayShown = FALSE;
-            plat_overlay_show("");
-        }
-        return;
+    if (!shown && sGameThreadOn == 2) {
+        // Turned off: clear the readout, and start its window afresh if it is turned on again.
+        sGameThreadOn = TRUE;
+        sWindows[PROF_WINDOW_OVERLAY].startNs = 0;
+        sOverlayShown = FALSE;
+        plat_overlay_show("");
     }
     if (!sGameThreadOn) {
-        // Turned on part way through a frame: wait for the next one, so no stage is timed from a stale mark.
+        // The first frame: start at its top, so no stage is timed from a stale mark.
         if (mark != PROF_MARK_LOOP_START) {
             return;
         }
@@ -441,6 +534,7 @@ void prof_game_mark(int mark, int updateRate) {
             break;
         case PROF_MARK_BUILT: {
             unsigned long long build = now - sMarkNs[PROF_MARK_LOOP_START];
+            sBuildUs = (u32) (build / 1000);
             prof_add(PROF_LOGIC, sLogicNs);
             prof_add(PROF_SCENE, build > sLogicNs ? build - sLogicNs : 0);
             for (w = 0; w < PROF_WINDOW_COUNT; w++) {
@@ -478,6 +572,11 @@ void prof_game_mark(int mark, int updateRate) {
                     win->pacedFrames[periodUs < PACED_60_US ? 0 : periodUs < PACED_30_US ? 1 : periodUs < PACED_20_US ? 2 : 3]++;
                 }
             }
+            record_frame(periodUs, sBuildUs, updateRate, now);
+            if (!shown) {
+                break;
+            }
+            sGameThreadOn = 2; // The readout is in use.
             if (sWindows[PROF_WINDOW_OVERLAY].startNs == 0) {
                 prof_window_start(PROF_WINDOW_OVERLAY);
             } else if (now - sWindows[PROF_WINDOW_OVERLAY].startNs >= 1000000000ULL) {

@@ -1,6 +1,7 @@
 /* POSIX implementation of the platform layer. Used by the host (Linux/macOS) test build. */
 #define _GNU_SOURCE
 #include "plat.h"
+#include "recorder.h"
 #include "race_hud.h"
 #include "setup_screen.h"
 #include "bottom_screen.h"
@@ -49,6 +50,18 @@ unsigned long long plat_idle_ns(void) {
 }
 
 unsigned long long plat_render_idle_ns(void) {
+    return 0;
+}
+
+int plat_old_3ds(void) {
+    return 0;
+}
+
+unsigned long long plat_screen_busy_ns(void) {
+    return 0;
+}
+
+unsigned long plat_screen_draws(void) {
     return 0;
 }
 
@@ -225,6 +238,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
     return thread;
 }
 
+void plat_split_render_cores(int on) {
+    (void) on;
+}
+
 void plat_thread_set_priority(PlatThread *thread, int n64Priority) {
     (void) thread;
     (void) n64Priority;
@@ -379,11 +396,13 @@ const char *plat_data_dir(void) {
 }
 
 void plat_log(const char *fmt, ...) {
+    char buffer[512];
     va_list args;
     va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
-    fputc('\n', stderr);
+    fprintf(stderr, "%s\n", buffer);
+    rec_log_line("", buffer);
 }
 
 void plat_log_keep(void) {
