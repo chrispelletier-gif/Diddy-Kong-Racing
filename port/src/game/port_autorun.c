@@ -83,6 +83,7 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "plat/recorder.h"
 #include <string.h>
 
 #define MAX_RACES 1024
@@ -93,6 +94,7 @@
 #define STATE_FILE "autorun_state.txt"
 #define RESULTS_FILE "autorun_results.csv"
 #define PROBLEMS_FILE "autorun_problems.txt"
+#define HITCH_FILE "autorun_hitches.txt" // Every hitch of the run, with its cause (the flight recorder, plat/recorder.h)
 #define HANG_FILE "autorun_hang.txt"
 #define BENCH_STATE_FILE "gpu_bench_state.txt"
 #define BENCH_RESULTS_FILE "gpu_bench_results.csv"
@@ -643,6 +645,98 @@ static const char *graphics_setup(void) {
     return text;
 }
 
+/*
+ * The flight recorder's hitches (plat/recorder.h) since the race before ended, so the results screen, the menus and the
+ * load before this race count too, each with what took the time and what happened then: written to HITCH_FILE, and
+ * counted by cause for the run's issue, which also lists the run's worst.
+ */
+#define WORST_HITCHES 8
+static unsigned int sHitchSince;
+static unsigned int sRunHitches, sRunCauses[REC_CAUSE_COUNT];
+static struct {
+    unsigned int periodUs;
+    char text[200];
+} sWorstHitches[WORST_HITCHES];
+static s32 sWorstHitchCount;
+
+static void reset_hitches(void) {
+    sHitchSince = rec_frame_now();
+    sRunHitches = 0;
+    bzero(sRunCauses, sizeof(sRunCauses));
+    sWorstHitchCount = 0;
+}
+
+static void record_hitches(const char *outcome) {
+    static char text[6 * 1024];
+    const RecState *rec = rec_state();
+    Race *race = &sRaces[sNext];
+    unsigned int counts[REC_CAUSE_COUNT], found, n;
+    s32 length, c, i;
+
+    bzero(counts, sizeof(counts));
+    length = plat_snprintf(text, sizeof(text), "\n## run %d race %d/%d: %s, %s, %s, %s", (int) sRun, (int) sNext + 1,
+                           (int) sNumRaces, track_name(race->track), sCharacterNames[(s32) race->character],
+                           sVehicleNames[(s32) race->vehicle], graphics_setup());
+    if (is_bench()) {
+        length += plat_snprintf(text + length, sizeof(text) - length, ", config %d", (int) race->config);
+    }
+    length += plat_snprintf(text + length, sizeof(text) - length, ": %s\n\n", outcome);
+    // At most 4 KB of them a race (about 15 lines), so 200 races stay within the issue's attachment budget.
+    found = rec_hitches_since(sHitchSince, text + length, 4096, counts);
+    length = strlen(text);
+    length += plat_snprintf(text + length, sizeof(text) - length, "%u hitches since the race before ended:", found);
+    for (c = 0; c < REC_CAUSE_COUNT; c++) {
+        length += plat_snprintf(text + length, sizeof(text) - length, "%s %s %u", c > 0 ? "," : "",
+                                rec_cause_name(c), counts[c]);
+        sRunCauses[c] += counts[c];
+    }
+    plat_snprintf(text + length, sizeof(text) - length, "\n");
+    sRunHitches += found;
+    append_file(HITCH_FILE, text, "# Hitches in each race of the test runs: frames half as long again as usual, with what "
+                                  "took the time and what happened then (port/src/plat/recorder.c).\n");
+
+    // The run's worst, longest first.
+    for (n = rec->hitchCount > REC_HITCHES ? rec->hitchCount - REC_HITCHES : 0; n < rec->hitchCount; n++) {
+        const RecHitch *h = &rec->hitches[n % REC_HITCHES];
+        if (h->frame < sHitchSince) {
+            continue;
+        }
+        for (i = sWorstHitchCount; i > 0 && sWorstHitches[i - 1].periodUs < h->periodUs; i--) {
+            if (i < WORST_HITCHES) {
+                sWorstHitches[i] = sWorstHitches[i - 1];
+            }
+        }
+        if (i < WORST_HITCHES) {
+            sWorstHitches[i].periodUs = h->periodUs;
+            plat_snprintf(sWorstHitches[i].text, sizeof(sWorstHitches[i].text), "race %d (%s): %.150s", (int) sNext + 1,
+                          track_name(race->track), h->text);
+            if (sWorstHitchCount < WORST_HITCHES) {
+                sWorstHitchCount++;
+            }
+        }
+    }
+    sHitchSince = rec_frame_now();
+}
+
+/* The run's hitches for its issue: how many, by cause, and the worst. Returns the length written. */
+static s32 hitch_summary(char *out, s32 size) {
+    s32 length, c, i;
+    length = plat_snprintf(out, size, "\n### Hitches\n\n%u since this launch's first race (all of them, race by race, "
+                                      "are in `" HITCH_FILE "`):", sRunHitches);
+    for (c = 0; c < REC_CAUSE_COUNT && length < size; c++) {
+        length += plat_snprintf(out + length, size - length, "%s %s %u", c > 0 ? "," : "", rec_cause_name(c),
+                                sRunCauses[c]);
+    }
+    if (length < size) {
+        length += plat_snprintf(out + length, size - length, ".\n\n");
+    }
+    for (i = 0; i < sWorstHitchCount && length < size; i++) {
+        length += plat_snprintf(out + length, size - length, "- **%u ms** %s\n", sWorstHitches[i].periodUs / 1000,
+                                sWorstHitches[i].text);
+    }
+    return length < size ? length : size - 1;
+}
+
 /* Writes the results line of the race that just ended. stats may be NULL (the race never got going). */
 static void record_result(const char *outcome, s32 position, const ProfStats *stats) {
     char header[640];
@@ -878,6 +972,10 @@ static void init(void) {
     }
     plat_free(state);
     port_log("autorun: run %d, %d races, starting at %d", (int) sRun, (int) sNumRaces, (int) sNext + 1);
+    reset_hitches();
+    if (sNext == 0) {
+        io_queue(HITCH_FILE, "", NULL, FALSE); // A new run: the last one's hitches went with its issue.
+    }
     set_phase(PHASE_TITLE);
     if (sNumRaces == 0) {
         sPhase = PHASE_OFF;
@@ -1450,6 +1548,10 @@ static void send_results(const char *why) {
                                 aa_label(), 60 / plat_frame_retraces(),
                                 plat_render_ahead());
     }
+    if (length > 0 && length < (s32) sizeof(summary) - 2048) {
+        // Kept to 2 KB, so the mode's own tables below still fit.
+        length += hitch_summary(summary + length, 2048);
+    }
     if (sMode == MODE_BOSS && length > 0 && length < (s32) sizeof(summary)) {
         boss_summary(summary + length, sizeof(summary) - length);
     } else if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
@@ -1507,6 +1609,7 @@ static void end_race(const char *outcome, s32 position) {
     prof_window_read(PROF_WINDOW_SESSION, &sRaceStats);
     sOutcome = outcome;
     record_result(outcome, position, sPhase == PHASE_RACING ? &sRaceStats : NULL);
+    record_hitches(outcome);
     if (str_equal(outcome, "finished")) {
         if (sRaceStats.elapsedNs > 0) {
             sFpsSum += sRaceStats.gameFrames * 1e9 / sRaceStats.elapsedNs;

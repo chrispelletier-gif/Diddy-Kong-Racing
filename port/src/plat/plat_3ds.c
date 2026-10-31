@@ -1,5 +1,6 @@
 /* Nintendo 3DS (libctru) implementation of the platform layer. */
 #include "plat.h"
+#include "recorder.h"
 #include "bottom_screen.h"
 #include "setup_screen.h"
 #include "settings.h"
@@ -730,6 +731,10 @@ static void log_line(const char *prefix, const char *text) {
         int length = snprintf(line, sizeof(line), "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
         ring_add(line, length < (int) sizeof(line) ? length : (int) sizeof(line) - 1);
     }
+    if (sLogCopy == NULL) {
+        // The flight recorder's timeline too, but not a snapshot's draws (those have their own file).
+        rec_log_line(prefix, text);
+    }
     file = log_file();
     if (file != NULL) {
         char line[600];
@@ -1174,6 +1179,16 @@ static void log_stall_state(int seconds, unsigned idlePct, unsigned renderIdlePc
  * to hang_log.txt, which the bug report on the next launch sends, and during the unattended test run the hang is
  * written down for the next launch to record (port_autorun.c). Both files go again if drawing resumes.
  */
+/* The flight recorder as it is, 3 and 20 seconds into a stall: a freeze that ends with the power button leaves it
+ * for the next start's report (bugreport_3ds.c). Removed if drawing resumes. */
+static void save_recording(void) {
+#if PLAT_DEBUG_TOOLS
+    char path[256];
+    snprintf(path, sizeof(path), "%s/hang_rec.bin", plat_data_dir());
+    plat_save_file(path, rec_state(), sizeof(RecState));
+#endif
+}
+
 static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, unsigned idlePct,
                            unsigned renderIdlePct) {
     static char sRecent[40 * 1024];
@@ -1181,6 +1196,11 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, u
     snprintf(path, sizeof(path), "%s/autorun_hang.txt", plat_data_dir());
     snprintf(logPath, sizeof(logPath), "%s/hang_log.txt", plat_data_dir());
     if (framesDrawn || sPauseRequested) {
+        if (*stalledSeconds >= 3) {
+            char recPath[256];
+            snprintf(recPath, sizeof(recPath), "%s/hang_rec.bin", plat_data_dir());
+            remove(recPath);
+        }
         *stalledSeconds = 0;
         if (*written) {
             *written = 0;
@@ -1192,6 +1212,7 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, u
     // Idle meters are not started here: they spin at the idle thread's priority and would starve it during start-up.
     if (++*stalledSeconds == 3) {
         log_stall_state(*stalledSeconds, idlePct, renderIdlePct);
+        save_recording();
     }
     if (*stalledSeconds == 20) {
         snprintf(text, sizeof(text), "renderer stuck while %s (gfx %u/%u, vi %u)\n",
@@ -1204,6 +1225,7 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, u
             plat_save_file(path, text, strlen(text));
         }
         plat_save_file(logPath, sRecent, plat_log_recent(sRecent, sizeof(sRecent)));
+        save_recording();
     }
 }
 
@@ -1269,6 +1291,10 @@ static void watchdog(void *arg) {
         if (seconds % 5 == 0 && seconds <= 60) {
             log_line("watchdog: ", line[0]);
             log_line("watchdog: ", line[1]);
+        } else if (seconds % 5 == 0) {
+            // After the first minute only the flight recorder's timeline gets them (the log file would grow).
+            rec_event("watchdog: %s", line[0]);
+            rec_event("watchdog: %s", line[1]);
         }
     }
 }

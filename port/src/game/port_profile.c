@@ -5,7 +5,9 @@
  *                   few seconds. The Settings menu's Profiler row on the bottom screen does the same, and is
  *                   remembered in profiler.txt in the data directory. The unattended test run (DKR_AUTORUN) profiles
  *                   and logs too, but only shows the readout if one of those is on.
- * While it is off, every hook returns after one check.
+ * While it is off, the stages and counters are still collected (prof_recording) for the flight recorder
+ * (port/src/plat/recorder.c), which keeps every frame's row; only the readout, the log lines and the renderer's parts
+ * (prof_part, which reads the clock around every draw) wait for it.
  *
  * Each stage has exactly one writer thread, which keeps a running total in microseconds; readers take the difference
  * between two snapshots, so nothing is ever reset under a writer's feet. 32-bit totals are read and written in one
@@ -16,12 +18,14 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "plat/recorder.h"
 
 #define USER_FILE "profiler.txt"
 
 static s32 sEnabled = -1;      // DKR_PROFILE.
 static volatile s32 sUserOn;   // The bottom screen button.
-static s32 sGameThreadOn;      // Whether the game thread is profiling (it starts and stops at the top of a frame).
+static s32 sGameThreadOn;      // Whether the game thread is timing its frames (from the top of one): 2 while the
+                               // readout is on too.
 
 /* Running totals (only ever increased, by the stage's own thread). */
 static volatile u32 sTotalUs[PROF_STAGE_COUNT];
@@ -42,6 +46,7 @@ static unsigned long long sTaskTextureNs;
 static unsigned long long sMarkNs[4];
 static unsigned long long sLogicStartNs;
 static unsigned long long sLogicNs; // Logic time of the current frame.
+static u32 sBuildUs;                // Logic + scene time of the current frame.
 static unsigned long long sLastFrameEndNs;
 static u32 sGameFrames;
 
@@ -94,6 +99,10 @@ int prof_enabled(void) {
     return sEnabled || sUserOn || port_autorun_enabled();
 }
 
+int prof_recording(void) {
+    return TRUE;
+}
+
 int prof_user_enabled(void) {
     prof_enabled();
     return sUserOn;
@@ -108,9 +117,6 @@ void prof_set_user_enabled(int on) {
 }
 
 void prof_add(int stage, unsigned long long ns) {
-    if (!prof_enabled()) {
-        return;
-    }
     if (stage == PROF_GPU_WAIT) {
         sTaskGpuWaitNs += ns;
     } else if (stage == PROF_TEXTURE) {
@@ -130,9 +136,7 @@ void prof_add(int stage, unsigned long long ns) {
 }
 
 void prof_count(int counter, unsigned int n) {
-    if (prof_enabled()) {
-        sCounters[counter] += n;
-    }
+    sCounters[counter] += n;
 }
 
 static unsigned long long sPartNs[PROF_PART_COUNT];
@@ -173,9 +177,6 @@ unsigned long long prof_clock_read_cost(void) {
 void prof_render_task(unsigned long long totalNs) {
     unsigned long long busyNs;
     s32 w;
-    if (!prof_enabled()) {
-        return;
-    }
     // Whatever the task spent neither waiting for the GPU nor on textures was display list work.
     busyNs = totalNs > sTaskGpuWaitNs ? totalNs - sTaskGpuWaitNs : 0;
     // Nor timing the walk's parts, so the renderer's time reads the same with or without them.
@@ -199,15 +200,11 @@ void prof_render_task(unsigned long long totalNs) {
 }
 
 void prof_logic_begin(void) {
-    if (prof_enabled()) {
-        sLogicStartNs = plat_time_ns();
-    }
+    sLogicStartNs = plat_time_ns();
 }
 
 void prof_logic_end(void) {
-    if (prof_enabled()) {
-        sLogicNs += plat_time_ns() - sLogicStartNs;
-    }
+    sLogicNs += plat_time_ns() - sLogicStartNs;
 }
 
 void prof_window_start(int window) {
@@ -411,23 +408,59 @@ static void show_overlay(void) {
     prof_window_start(PROF_WINDOW_OVERLAY);
 }
 
+/* The flight recorder's row for the frame just ended: the game thread's stages, and what the renderer, the GPU and
+ * the sound did since the row before (from the running totals). */
+static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned long long now) {
+    static u32 sLastTotalUs[PROF_STAGE_COUNT], sLastCounters[PROF_COUNTER_COUNT];
+    u32 totals[PROF_STAGE_COUNT], counters[PROF_COUNTER_COUNT];
+    u32 logicUs = (u32) (sLogicNs / 1000);
+    RecFrame row;
+    s32 i;
+
+    for (i = 0; i < PROF_STAGE_COUNT; i++) {
+        totals[i] = sTotalUs[i];
+    }
+    for (i = 0; i < PROF_COUNTER_COUNT; i++) {
+        counters[i] = sCounters[i];
+    }
+    bzero(&row, sizeof(row));
+    row.periodUs = periodUs;
+    row.logicUs = logicUs;
+    row.sceneUs = buildUs > logicUs ? buildUs - logicUs : 0;
+    row.renderWaitUs = (u32) ((sMarkNs[PROF_MARK_WAITED] - sMarkNs[PROF_MARK_BUILT]) / 1000);
+    row.vsyncUs = (u32) ((now - sMarkNs[PROF_MARK_WAITED]) / 1000);
+    row.rdpUs = totals[PROF_RDP] - sLastTotalUs[PROF_RDP];
+    row.texUs = totals[PROF_TEXTURE] - sLastTotalUs[PROF_TEXTURE];
+    row.gpuUs = totals[PROF_GPU_DRAW] - sLastTotalUs[PROF_GPU_DRAW];
+    row.gpuWaitUs = totals[PROF_GPU_WAIT] - sLastTotalUs[PROF_GPU_WAIT];
+    row.audioUs = totals[PROF_AUDIO] - sLastTotalUs[PROF_AUDIO];
+    row.tris = counters[PROF_TRIANGLES] - sLastCounters[PROF_TRIANGLES];
+    row.draws = (unsigned short) (counters[PROF_DRAWS] - sLastCounters[PROF_DRAWS]);
+    row.texDecodes = (unsigned short) (counters[PROF_TEXTURE_UPLOADS] - sLastCounters[PROF_TEXTURE_UPLOADS]);
+    row.rate = (signed char) updateRate;
+    row.flags = prof_enabled() ? REC_FLAG_PROFILER : 0;
+    for (i = 0; i < PROF_STAGE_COUNT; i++) {
+        sLastTotalUs[i] = totals[i];
+    }
+    for (i = 0; i < PROF_COUNTER_COUNT; i++) {
+        sLastCounters[i] = counters[i];
+    }
+    rec_game_frame(&row);
+}
+
 void prof_game_mark(int mark, int updateRate) {
     unsigned long long now;
-    s32 w;
+    s32 w, shown = prof_enabled();
 
-    if (!prof_enabled()) {
-        if (sGameThreadOn) {
-            // Turned off: clear the readout, and start afresh if it is turned on again.
-            sGameThreadOn = FALSE;
-            sWindows[PROF_WINDOW_OVERLAY].startNs = 0;
-            sLastFrameEndNs = 0;
-            sOverlayShown = FALSE;
-            plat_overlay_show("");
-        }
-        return;
+    if (!shown && sGameThreadOn == 2) {
+        // Turned off: clear the readout, and start its window afresh if it is turned on again.
+        sGameThreadOn = TRUE;
+        sWindows[PROF_WINDOW_OVERLAY].startNs = 0;
+        sOverlayShown = FALSE;
+        plat_overlay_show("");
     }
     if (!sGameThreadOn) {
-        // Turned on part way through a frame: wait for the next one, so no stage is timed from a stale mark.
+        // The first frame: start at its top, so no stage is timed from a stale mark.
         if (mark != PROF_MARK_LOOP_START) {
             return;
         }
@@ -441,6 +474,7 @@ void prof_game_mark(int mark, int updateRate) {
             break;
         case PROF_MARK_BUILT: {
             unsigned long long build = now - sMarkNs[PROF_MARK_LOOP_START];
+            sBuildUs = (u32) (build / 1000);
             prof_add(PROF_LOGIC, sLogicNs);
             prof_add(PROF_SCENE, build > sLogicNs ? build - sLogicNs : 0);
             for (w = 0; w < PROF_WINDOW_COUNT; w++) {
@@ -478,6 +512,11 @@ void prof_game_mark(int mark, int updateRate) {
                     win->pacedFrames[periodUs < PACED_60_US ? 0 : periodUs < PACED_30_US ? 1 : periodUs < PACED_20_US ? 2 : 3]++;
                 }
             }
+            record_frame(periodUs, sBuildUs, updateRate, now);
+            if (!shown) {
+                break;
+            }
+            sGameThreadOn = 2; // The readout is in use.
             if (sWindows[PROF_WINDOW_OVERLAY].startNs == 0) {
                 prof_window_start(PROF_WINDOW_OVERLAY);
             } else if (now - sWindows[PROF_WINDOW_OVERLAY].startNs >= 1000000000ULL) {

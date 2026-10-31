@@ -275,13 +275,27 @@ The issue body has the build, the console, the counters and the end of the log. 
 lines; the body has the latest ones. When the GPU stops responding, the game saves `gpu_hang.txt` (the GPU's command
 queue, marking the command list it stopped in, and every draw of the stuck frame, those in that list starred) and
 `gpu_hang_cmd.bin` (the frame's command list), and 20 seconds into any hang `hang_log.txt` (the latest log lines).
-They go with a report sent right away, or as `last_*` files with the report on the next launch. To get them back:
+They go with a report sent right away, or as `last_*` files with the report on the next launch.
+
+A debug build also keeps a flight recorder going all the time (`port/src/plat/recorder.h`), whether the Profiler row
+is on or not: a row for each of the last 1024 game frames (the game thread's stages, the renderer's, texture decodes,
+the GPU's time, triangles, sound gaps, and what the game was doing), the last 512 events (every log line, settings
+changes, every SD card read and write with how long it took, the watchdog's counters, the moment the report was asked
+for) and the last 256 hitches (frames half as long again as the usual pace) with what took the time and what happened
+then. Every report attaches it as `timeline.csv` and sums it up in the body (the slowest frames and their causes), with
+the game's state in words and every saved setting. A crash or a stall of 3 seconds saves it too, and the next
+launch's report has it as `last_timeline.csv`. The test runs and benches write every race's hitches to
+`autorun_hitches.txt` and list the run's worst in their issue. To get them back:
 
 ```sh
 python3 port/tools/bugreport_fetch.py --list        # open reports
 python3 port/tools/bugreport_fetch.py 12             # saves issue 12 to bugreport_12/
 python3 port/tools/diff_frames.py bugreport_12 bugreport_12/diff
+python3 port/tools/timeline_report.py bugreport_12/timeline.csv   # the frames around the press, the slowest ones
 ```
+
+On the host build, `DKR_REC_TEST=n` presses the shortcut at game frame n and writes `rec_timeline.csv`,
+`rec_summary.txt` and `rec_game.txt` to the data directory 30 frames later.
 
 A crash report gives `pc` and `lr`; with the `dkr.elf` of the same build (the `Build` line is its commit),
 `arm-none-eabi-addr2line -f -e dkr.elf <pc> <lr>` names the functions.

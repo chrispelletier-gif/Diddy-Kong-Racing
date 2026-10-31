@@ -10,6 +10,8 @@
 int settings_get(const char *key, int fallback);
 /* Changes key and saves the file. */
 void settings_set(const char *key, int value);
+/* Every saved setting as "key=value, key=value", for bug reports. */
+void settings_describe(char *out, int size);
 /* Holds settings_set's file writes back while on (one write when it goes off). */
 void settings_defer(int on);
 

@@ -1,6 +1,7 @@
 /* POSIX implementation of the platform layer. Used by the host (Linux/macOS) test build. */
 #define _GNU_SOURCE
 #include "plat.h"
+#include "recorder.h"
 #include "race_hud.h"
 #include "setup_screen.h"
 #include "bottom_screen.h"
@@ -379,11 +380,13 @@ const char *plat_data_dir(void) {
 }
 
 void plat_log(const char *fmt, ...) {
+    char buffer[512];
     va_list args;
     va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
-    fputc('\n', stderr);
+    fprintf(stderr, "%s\n", buffer);
+    rec_log_line("", buffer);
 }
 
 void plat_log_keep(void) {

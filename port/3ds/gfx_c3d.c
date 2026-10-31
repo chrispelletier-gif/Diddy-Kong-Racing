@@ -1573,7 +1573,7 @@ static void wait_for_present(void) {
     for (i = 0; i < 70 && gspIsPresentPending(GSP_SCREEN_TOP); i++) {
         svcSleepThread(500 * 1000);
     }
-    if (prof_enabled()) {
+    if (prof_recording()) {
         // Waiting, like waiting for the GPU, not renderer work.
         unsigned long long ns = plat_time_ns() - start;
         prof_add(PROF_GPU_WAIT, ns);
@@ -2530,7 +2530,7 @@ static void wait_for_gpu(int measure) {
         transform_frame_drawn(sSlots[sOnGpu].frame);
         adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
     }
-    if (measure && prof_enabled()) {
+    if (measure && prof_recording()) {
         prof_add(PROF_GPU_WAIT, plat_time_ns() - waitStart);
         if (sOnGpu >= 0) {
             // How long the GPU took to draw the previous frame, which it has just finished.

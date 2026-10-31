@@ -1,5 +1,6 @@
 /* Platform helpers shared by every target (plain C library). */
 #include "plat.h"
+#include "recorder.h"
 #include "settings.h"
 
 #include <stdarg.h>
@@ -116,7 +117,26 @@ static FILE *open_for_reading(const char *path) {
     return f;
 }
 
+/* SD card use goes on the flight recorder's timeline with how long it took, as it is a usual cause of hitches. */
+static const char *base_name(const char *path) {
+    const char *slash = strrchr(path, '/');
+    return slash != NULL ? slash + 1 : path;
+}
+
+static void record_file_use(const char *what, const char *path, long bytes, unsigned long long startNs) {
+    rec_event("SD %s %s: %ld bytes, %.1f ms", what, base_name(path), bytes, (plat_time_ns() - startNs) / 1e6);
+}
+
+static void *load_file(const char *path, unsigned int *size);
+
 void *plat_load_file(const char *path, unsigned int *size) {
+    unsigned long long start = plat_time_ns();
+    void *data = load_file(path, size);
+    record_file_use(data != NULL ? "read" : "read (none)", path, data != NULL ? (long) *size : 0, start);
+    return data;
+}
+
+static void *load_file(const char *path, unsigned int *size) {
     FILE *f = open_for_reading(path);
     long len;
     void *data;
@@ -143,14 +163,17 @@ void *plat_load_file(const char *path, unsigned int *size) {
 }
 
 int plat_load_file_start(const char *path, void *data, unsigned int size) {
+    unsigned long long start = plat_time_ns();
     FILE *f = open_for_reading(path);
     size_t got;
 
     if (f == NULL) {
+        record_file_use("read (none)", path, 0, start);
         return -1;
     }
     got = fread(data, 1, size, f);
     fclose(f);
+    record_file_use("read", path, (long) got, start);
     return (int) got;
 }
 
@@ -158,7 +181,16 @@ int plat_load_file_start(const char *path, void *data, unsigned int size) {
  * Written to a temporary file which then replaces the old one, so that losing power or crashing part way leaves either
  * the old file or the new one, never a cut-off one. Returns 0 if anything failed (the old file is then kept).
  */
+static int save_file(const char *path, const void *data, unsigned int size);
+
 int plat_save_file(const char *path, const void *data, unsigned int size) {
+    unsigned long long start = plat_time_ns();
+    int ok = save_file(path, data, size);
+    record_file_use(ok ? "write" : "write FAILED", path, (long) size, start);
+    return ok;
+}
+
+static int save_file(const char *path, const void *data, unsigned int size) {
     char temp[300];
     FILE *f;
     int ok;
@@ -179,6 +211,7 @@ int plat_save_file(const char *path, const void *data, unsigned int size) {
 }
 
 int plat_append_file(const char *path, const void *data, unsigned int size) {
+    unsigned long long start = plat_time_ns();
     FILE *f = fopen(path, "ab");
     int ok;
 
@@ -187,6 +220,7 @@ int plat_append_file(const char *path, const void *data, unsigned int size) {
     }
     ok = fwrite(data, 1, size, f) == size;
     ok = fclose(f) == 0 && ok;
+    record_file_use(ok ? "append" : "append FAILED", path, (long) size, start);
     return ok;
 }
 

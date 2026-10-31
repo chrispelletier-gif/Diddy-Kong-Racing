@@ -49,7 +49,7 @@ PORT_GAME_SRC := $(wildcard src/*.c src/os/*.c src/game/*.c src/gfx/*.c src/audi
 # Port sources that use the platform's own headers.
 PORT_SYS_SRC := src/plat/plat_common.c src/plat/input_script.c $(wildcard src/gfx/sys/*.c src/audio/sys/*.c)
 PORT_SYS_SRC += src/plat/settings.c src/plat/controls.c src/plat/bottom_screen.c src/plat/options.c \
-                src/plat/save_backups.c
+                src/plat/save_backups.c src/plat/recorder.c
 
 ifeq ($(TARGET),3ds)
   PORT_SYS_SRC += src/plat/plat_3ds.c src/plat/bugreport.c $(wildcard 3ds/*.c)
@@ -60,9 +60,9 @@ endif
 # A player's build (RELEASE=1) leaves the debug tools out: the profiler, the test runs, bug reports (crash.txt is still
 # written), the updater and the reference renderer. src/release/ stands in for what the rest of the port calls.
 ifeq ($(RELEASE),1)
-  PORT_GAME_SRC := $(filter-out src/game/port_autorun.c src/game/port_profile.c,$(PORT_GAME_SRC)) \
+  PORT_GAME_SRC := $(filter-out src/game/port_autorun.c src/game/port_profile.c src/game/port_recorder.c,$(PORT_GAME_SRC)) \
                    src/release/debug_stubs.c
-  PORT_SYS_SRC  := $(filter-out src/plat/bugreport.c 3ds/net_3ds.c 3ds/gfx_ref.c,$(PORT_SYS_SRC))
+  PORT_SYS_SRC  := $(filter-out src/plat/bugreport.c src/plat/recorder.c 3ds/net_3ds.c 3ds/gfx_ref.c,$(PORT_SYS_SRC))
 endif
 
 #### Flags ####

@@ -44,6 +44,12 @@ enum ProfMark { PROF_MARK_LOOP_START, PROF_MARK_BUILT, PROF_MARK_WAITED, PROF_MA
 #define PROF_RATE_BUCKETS 7
 
 int prof_enabled(void);
+/*
+ * Whether the stages and counters are being collected: always in a debug build, for the flight recorder
+ * (plat/recorder.h), whether or not the profiler's readout is on. Only the renderer's parts (prof_part) wait for
+ * prof_enabled.
+ */
+int prof_recording(void);
 /* The Settings menu's Profiler row on the bottom screen: on or off, remembered across launches. */
 int prof_user_enabled(void);
 void prof_set_user_enabled(int on);
@@ -130,6 +136,7 @@ void prof_set_status(const char *text);
 #ifdef PORT_RELEASE
 #include <string.h>
 #define prof_enabled() 0
+#define prof_recording() 0
 #define prof_user_enabled() 0
 #define prof_set_user_enabled(on) ((void) (on))
 #define prof_add(stage, ns) ((void) (stage), (void) (ns))
