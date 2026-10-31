@@ -845,6 +845,19 @@ int plat_take_setup_tap(void) {
     return tap;
 }
 
+/* Debug: the First-run setup row closes the Settings menu so that the setup has the screen (update_3ds.c). */
+static volatile int sCloseMenu;
+
+void plat_request_close_menu(void) {
+    sCloseMenu = 1;
+}
+
+int plat_3ds_take_close_menu(void) {
+    int closing = sCloseMenu;
+    sCloseMenu = 0;
+    return closing;
+}
+
 /* A touch (update_3ds_touch): nonzero if the setup is showing, which takes it. */
 int plat_3ds_setup_touch(int x, int y) {
     int hit;

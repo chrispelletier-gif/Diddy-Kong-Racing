@@ -3072,6 +3072,37 @@ static void draw_two_screens(Rect r, int where) {
     }
 }
 
+/* The two screens with the bottom one in a look (0 Classic .. 3 Dock): the race picture above, and below it the
+ * standings, the map and the buttons, drawn with the look's own boxes (box() follows sStyle). */
+static void draw_two_looks(Rect r, int look) {
+    int h = (r.y1 - r.y0 - 2) / 2, w = h * 5 / 3, i, saved = sStyle;
+    Rect top = { (r.x0 + r.x1 - w) / 2, r.y0, (r.x0 + r.x1 + w) / 2, r.y0 + h };
+    Rect bottom = { (r.x0 + r.x1) / 2 - h * 2 / 3 - 2, r.y0 + h + 2, (r.x0 + r.x1) / 2 + h * 2 / 3 + 2, r.y0 + 2 * h + 2 };
+    int bw = bottom.x1 - bottom.x0, bh = bottom.y1 - bottom.y0, rowH = (bh - 9) / 3;
+    Scene sc = { 1.1f, 1.3f, 0, 0, 0, 0 };
+    draw_scene(top, sc);
+    picture_frame(top, 0);
+    fill(bottom.x0, bottom.y0, bottom.x1, bottom.y1, (Colour){ 20, 40, 120, 255 });
+    sStyle = look;
+    for (i = 0; i < 3; i++) {
+        int y = bottom.y0 + 2 + i * (rowH + 1);
+        Colour lit = i == 0 ? PICKED_EDGE : BOX_EDGE;
+        box(bottom.x0 + 2, y, bottom.x0 + bw / 2 - 1, y + rowH, i == 0 ? (Colour){ 255, 200, 40, 90 } : BOX_FILL, lit);
+    }
+    box(bottom.x0 + bw / 2 + 1, bottom.y0 + 2, bottom.x1 - 2, bottom.y0 + 2 + 2 * rowH, BOX_FILL, BOX_EDGE);
+    // The buttons along the bottom: boxes, or in the Dock a few round icons.
+    for (i = 0; i < 3; i++) {
+        int x = bottom.x0 + 2 + i * (bw - 4) / 3;
+        if (look == 3) {
+            round_disc(x + (bw - 4) / 6, bottom.y1 - 4, 2, i == 1 ? (Colour){ 255, 214, 40, 255 } : (Colour){ 255, 255, 255, 220 });
+        } else {
+            box(x, bottom.y1 - 7, x + (bw - 4) / 3 - 2, bottom.y1 - 2, BOX_FILL, BOX_EDGE);
+        }
+    }
+    sStyle = saved;
+    picture_frame(bottom, 0);
+}
+
 /* Whether x, y is inside a polygon of count points (even-odd rule). */
 static int inside(const float (*points)[2], int count, float x, float y) {
     int i, j, in = 0;
@@ -3166,6 +3197,9 @@ static void draw_tile_art(const SetupScreen *s, int i, Rect r) {
             }
             draw_scene(r, plain);
             break;
+        case SETUP_PAGE_LOOK:
+            draw_two_looks(r, i);
+            return;
         default:
             draw_two_screens(r, i == 0 ? 0 : i == 1 ? 1 : 2);
             return; // Its screens have their own frames.
@@ -3201,7 +3235,7 @@ static void draw_setup_tile(const SetupScreen *s, int i) {
     }
     if (s->page == SETUP_PAGE_LANGUAGE) {
         art = (Rect){ (r.x0 + r.x1) / 2 - 42, r.y0 + 8, (r.x0 + r.x1) / 2 + 42, r.y0 + 64 };
-    } else if (s->page == SETUP_PAGE_HUD) {
+    } else if (s->page == SETUP_PAGE_HUD || s->page == SETUP_PAGE_LOOK) {
         art = (Rect){ r.x0 + 4, r.y0 + 5, r.x1 - 4, r.y0 + 59 };
     } else {
         art = wide_screen_in((Rect){ r.x0 + 6, r.y0 + 6, r.x1 - 6, r.y1 }, s->page == SETUP_PAGE_STYLE ? 52 : 56);
