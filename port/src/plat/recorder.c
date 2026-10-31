@@ -238,10 +238,12 @@ const RecState *rec_state(void) {
 }
 
 void rec_copy(RecState *out) {
+    unsigned int frameCount;
     init();
+    // The count from before the copy: a frame row written while it was copied is not counted as whole.
+    frameCount = __atomic_load_n(&sRec.frameCount, __ATOMIC_ACQUIRE);
     memcpy(out, &sRec, sizeof(*out));
-    // A frame row being written as it was copied: the count says which are whole.
-    out->frameCount = __atomic_load_n(&sRec.frameCount, __ATOMIC_ACQUIRE);
+    out->frameCount = frameCount;
 }
 
 int rec_describe_game(char *out, int size, int timeoutMs) {
@@ -419,6 +421,9 @@ char *rec_format_csv(const RecState *s) {
             add(&b, "\n");
             e++;
             continue;
+        }
+        if (row == NULL) {
+            break; // Only half-written events were left.
         }
         add(&b,
             "f,%u,%u,%u,%d,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u,%u,%u,%u,"

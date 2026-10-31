@@ -767,10 +767,6 @@ static void report_now(void) {
         snprintf(report.title, sizeof(report.title), "[3DS bug report] frame %d", frame);
         snprintf(name, sizeof(name), "diff_%05d_log.txt", frame);
         add_file(&report, name);
-        // The frames of the last few seconds most like a flash (gfx_c3d.c, history_save): a glitch seen for a moment
-        // is over before the snapshot.
-        snprintf(name, sizeof(name), "diff_%05d_flash.bin", frame);
-        add_file(&report, name);
         // The recent frame most likely to show the glitch, before the larger files (see save_recent_frames). In 3D (both
         // eyes) or at 800 pixels it is twice the size, so it goes after them instead of using up the attachment budget.
         snprintf(name, sizeof(name), "diff_%05d_recent1.bin", frame);
@@ -783,6 +779,10 @@ static void report_now(void) {
         snprintf(name, sizeof(name), "diff_%05d_gpu.bin", frame);
         add_file(&report, name);
         snprintf(name, sizeof(name), "diff_%05d_cmd.bin", frame);
+        add_file(&report, name);
+        // The frames of the last few seconds most like a flash (gfx_c3d.c, history_save): a glitch seen for a moment
+        // is over before the snapshot. After the snapshot's own files, so it can't push them out of the budget.
+        snprintf(name, sizeof(name), "diff_%05d_flash.bin", frame);
         add_file(&report, name);
         if (largeRecent) {
             snprintf(name, sizeof(name), "diff_%05d_recent1.bin", frame);
