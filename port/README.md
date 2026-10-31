@@ -376,7 +376,9 @@ freeze it and the page, to read them.
 | OBJECTS | The 13 costliest kinds of object (by behaviour; particles together): updated, drawn, triangles, and game logic, display list building and renderer ms. |
 | WASTE | Per kind, of its triangles: off the screen, facing away (the GPU culls them), under a pixel; and its overdraw (the screen area its triangles cover, x1.00 being the screen once). |
 
-The renderer's and the game thread's times per kind are taken while the profiler is on (an Old 3DS, whose clock reads
+With the two-core renderer (the default on both consoles) the renderer's time per kind is the display list walk's;
+the GPU hand-off on the other core is in the log's `two-core renderer` line. The renderer's and the game thread's
+times per kind are taken while the profiler is on (an Old 3DS, whose clock reads
 are system calls, times one frame in 8); the waste on one frame in 8. The log gets the same as `draw mix a frame` and
 `objects a frame` lines every few seconds. The GPU can't time its draws one by one, so the switch bench has four
 cost rows that leave a kind undrawn (`DKR_SKIP_KINDS`, a bit per kind): the GPU ms they save is what that kind costs
