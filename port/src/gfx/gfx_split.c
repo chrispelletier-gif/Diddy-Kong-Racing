@@ -72,6 +72,7 @@ static int sFailed;
 
 /* The profiler's view (gfx_split_take_times): the walk's waits for the backend, the backend's busy time (frame start
  * to frame end, less its waits) and how often it was woken. Clocks are read only around waits, which block anyway. */
+static unsigned long long sWalkWaitTotalNs, sWalkWaitTakenNs; // Never reset, for the draw mix (gfx_split_walk_waited_ns)
 static unsigned long long sWalkWaitNs, sBackendBusyNs, sBackendFrameStart, sBackendWaitNs;
 static unsigned int sBackendFrames, sBackendWakes;
 
@@ -95,6 +96,7 @@ static void wait_for_room(unsigned int bytes) {
             unsigned long long start = plat_time_ns();
             plat_sem_wait(sSpace);
             sWalkWaitNs += plat_time_ns() - start;
+            sWalkWaitTotalNs = sWalkWaitNs + sWalkWaitTakenNs;
         }
     }
 }
@@ -281,6 +283,7 @@ int gfx_split_frame_start(int direct) {
         unsigned long long start = plat_time_ns();
         plat_sem_wait(sFrameSlots);
         sWalkWaitNs += plat_time_ns() - start;
+            sWalkWaitTotalNs = sWalkWaitNs + sWalkWaitTakenNs;
     }
     commit(reserve(OP_START, 0));
     return TRUE;
@@ -301,12 +304,17 @@ int gfx_split_active(void) {
     return sActive;
 }
 
+unsigned long long gfx_split_walk_waited_ns(void) {
+    return sWalkWaitTotalNs;
+}
+
 void gfx_split_take_times(unsigned long long *walkWaitNs, unsigned long long *backendBusyNs,
                           unsigned int *backendFrames, unsigned int *backendWakes) {
     *walkWaitNs = sWalkWaitNs;
     *backendBusyNs = sBackendBusyNs;
     *backendFrames = sBackendFrames;
     *backendWakes = sBackendWakes;
+    sWalkWaitTakenNs += sWalkWaitNs;
     sWalkWaitNs = sBackendBusyNs = 0; // Read without a lock: a frame caught mid-update is off by a little
     sBackendFrames = sBackendWakes = 0;
 }

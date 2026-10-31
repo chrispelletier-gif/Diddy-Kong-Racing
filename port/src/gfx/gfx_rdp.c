@@ -1190,7 +1190,7 @@ static ProfDrawMix sMix;
 static unsigned long sObjTris[PROF_OBJ_BUCKETS + 1]; // The last one: no object's
 static unsigned long long sObjTicks[PROF_OBJ_BUCKETS + 1];
 static unsigned long long sKindTicks[PROF_KINDS];
-static unsigned long long sKindStart;
+static unsigned long long sKindStart, sKindWaited;
 static s32 sKindTimed;  // This frame times each kind (kind_frame_start)
 static s32 sAuditFrame; // This frame's triangles are classified (audit_triangle)
 
@@ -1230,10 +1230,15 @@ void gfx_object_mix_take(ProfObjMix *out) {
 /* The renderer's time goes to the kind whose tag came last. Out of line and cold: only a profiled frame reads the
  * clock at each tag. */
 static COLD void kind_switch_timed(void) {
-    unsigned long long now = plat_ticks();
-    sKindTicks[sDrawKind] += now - sKindStart;
-    sObjTicks[sDrawObj] += now - sKindStart;
+    unsigned long long now = plat_ticks(), waited = gfx_split_walk_waited_ns(), spent = now - sKindStart;
+    // The two-core renderer's waits for the other core are no kind's (the "two-core renderer" log line has them).
+    unsigned long long waitTicks =
+        waited > sKindWaited ? (waited - sKindWaited) * plat_ticks_per_second() / 1000000000ULL : 0;
+    spent = spent > waitTicks ? spent - waitTicks : 0;
+    sKindTicks[sDrawKind] += spent;
+    sObjTicks[sDrawObj] += spent;
     sKindStart = now;
+    sKindWaited = waited;
 }
 
 /* A tag's low 4 bits are the kind, bits 4-11 the object kind plus one (port_drawtag.h). */
@@ -1258,6 +1263,7 @@ static void kind_frame_start(u32 frame) {
     if (sKindTimed) {
         sMix.timedFrames++;
         sKindStart = plat_ticks();
+        sKindWaited = gfx_split_walk_waited_ns();
     }
     if (sAuditFrame) {
         sMix.auditedFrames++;
