@@ -639,6 +639,8 @@ static u32 peek_keys(void) {
     return keys;
 }
 
+void plat_log_drain(void);
+
 static void report_now(void) {
     ReportConfig config;
     Report report;
@@ -676,6 +678,7 @@ static void report_now(void) {
 
     memset(&report, 0, sizeof(report));
     report.kind = REPORT_BUTTON;
+    plat_log_drain(); // The snapshot's files are written behind the renderer's back.
     if (gPlatSnapshotSaved != before) {
         char name[64];
         int frame = gPlatSnapshotSaved, largeRecent;
@@ -787,13 +790,17 @@ static void button_thread(void *arg) {
              sReportRequested) &&
             !sBusy) {
             sBusy = 1;
+            net_3ds_background(1);
             report_now();
+            net_3ds_background(0);
             sReportRequested = 0;
             sBusy = 0;
         }
         if (sResultsRequested && !sBusy) {
             sBusy = 1;
+            net_3ds_background(1);
             send_test_results();
+            net_3ds_background(0);
             sBusy = 0;
         }
         last = keys;

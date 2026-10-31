@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+void plat_log_drain(void);
 extern u32 __ctru_heap_size;
 extern void (*__system_retAddr)(void);
 
@@ -244,6 +245,7 @@ void plat_3ds_exit(void) {
     unsigned long long start = plat_time_ns();
 
     sQuitting = 1;
+    plat_log_drain();
     while (sRendererParked == 0 && plat_time_ns() - start < 1000000000ULL) {
         svcSleepThread(1000000);
     }
@@ -455,6 +457,10 @@ const char *plat_data_dir(void) {
 static LightLock sLogLock;
 static int sLogLines;
 static int sLogDebug;
+static int sLogLockReady;
+static int sLockReady_hook(void) {
+    return sLogLockReady;
+}
 static FILE *sLogCopy;
 
 /* Every line also goes into a ring buffer, for bug reports: the file stops after the start-up lines. */
@@ -499,6 +505,193 @@ int plat_log_recent(char *out, int size) {
     return strlen(out);
 }
 
+
+/*
+ * Log lines past the start-up ones (a snapshot's file with a line for every draw, or log.txt once "debug" exists)
+ * and the snapshot's other files are written by a thread of their own at the lowest priority, so the renderer that
+ * produces them never waits for the SD card. Lines collect in chunks; a full chunk becomes a job. Jobs run in order.
+ * At most WRITE_PENDING_MAX bytes wait; past that the producer waits for the writer to catch up.
+ */
+#define LOG_CHUNK_SIZE (16 * 1024)
+#define WRITE_PENDING_MAX (2 * 1024 * 1024)
+#define LOG_CHUNK_MAX_AGE_NS 1000000000ULL
+
+enum { JOB_WRITE, JOB_CLOSE, JOB_SAVE };
+
+typedef struct WriteJob {
+    struct WriteJob *next;
+    int kind;
+    FILE *file;
+    char *data; /* Owned. */
+    unsigned int size;
+    char path[256];
+} WriteJob;
+
+typedef struct LogChunk {
+    FILE *file;
+    char *data;
+    unsigned int length;
+    unsigned long long started;
+} LogChunk;
+
+static LightLock sJobLock;
+static LightSemaphore sJobSemaphore;
+static WriteJob *sJobHead, *sJobTail;
+static volatile unsigned int sJobsPending;  /* Queued or running. */
+static volatile unsigned int sBytesPending;
+static int sWriterState; /* 0 not started, 1 running, -1 could not start. */
+static LogChunk sLogChunk, sCopyChunk;
+
+static void run_job(WriteJob *job) {
+    switch (job->kind) {
+        case JOB_WRITE:
+            if (job->file != NULL) {
+                fwrite(job->data, 1, job->size, job->file);
+                fflush(job->file);
+            }
+            break;
+        case JOB_CLOSE:
+            if (job->file != NULL) {
+                fclose(job->file);
+            }
+            break;
+        case JOB_SAVE:
+            plat_save_file(job->path, job->data, job->size);
+            break;
+    }
+    free(job->data);
+    __sync_fetch_and_sub(&sBytesPending, job->size);
+    __sync_fetch_and_sub(&sJobsPending, 1);
+}
+
+static void writer_thread(void *arg) {
+    (void) arg;
+    for (;;) {
+        WriteJob *job;
+        LightSemaphore_Acquire(&sJobSemaphore, 1);
+        LightLock_Lock(&sJobLock);
+        job = sJobHead;
+        sJobHead = job->next;
+        if (sJobHead == NULL) {
+            sJobTail = NULL;
+        }
+        LightLock_Unlock(&sJobLock);
+        run_job(job);
+        free(job);
+    }
+}
+
+/* Queues a job (taking its data). Without a writer thread, or without memory for the job, it is run here. */
+static void queue_job(int kind, FILE *file, char *data, unsigned int size, const char *path) {
+    WriteJob *job;
+    static int sInit;
+
+    if (!sInit) {
+        sInit = 1;
+        LightLock_Init(&sJobLock);
+        LightSemaphore_Init(&sJobSemaphore, 0, 0x7FFF);
+    }
+    if (sWriterState == 0) {
+        // Below every game thread, on the game's core (the renderer has its own on a New 3DS).
+        sWriterState = threadCreate(writer_thread, NULL, 16 * 1024, 0x3E, 0, true) != NULL ? 1 : -1;
+    }
+    while (sWriterState > 0 && sBytesPending > WRITE_PENDING_MAX) {
+        svcSleepThread(2000000);
+    }
+    job = calloc(1, sizeof(*job));
+    if (job == NULL) {
+        WriteJob here = { 0 };
+        here.kind = kind;
+        here.file = file;
+        here.data = data;
+        here.size = size;
+        if (path != NULL) {
+            snprintf(here.path, sizeof(here.path), "%s", path);
+        }
+        __sync_fetch_and_add(&sBytesPending, size);
+        __sync_fetch_and_add(&sJobsPending, 1);
+        run_job(&here);
+        return;
+    }
+    job->kind = kind;
+    job->file = file;
+    job->data = data;
+    job->size = size;
+    if (path != NULL) {
+        snprintf(job->path, sizeof(job->path), "%s", path);
+    }
+    __sync_fetch_and_add(&sBytesPending, size);
+    __sync_fetch_and_add(&sJobsPending, 1);
+    if (sWriterState < 0) {
+        run_job(job);
+        free(job);
+        return;
+    }
+    LightLock_Lock(&sJobLock);
+    if (sJobTail != NULL) {
+        sJobTail->next = job;
+    } else {
+        sJobHead = job;
+    }
+    sJobTail = job;
+    LightLock_Unlock(&sJobLock);
+    LightSemaphore_Release(&sJobSemaphore, 1);
+}
+
+static void chunk_flush(LogChunk *chunk) {
+    if (chunk->data != NULL && chunk->length > 0) {
+        queue_job(JOB_WRITE, chunk->file, chunk->data, chunk->length, NULL);
+        chunk->data = NULL;
+        chunk->length = 0;
+    }
+}
+
+/* Adds a line to the chunk for file (flushing it when it is full or old). With the lock held. */
+static void chunk_add(LogChunk *chunk, FILE *file, const char *line, int length) {
+    unsigned long long now = plat_time_ns();
+    if (chunk->file != file) {
+        chunk_flush(chunk);
+        chunk->file = file;
+    }
+    if (chunk->data != NULL && chunk->length + length > LOG_CHUNK_SIZE) {
+        chunk_flush(chunk);
+    }
+    if (chunk->data == NULL) {
+        chunk->data = malloc(LOG_CHUNK_SIZE);
+        chunk->length = 0;
+        chunk->started = now;
+        if (chunk->data == NULL) {
+            return; /* The line is in the ring buffer all the same. */
+        }
+    }
+    if (length > LOG_CHUNK_SIZE) {
+        length = LOG_CHUNK_SIZE;
+    }
+    memcpy(chunk->data + chunk->length, line, length);
+    chunk->length += length;
+    if (now - chunk->started > LOG_CHUNK_MAX_AGE_NS) {
+        chunk_flush(chunk);
+    }
+}
+
+/* Waits until everything queued so far is on the SD card (a snapshot's log is complete only then). */
+void plat_log_drain(void) {
+    if (sLockReady_hook()) {
+        LightLock_Lock(&sLogLock);
+        chunk_flush(&sLogChunk);
+        chunk_flush(&sCopyChunk);
+        LightLock_Unlock(&sLogLock);
+    }
+    while (sJobsPending > 0 && sWriterState > 0) {
+        svcSleepThread(5000000);
+    }
+}
+
+/* Saves a file on the writer thread; data comes from malloc and is freed there. */
+void plat_save_file_later(const char *path, void *data, unsigned int size) {
+    queue_job(JOB_SAVE, NULL, data, size, path);
+}
+
 static FILE *log_file(void) {
     static int sChecked;
     static FILE *sFile;
@@ -525,12 +718,11 @@ static FILE *log_file(void) {
 }
 
 static void log_line(const char *prefix, const char *text) {
-    static int sLockReady;
     FILE *file;
-    if (!sLockReady) {
+    if (!sLogLockReady) {
         // The first line is logged from the main thread before any other thread exists.
         LightLock_Init(&sLogLock);
-        sLockReady = 1;
+        sLogLockReady = 1;
     }
     LightLock_Lock(&sLogLock);
     {
@@ -540,12 +732,27 @@ static void log_line(const char *prefix, const char *text) {
     }
     file = log_file();
     if (file != NULL) {
-        fprintf(file, "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
-        fflush(file);
+        char line[600];
+        int length = snprintf(line, sizeof(line), "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+        if (length >= (int) sizeof(line)) {
+            length = sizeof(line) - 1;
+        }
+        if (sLogLines < LOG_BOOT_LINES) {
+            // The start-up lines go to the card at once: they are what is left if the game never gets going.
+            fwrite(line, 1, length, file);
+            fflush(file);
+        } else {
+            chunk_add(&sLogChunk, file, line, length);
+        }
         sLogLines++;
     }
     if (sLogCopy != NULL) {
-        fprintf(sLogCopy, "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+        char line[600];
+        int length = snprintf(line, sizeof(line), "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+        if (length >= (int) sizeof(line)) {
+            length = sizeof(line) - 1;
+        }
+        chunk_add(&sCopyChunk, sLogCopy, line, length);
     }
     LightLock_Unlock(&sLogLock);
 }
@@ -561,11 +768,12 @@ void plat_log_copy_to(const char *path) {
     FILE *file = (path != NULL) ? fopen(path, "w") : NULL;
     FILE *old;
     LightLock_Lock(&sLogLock);
+    chunk_flush(&sCopyChunk);
     old = sLogCopy;
     sLogCopy = file;
     LightLock_Unlock(&sLogLock);
     if (old != NULL) {
-        fclose(old);
+        queue_job(JOB_CLOSE, old, NULL, 0, NULL); /* After its lines. */
     }
     if (file != NULL) {
         struct mallinfo info = mallinfo();

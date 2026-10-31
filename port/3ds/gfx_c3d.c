@@ -1802,6 +1802,8 @@ static void record_recent_frame(void) {
 
 /* Saves the recent frames most likely to show a line as diff_NNNNN_recentK.bin (width, height, then BGR8), and
  * logs every frame's score. Called once the GPU has finished the snapshot frame, so the ring is idle. */
+void plat_save_file_later(const char *path, void *data, unsigned int size);
+
 static void save_recent_frames(int snapshotFrame) {
     int score[RECENT_SLOTS], where[RECENT_SLOTS], i, k;
     char path[256];
@@ -1845,8 +1847,7 @@ static void save_recent_frames(int snapshotFrame) {
                     }
                 }
                 plat_snprintf(path, sizeof(path), "%s/diff_%05d_recent%d.bin", plat_data_dir(), snapshotFrame, k + 1);
-                plat_save_file(path, file, 8 + bytes);
-                free(file);
+                plat_save_file_later(path, file, 8 + bytes); /* Frees file. */
                 plat_log("kept recent frame %d as recent%d", sRecentFrame[pick], k + 1);
             }
         }

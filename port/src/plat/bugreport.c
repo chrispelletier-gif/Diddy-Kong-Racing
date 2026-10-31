@@ -190,7 +190,7 @@ static unsigned char *gzip(const unsigned char *data, unsigned int size, unsigne
     unsigned char *out;
 
     memset(&stream, 0, sizeof(stream));
-    if (deflateInit2(&stream, 9, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+    if (deflateInit2(&stream, 6, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
         return NULL;
     }
     bound = deflateBound(&stream, size) + 32;

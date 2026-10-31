@@ -26,6 +26,8 @@
 #include <curl/curl.h>
 #include <mbedtls/sha256.h>
 #include "net_3ds.h"
+#else
+#define net_3ds_background(background) ((void) 0) /* No network in a player build. */
 #endif
 
 #ifndef PORT_BUILD_VERSION
@@ -271,16 +273,35 @@ static size_t on_data(char *data, size_t size, size_t count, void *user) {
     return length;
 }
 
+/*
+ * One libcurl handle serves the requests of a check or a download, so the connection to github.com (and its TLS
+ * session) is reused: every new connection costs a handshake of a second or more on the 3DS. Dropped by http_done.
+ */
+static CURL *sCurl;
+
+static void http_done(void) {
+    if (sCurl != NULL) {
+        curl_easy_cleanup(sCurl);
+        sCurl = NULL;
+    }
+}
+
 /* GETs url into download. Returns the HTTP status, or 0 with the error in error. */
 static long http_get(const Config *config, const char *url, int binary, Download *download, char *error,
                      size_t errorSize) {
-    CURL *curl = curl_easy_init();
+    CURL *curl;
     struct curl_slist *headers = NULL;
     char auth[300], curlError[CURL_ERROR_SIZE];
     long status = 0;
     CURLcode code;
     const char *caFile = net_3ds_ca_file();
 
+    if (sCurl == NULL) {
+        sCurl = curl_easy_init();
+    } else {
+        curl_easy_reset(sCurl); // Keeps the open connections and TLS sessions.
+    }
+    curl = sCurl;
     if (curl == NULL) {
         snprintf(error, errorSize, "out of memory (curl)");
         return 0;
@@ -323,7 +344,6 @@ static long http_get(const Config *config, const char *url, int binary, Download
         status = 0;
     }
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
     return status;
 }
 
@@ -521,6 +541,7 @@ static int check(void) {
         }
         found += result > 0;
     }
+    http_done();
     net_3ds_end();
     if (!found) {
         plat_status("Update: no builds found%s", config.token[0] == '\0' ? port_text(" (a private repo needs the token)") : "");
@@ -577,6 +598,7 @@ static int download_verified(const char *url, unsigned long size, const char *sh
         status = 0;
     } else {
         status = http_get(&config, url, 1, &download, error, sizeof(error));
+        http_done();
         net_3ds_end();
     }
     mbedtls_sha256_finish_ret(&download.sha, hash);
@@ -747,8 +769,13 @@ int update_3ds_touch(int x, int y) {
 
 /* Looks for new builds; returns 1 if the choices are shown, 0 (back to idle) if there are none. */
 static int check_updates(void) {
+    int found;
+
     sState = STATE_BUSY;
-    if (check()) {
+    net_3ds_background(1);
+    found = check();
+    net_3ds_background(0);
+    if (found) {
         sState = STATE_CHOOSE;
         draw_choices();
         return 1;
@@ -761,7 +788,7 @@ static void update_thread(void *arg) {
     (void) arg;
     bugreport_watch_thread("update");
     for (;;) {
-        int button;
+        int button, installed;
         // Every two seconds without a tap, the test run's buttons and rows are brought up to date (a run ends by
         // itself).
         if (LightEvent_WaitTimeout(&sTapEvent, 2000000000LL) != 0) {
@@ -861,7 +888,10 @@ static void update_thread(void *arg) {
                     plat_request_ui_sound(PLAT_UI_SOUND_SELECT);
                     sState = STATE_BUSY;
                     sChosen = button;
-                    if (install(&sChannels[button])) {
+                    net_3ds_background(1);
+                    installed = install(&sChannels[button]);
+                    net_3ds_background(0);
+                    if (installed) {
                         sState = STATE_INSTALLED;
                         draw_text_button("Quit to finish the update");
                     } else {
