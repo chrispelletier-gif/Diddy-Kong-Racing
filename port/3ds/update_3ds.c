@@ -749,7 +749,7 @@ int update_3ds_touch(int x, int y) {
     }
     if (y < BUTTON_TOP) {
         if (sState != STATE_MENU) {
-            return 0;
+            return plat_overlay_tap(x, y); // The profiler's monitor: its pages and freezing the graph.
         }
         sTapX = x;
         sTapY = y;

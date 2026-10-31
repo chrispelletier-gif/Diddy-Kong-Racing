@@ -230,7 +230,11 @@ const ProfObjMix *prof_object_mix_last_second(void);
 const ProfObjMix *prof_object_mix_window(void);
 /* The `top` costliest object kinds (by game logic + building + renderer time, else triangles), a frame each. */
 void prof_format_object_mix(const ProfObjMix *mix, int top, char *out, int size);
+/* A tap on the profiler's readout (any thread): on the graph freezes or unfreezes it, below it shows the next page.
+ * Returns nonzero if it took the tap. */
+int prof_monitor_tap(int x, int y);
 #ifdef PORT_RELEASE
+#define prof_monitor_tap(x, y) ((void) (x), (void) (y), 0)
 #define prof_scene_frame(segments, allowed, drawn, objects) ((void) 0)
 #define prof_object_logic_begin() 0ULL
 #define prof_object_logic_end(bucket, start) ((void) (start))

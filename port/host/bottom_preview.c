@@ -107,6 +107,40 @@ void host_bottom_preview(const char *dir) {
         bs_set_buttons(sRunning, 2);
     }
     save(dir, "2_profiler_test_run");
+    {
+        // The live monitor: the frame graph over a page (made-up frames: steady 60 fps, a GPU-bound stretch, a hitch).
+        unsigned char height[BS_GRAPH_FRAMES], kind[BS_GRAPH_FRAMES];
+        int i;
+        for (i = 0; i < BS_GRAPH_FRAMES; i++) {
+            height[i] = i < 70 ? 33 + (i % 3) : i < 120 ? 66 + (i % 5) : 33;
+            kind[i] = i < 70 ? BS_GRAPH_RETRACE : i < 120 ? BS_GRAPH_GPU : BS_GRAPH_RENDERER;
+        }
+        height[100] = 150;
+        kind[100] = BS_GRAPH_TEXTURES | BS_GRAPH_HITCH;
+        height[40] = 45;
+        kind[40] = BS_GRAPH_LOGIC;
+        bs_set_frame_graph(height, kind, BS_GRAPH_FRAMES);
+    }
+    bs_set_overlay("DRAW KINDS 2/4  tap: page\n"
+                   "a frame:   tris drw  rdp   bld waste\n"
+                   "menus/oth     2   1  0.19  0.28   0%\n"
+                   "track       458  56  4.01  0.01  83%\n"
+                   "racers      280  36  1.50  0.02  43%\n"
+                   "objects     187  28  1.43  0.01  94%\n"
+                   "sky          38  10  0.52  0.01  71%\n"
+                   "effects      23   6  0.14  0.00  27%\n"
+                   "shadows      44   7  0.30  0.09  65%\n"
+                   "segments 11/24 (table 17)\n"
+                   "objects 10/79 drawn\n");
+    save(dir, "2b_monitor_kinds");
+    bs_set_overlay("OBJECTS 3/4 FROZEN  tap: page\n"
+                   "a frame:   upd drw  tris logic  bld  rdp\n"
+                   "racer      12   2   266  0.62 0.02 1.44\n"
+                   "scenery    22   5    30  0.03 0.01 0.91\n"
+                   "dino whal   1   1   166  0.04 0.01 0.06\n"
+                   "banana     14   0     0  0.08 0.00 0.00\n");
+    save(dir, "2c_monitor_objects");
+    bs_set_frame_graph(NULL, NULL, 0);
     bs_set_overlay("");
 
     // The Settings menu: a player's tabs, then a debug build's.

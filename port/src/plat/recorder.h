@@ -126,6 +126,8 @@ unsigned int rec_hitches_since(unsigned int since, char *out, int size, unsigned
 const char *rec_cause_name(int cause);
 /* Frames recorded so far (the next frame's number). */
 unsigned int rec_frame_now(void);
+/* What took a frame's time (REC_CAUSE_*): the game thread's biggest stage, or what the renderer it waited for did. */
+int rec_frame_cause(const RecFrame *r);
 #else
 #define rec_game_frame(row) ((void) (row))
 #define rec_event(...) ((void) 0)

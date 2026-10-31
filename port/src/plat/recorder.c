@@ -33,7 +33,7 @@ static void init(void) {
 }
 
 /* What took a frame's time: the game thread's biggest stage, or what the renderer it waited for was doing. */
-static int frame_cause(const RecFrame *r) {
+int rec_frame_cause(const RecFrame *r) {
     if (r->logicUs >= r->sceneUs && r->logicUs >= r->renderWaitUs && r->logicUs >= r->vsyncUs) {
         return REC_CAUSE_LOGIC;
     }
@@ -57,7 +57,7 @@ const char *rec_cause_name(int cause) {
 }
 
 static void describe_cause(const RecFrame *r, char *out, size_t size) {
-    switch (frame_cause(r)) {
+    switch (rec_frame_cause(r)) {
         case REC_CAUSE_LOGIC:
             snprintf(out, size, "game logic %u ms", r->logicUs / 1000);
             break;
@@ -92,7 +92,7 @@ static void record_hitch(const RecFrame *r) {
     h->frame = r->frame;
     h->endMs = r->endMs;
     h->periodUs = r->periodUs;
-    h->cause = frame_cause(r);
+    h->cause = rec_frame_cause(r);
     describe_cause(r, cause, sizeof(cause));
     length = snprintf(h->text, sizeof(h->text), "%s level %d%s: %s", mode_name(r->mode), r->level,
                       r->racing ? " racing" : "", cause);

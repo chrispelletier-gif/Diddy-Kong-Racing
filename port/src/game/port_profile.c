@@ -21,6 +21,7 @@
 #include "plat/recorder.h"
 #include "gfx/gfx_split.h"
 #include "port_drawtag.h"
+#include "plat/bottom_screen.h"
 
 #define USER_FILE "profiler.txt"
 
@@ -583,9 +584,137 @@ void prof_format_object_mix(const ProfObjMix *m, int top, char *out, int size) {
     }
 }
 
+/*
+ * The live monitor on the bottom screen while the readout is on: the frame graph (the flight recorder's last frames,
+ * each coloured by what took its time) over one of the pages, refreshed once a second. A tap on the graph freezes it
+ * (and the page) to read; a tap under it shows the next page.
+ */
+enum { MON_SUMMARY, MON_KINDS, MON_OBJECTS, MON_WASTE, MON_PAGES };
+static volatile s32 sMonPage, sMonFrozen, sMonDirty;
+static char sSummaryText[512];
+static const char *const sMonPageNames[MON_PAGES] = { "PROFILER", "DRAW KINDS", "OBJECTS", "WASTE" };
+
+int prof_monitor_tap(int x, int y) {
+    (void) x;
+    if (!sOverlayShown) {
+        return 0;
+    }
+    if (y < BS_GRAPH_BOTTOM) {
+        sMonFrozen = !sMonFrozen;
+    } else {
+        sMonPage = (sMonPage + 1) % MON_PAGES;
+    }
+    sMonDirty = TRUE;
+    return 1;
+}
+
+static void show_graph(void) {
+    const RecState *rec = rec_state(); // Read in place: a copy would cost an Old 3DS 11 KB.
+    unsigned char height[BS_GRAPH_FRAMES], kind[BS_GRAPH_FRAMES];
+    u32 count = __atomic_load_n(&rec->frameCount, __ATOMIC_ACQUIRE), first, i;
+    s32 n = count < BS_GRAPH_FRAMES ? (s32) count : BS_GRAPH_FRAMES;
+    first = count - (u32) n;
+    for (i = 0; i < (u32) n; i++) {
+        const RecFrame *f = &rec->frames[(first + i) % REC_FRAMES];
+        u32 halfMs = (f->periodUs + 250) / 500;
+        height[i] = (unsigned char) (halfMs > 255 ? 255 : halfMs);
+        kind[i] = (unsigned char) (rec_frame_cause(f) | ((f->flags & REC_FLAG_HITCH) ? BS_GRAPH_HITCH : 0));
+    }
+    plat_overlay_graph(height, kind, n);
+}
+
+static void show_monitor_page(void) {
+    static char text[1024];
+    const ProfDrawMix *m = &sSecondMix;
+    const ProfSceneCounts *sc = &sSecondScene;
+    double frames = m->frames ? (double) m->frames : 1.0, timed = m->timedFrames ? (double) m->timedFrames : 1.0;
+    double gameTimed = m->gameTimedFrames ? (double) m->gameTimedFrames : 1.0;
+    double audited = m->auditedFrames ? (double) m->auditedFrames : 1.0;
+    s32 page = sMonPage, at, k;
+
+    at = plat_snprintf(text, sizeof(text), "%s %d/%d%s  tap: page\n", sMonPageNames[page], (int) page + 1,
+                       MON_PAGES, sMonFrozen ? " FROZEN" : "");
+    switch (page) {
+        case MON_SUMMARY:
+            plat_snprintf(text + at, sizeof(text) - at, "%sgraph: grn logic cyan build yel rdp\n"
+                                                        "org tex red gpu grey retrace; tap: freeze",
+                          sSummaryText);
+            break;
+        case MON_KINDS:
+            at += plat_snprintf(text + at, sizeof(text) - at, "a frame:   tris drw  rdp   bld waste\n");
+            for (k = 0; k < PORT_DRAW_KINDS && at < (s32) sizeof(text); k++) {
+                const ProfKindStats *st = &m->kinds[k];
+                double a = st->audited ? (double) st->audited : 1.0;
+                if (st->draws == 0) {
+                    continue;
+                }
+                at += plat_snprintf(text + at, sizeof(text) - at, "%-9.9s %5.0f %3.0f %5.2f %5.2f %3.0f%%\n",
+                                    sKindNames[k], st->tris / frames, st->draws / frames, st->renderNs / 1e6 / timed,
+                                    st->buildNs / 1e6 / gameTimed,
+                                    (st->offscreen + st->backface + st->tiny) * 100.0 / a);
+            }
+            if (sc->frames > 0 && at < (s32) sizeof(text)) {
+                plat_snprintf(text + at, sizeof(text) - at, "segments %.0f/%.0f (table %.0f)\nobjects %.0f/%.0f drawn",
+                              (double) sc->segmentsDrawn / sc->frames, (double) sc->segments / sc->frames,
+                              (double) sc->segmentsAllowed / sc->frames, (double) sc->objectsDrawn / sc->frames,
+                              (double) sc->objects / sc->frames);
+            }
+            break;
+        case MON_OBJECTS: {
+            const ProfObjMix *o = &sSecondObj;
+            double of = o->frames ? (double) o->frames : 1.0, ot = o->timedFrames ? (double) o->timedFrames : 1.0;
+            double ort = o->renderTimedFrames ? (double) o->renderTimedFrames : 1.0;
+            u8 picked[PROF_OBJ_BUCKETS];
+            s32 n;
+            at += plat_snprintf(text + at, sizeof(text) - at, "a frame:   upd drw  tris logic  bld  rdp\n");
+            for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+                picked[k] = o->objs[k].updates == 0 && o->objs[k].drawn == 0 && o->objs[k].tris == 0;
+            }
+            for (n = 0; n < 13 && at < (s32) sizeof(text); n++) {
+                s32 best = -1;
+                double bestCost = -1.0;
+                for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+                    const ProfObjStats *b = &o->objs[k];
+                    double cost = (b->logicNs + b->buildNs) / ot + b->renderNs / ort + b->tris * 1e-3;
+                    if (!picked[k] && cost > bestCost) {
+                        best = k;
+                        bestCost = cost;
+                    }
+                }
+                if (best < 0) {
+                    break;
+                }
+                picked[best] = TRUE;
+                at += plat_snprintf(text + at, sizeof(text) - at, "%-9.9s %3.0f %3.0f %5.0f %5.2f %4.2f %4.2f\n",
+                                    prof_object_name(best), o->objs[best].updates / of, o->objs[best].drawn / of,
+                                    o->objs[best].tris / of, o->objs[best].logicNs / 1e6 / ot,
+                                    o->objs[best].buildNs / 1e6 / ot, o->objs[best].renderNs / 1e6 / ort);
+            }
+            break;
+        }
+        default:
+            at += plat_snprintf(text + at, sizeof(text) - at, "triangles: off  back tiny overdraw\n");
+            for (k = 0; k < PORT_DRAW_KINDS && at < (s32) sizeof(text); k++) {
+                const ProfKindStats *st = &m->kinds[k];
+                double a = st->audited ? (double) st->audited : 1.0;
+                if (st->draws == 0) {
+                    continue;
+                }
+                at += plat_snprintf(text + at, sizeof(text) - at, "%-9.9s %4.0f%% %4.0f%% %3.0f%% x%.2f\n",
+                                    sKindNames[k], st->offscreen * 100.0 / a, st->backface * 100.0 / a,
+                                    st->tiny * 100.0 / a, st->areaPx / audited / (400.0 * 240.0));
+            }
+            if (at < (s32) sizeof(text)) {
+                plat_snprintf(text + at, sizeof(text) - at, "off: past an edge; back: GPU culls it;\n"
+                                                            "tiny: under a pixel; x1 = screen once");
+            }
+            break;
+    }
+    plat_overlay_show(text);
+}
+
 static void show_overlay(void) {
     ProfStats s;
-    char text[512];
     u32 slow, i;
     double fps;
 
@@ -595,8 +724,8 @@ static void show_overlay(void) {
     for (slow = 0, i = 4; i < PROF_RATE_BUCKETS; i++) {
         slow += s.rateFrames[i];
     }
-    plat_snprintf(text, sizeof(text),
-                  "PROFILER %4.1f fps  limit: %s\n"
+    plat_snprintf(sSummaryText, sizeof(sSummaryText),
+                  "%4.1f fps  limit: %s\n"
                   "30fps %3d%%  20fps %3d%%  slower %3d%%\n"
                   "worst frame %3u ms  hitches %u\n"
                   "game  logic %4.1f scene %4.1f wait %4.1f\n"
@@ -618,11 +747,15 @@ static void show_overlay(void) {
                   sStatus);
     if (sEnabled || sUserOn) {
         sOverlayShown = TRUE;
-        plat_overlay_show(text);
+        if (!sMonFrozen) {
+            show_graph();
+            show_monitor_page();
+        }
     } else if (sOverlayShown) {
         // Only a test run is profiling: it still measures and logs, but the readout stays off (as the Settings menu
         // says), so the bottom screen keeps the race HUD.
         sOverlayShown = FALSE;
+        plat_overlay_graph(NULL, NULL, 0);
         plat_overlay_show("");
     }
     if (++sLogCounter % 4 == 0) {
@@ -760,6 +893,11 @@ static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned lon
         sLastCounters[i] = counters[i];
     }
     rec_game_frame(&row);
+    if (sMonDirty && sOverlayShown) {
+        // A tap on the monitor: show it now rather than at the next second.
+        sMonDirty = FALSE;
+        show_monitor_page();
+    }
 }
 
 void prof_game_mark(int mark, int updateRate) {
@@ -771,6 +909,7 @@ void prof_game_mark(int mark, int updateRate) {
         sGameThreadOn = TRUE;
         sWindows[PROF_WINDOW_OVERLAY].startNs = 0;
         sOverlayShown = FALSE;
+        plat_overlay_graph(NULL, NULL, 0);
         plat_overlay_show("");
     }
     if (!sGameThreadOn) {

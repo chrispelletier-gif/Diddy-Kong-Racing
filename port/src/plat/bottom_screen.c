@@ -790,13 +790,15 @@ void bs_set_style(int style) {
 /******************************** State ********************************/
 
 #define MESSAGES 24
-#define OVERLAY_LINES 12
+#define OVERLAY_LINES 16
 
 typedef struct State {
     char messages[MESSAGES][160];
     int messageCount; /* The newest is messages[(messageCount - 1) % MESSAGES]. */
     char overlay[OVERLAY_LINES][48];
     int overlayLines;
+    int graphCount; /* The profiler's frame graph (bs_set_frame_graph); 0: none. */
+    unsigned char graphHeight[BS_GRAPH_FRAMES], graphKind[BS_GRAPH_FRAMES];
     int menuShown;
     BsMenu menu;
     int buttonCount; /* 0: the panel text instead. */
@@ -839,6 +841,14 @@ void bs_set_overlay(const char *text) {
         text += length + (end != NULL);
     }
     sState.overlayLines = line;
+    sChanges |= 1 << BS_AREA_TOP;
+}
+
+void bs_set_frame_graph(const unsigned char *halfMs, const unsigned char *kinds, int count) {
+    count = count < BS_GRAPH_FRAMES ? count : BS_GRAPH_FRAMES;
+    memcpy(sState.graphHeight, halfMs, count);
+    memcpy(sState.graphKind, kinds, count);
+    sState.graphCount = count;
     sChanges |= 1 << BS_AREA_TOP;
 }
 
@@ -1057,12 +1067,53 @@ static void draw_logo(void) {
 static void draw_overlay(const State *s, int y0, int y1) {
     int i;
     box(2, y0, BS_WIDTH - 2, y1, (Colour){ 0, 0, 20, 170 }, BOX_EDGE);
-    for (i = 0; i < s->overlayLines; i++) {
+    for (i = 0; i < s->overlayLines && y0 + 2 + i * 8 + 8 <= y1; i++) {
         mono_text(4, y0 + 2 + i * 8, s->overlay[i], i == 0 ? YELLOW : WHITE);
     }
 }
 
+/*
+ * The profiler's frame graph: a bar per frame (2 pixels wide, the newest on the right), its height the frame's length
+ * (the top is 50 ms), coloured by what took its time (bottom_screen.h BS_GRAPH_*); lines at 60 and 30 fps.
+ */
+#define GRAPH_Y1 66
+#define GRAPH_PX_PER_MS (GRAPH_Y1 / 50.0f)
+static const Colour sGraphColours[BS_GRAPH_KINDS] = {
+    { 80, 230, 110, 255 },  /* logic */
+    { 80, 210, 255, 255 },  /* scene */
+    { 255, 220, 60, 255 },  /* renderer */
+    { 255, 140, 40, 255 },  /* textures */
+    { 255, 70, 70, 255 },   /* GPU */
+    { 120, 130, 170, 255 }, /* retrace */
+};
+
+static void draw_graph(const State *s) {
+    int i, x0 = BS_WIDTH - 2 - s->graphCount * 2;
+    fill(2, 0, BS_WIDTH - 2, GRAPH_Y1 + 1, (Colour){ 0, 0, 20, 200 });
+    for (i = 0; i < s->graphCount; i++) {
+        int kind = s->graphKind[i] & 15, h = (int) (s->graphHeight[i] * 0.5f * GRAPH_PX_PER_MS + 0.5f);
+        Colour c = sGraphColours[kind < BS_GRAPH_KINDS ? kind : 0];
+        h = h > GRAPH_Y1 ? GRAPH_Y1 : h < 1 ? 1 : h;
+        fill(x0 + i * 2, GRAPH_Y1 - h, x0 + i * 2 + 2, GRAPH_Y1, c);
+        if (s->graphKind[i] & BS_GRAPH_HITCH) {
+            fill(x0 + i * 2, GRAPH_Y1 - h, x0 + i * 2 + 2, GRAPH_Y1 - h + 2, WHITE);
+        }
+    }
+    fill(2, GRAPH_Y1 - (int) (16.7f * GRAPH_PX_PER_MS), BS_WIDTH - 2, GRAPH_Y1 - (int) (16.7f * GRAPH_PX_PER_MS) + 1,
+         (Colour){ 255, 255, 255, 90 });
+    fill(2, GRAPH_Y1 - (int) (33.3f * GRAPH_PX_PER_MS), BS_WIDTH - 2, GRAPH_Y1 - (int) (33.3f * GRAPH_PX_PER_MS) + 1,
+         (Colour){ 255, 255, 255, 60 });
+    mono_text(4, 1, "60", (Colour){ 255, 255, 255, 140 });
+    fill(2, GRAPH_Y1, BS_WIDTH - 2, GRAPH_Y1 + 1, BOX_EDGE);
+}
+
 static void draw_home(const State *s) {
+    if (s->overlayLines > 0 && s->graphCount > 0) {
+        // The live monitor: the frame graph over the profiler's page.
+        draw_graph(s);
+        draw_overlay(s, GRAPH_Y1 + 2, BS_BUTTONS_Y);
+        return;
+    }
     draw_logo();
     if (s->overlayLines > 0) {
         draw_messages(s, 70, 98);

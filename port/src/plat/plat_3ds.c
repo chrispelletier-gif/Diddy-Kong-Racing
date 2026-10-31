@@ -1,6 +1,7 @@
 /* Nintendo 3DS (libctru) implementation of the platform layer. */
 #include "plat.h"
 #include "recorder.h"
+#include "profile.h"
 #include "bottom_screen.h"
 #include "setup_screen.h"
 #include "settings.h"
@@ -1204,6 +1205,21 @@ void plat_overlay_show(const char *text) {
     bs_set_overlay(text);
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
+}
+
+void plat_overlay_graph(const unsigned char *halfMs, const unsigned char *kinds, int count) {
+    LightLock_Lock(&sConsoleLock);
+    bs_set_frame_graph(halfMs, kinds, count);
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+}
+
+int plat_overlay_tap(int x, int y) {
+    int shown;
+    LightLock_Lock(&sConsoleLock);
+    shown = bs_race_hud_covered();
+    LightLock_Unlock(&sConsoleLock);
+    return shown && prof_monitor_tap(x, y);
 }
 
 /* A line among the status messages that is not logged (the bug report's question at start). */

@@ -1184,6 +1184,7 @@ static COLD void flush_mesh_batch(void);
  * what they cost and how much was wasted, since the profiler last took them. Plain counters: the walk's thread writes
  * them, and a take that lands mid-frame is off by part of a frame. */
 static u8 sDrawKind;
+static u32 sSkipKinds; // DKR_SKIP_KINDS (read_switches)
 static u8 sDrawObj = PROF_OBJ_NONE; // The object kind whose tag came last (profile.h ProfObjMix)
 static ProfDrawMix sMix;
 static unsigned long sObjTris[PROF_OBJ_BUCKETS + 1]; // The last one: no object's
@@ -1451,6 +1452,9 @@ static void read_switches(void) {
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
     sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
+    // The switch bench's cost rows: the kinds (port_drawtag.h, a bit each) whose triangles are not drawn, so a race
+    // without them shows what they cost the GPU (the profiler times only the renderer's share per kind).
+    sSkipKinds = (u32) plat_switch("DKR_SKIP_KINDS", 0);
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -2409,6 +2413,9 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
     u32 generation;
     float keepSign; // The sign of a kept triangle's determinant, for the culling below
 
+    if (UNLIKELY(sSkipKinds != 0) && (sSkipKinds >> sDrawKind) & 1) {
+        return;
+    }
     sObjTris[sDrawObj] += count;
     if (sAnyPending) {
         if (model_triangles(tris, count, textured)) {

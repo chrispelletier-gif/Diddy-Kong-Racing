@@ -83,6 +83,7 @@
 #include "tracks.h"
 #include "port.h"
 #include "plat/plat.h"
+#include "port_drawtag.h"
 #include "plat/profile.h"
 #include "plat/recorder.h"
 #include "gfx/gfx_split.h"
@@ -97,6 +98,7 @@
 #define RESULTS_FILE "autorun_results.csv"
 #define PROBLEMS_FILE "autorun_problems.txt"
 #define HITCH_FILE "autorun_hitches.txt" // Every hitch of the run, with its cause (the flight recorder, plat/recorder.h)
+#define DRAWMIX_FILE "autorun_drawmix.csv" // Each race's cost per kind of thing drawn and per object kind (profile.h)
 #define HANG_FILE "autorun_hang.txt"
 #define BENCH_STATE_FILE "gpu_bench_state.txt"
 #define BENCH_RESULTS_FILE "gpu_bench_results.csv"
@@ -144,7 +146,8 @@ static const BenchConfig sBenchConfigs[] = {
 typedef struct BenchSwitch {
     const char *name; // For the results: what the test setting does.
     const char *env[BENCH_SWITCH_VARS];
-    s8 usual, test;
+    short usual, test;
+    s8 alone; // A measurement, not a setting: left out of the race with every switch flipped together.
 } BenchSwitch;
 
 /* Command list splits (P19) are off by default (#153), early depth (P20) was dropped (#155), the white-line
@@ -191,6 +194,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_2X, PLAT_AA_OFF },
     { "the N64's 4:3", { "BENCH_WIDESCREEN", NULL }, 2, 0 },
     { "back faces culled by the GPU, not the walk (P40 off)", { "DKR_CPU_CULL", NULL }, 1, 0 },
+    // The cost rows (the profiler's monitor, 2026-10-31): a kind of thing left undrawn (DKR_SKIP_KINDS, a bit per
+    // port_drawtag.h kind) against the usual race shows what it costs the GPU, which can't time draws one by one.
+    { "cost: track not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 1) | (1 << 5), 1 },
+    { "cost: racers and objects not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 2) | (1 << 3), 1 },
+    { "cost: sky not drawn", { "DKR_SKIP_KINDS", NULL }, 0, 1 << 4, 1 },
+    { "cost: effects and shadows not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 6) | (1 << 7), 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* The New 3DS's list: the Old 3DS work above, each turned on by itself against the New 3DS's usual settings (where it
@@ -200,17 +209,31 @@ static const BenchSwitch sSwitchesOld3ds[] = {
  * path) and the breakdowns' clock reads were measured on an Old 3DS only; P40 culls back faces in the walk; a
  * texture's hash kept 8 frames is the Old 3DS's #241 setting. Not raced again: the system-call flush and the VFP
  * vectors, which #176 showed do nothing on a New 3DS. */
-/* New 3DS: empty. Switch bench #286 (2026-10-31): the two-core renderer (P21) took the renderer from 7.4-8.4 ms to
+/* New 3DS: only the cost rows. Switch bench #286 (2026-10-31): the two-core renderer (P21) took the renderer from 7.4-8.4 ms to
  * 3.7-4.3 ms and kept Haunted Woods at 60 (1% low 30 -> 58), so it is on by default; the P38 cuts, the P40 cull and
  * texture hashes kept 8 frames measured within noise of the usual settings on all three tracks. */
 static const BenchSwitch sSwitchesNew3ds[] = {
+    // The cost rows (the profiler's monitor, 2026-10-31): a kind of thing left undrawn (DKR_SKIP_KINDS, a bit per
+    // port_drawtag.h kind) against the usual race shows what it costs the GPU, which can't time draws one by one.
+    { "cost: track not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 1) | (1 << 5), 1 },
+    { "cost: racers and objects not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 2) | (1 << 3), 1 },
+    { "cost: sky not drawn", { "DKR_SKIP_KINDS", NULL }, 0, 1 << 4, 1 },
+    { "cost: effects and shadows not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 6) | (1 << 7), 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
 // The usual settings, then each switch flipped
 #define SWITCH_CONFIGS (plat_old_3ds() ? (s32) ARRAY_COUNT(sSwitchesOld3ds) : (s32) ARRAY_COUNT(sSwitchesNew3ds))
-/* With two switches or more, a last race flips them all together: gains don't always add up. */
-#define SWITCH_ALL (SWITCH_CONFIGS > 2 ? SWITCH_CONFIGS : -1)
+/* With two switches or more (not counting the cost rows), a last race flips them all together: gains don't always add
+ * up. */
+static s32 switch_all_config(void) {
+    s32 i, settings = 0;
+    for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
+        settings += !sSwitches[i].alone;
+    }
+    return settings >= 2 ? SWITCH_CONFIGS : -1;
+}
+#define SWITCH_ALL switch_all_config()
 #define SWITCH_RACES (SWITCH_CONFIGS + (SWITCH_ALL >= 0))
 #define MAX_CONFIGS 16
 
@@ -257,7 +280,7 @@ static void apply_config(s32 config) {
             }
         }
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
-            if (config == i + 1 || config == SWITCH_ALL) {
+            if (config == i + 1 || (config == SWITCH_ALL && !sSwitches[i].alone)) {
                 for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
                     plat_override_switch(sSwitches[i].env[k], sSwitches[i].test);
                 }
@@ -320,7 +343,7 @@ static const char *config_name(s32 config) {
         return "?";
     }
     if (sMode == MODE_SWITCH) {
-        return config == 0 ? "usual settings" : config == SWITCH_ALL ? "all switches together" : sSwitches[config - 1].name;
+        return config == 0 ? "usual settings" : config == SWITCH_ALL ? "all switches together (not the cost rows)" : sSwitches[config - 1].name;
     }
     return sBenchConfigs[config].name;
 }
@@ -392,7 +415,7 @@ static const char *results_file(void) {
 typedef struct IoJob {
     char path[256];
     char *text;
-    char *header;       // Appends: written first if the file doesn't exist yet (or NULL).
+    char *header;       // Appends: written first if the file doesn't exist yet or is empty (or NULL).
     s32 append;         // Added to the end of the file, else it replaces the file.
 } IoJob;
 
@@ -411,7 +434,7 @@ static void io_thread(UNUSED void *arg) {
         if (job->append) {
             if (job->header != NULL) {
                 char probe[1];
-                if (plat_load_file_start(job->path, probe, sizeof(probe)) < 0) {
+                if (plat_load_file_start(job->path, probe, sizeof(probe)) <= 0) { // Missing, or emptied for a new run
                     plat_append_file(job->path, job->header, strlen(job->header));
                 }
             }
@@ -780,6 +803,162 @@ static void record_hitches(const char *outcome) {
     sHitchSince = rec_frame_now();
 }
 
+/*
+ * Each race's draw mix and object mix (profile.h): one row per kind drawn, per object kind that cost anything, and one
+ * for the scene, into DRAWMIX_FILE; and the run's totals for its issue. The window restarts as each race starts.
+ */
+#define DRAWMIX_TOP_OBJECTS 12
+static ProfDrawMix sRunMix;
+static ProfSceneCounts sRunScene;
+static ProfObjMix sRunObj;
+
+static void reset_draw_mix(void) {
+    bzero(&sRunMix, sizeof(sRunMix));
+    bzero(&sRunScene, sizeof(sRunScene));
+    bzero(&sRunObj, sizeof(sRunObj));
+}
+
+static void record_draw_mix(const char *outcome) {
+    static char text[8 * 1024];
+    static ProfDrawMix mix;
+    static ProfSceneCounts scene;
+    const ProfObjMix *obj = prof_object_mix_window();
+    Race *race = &sRaces[sNext];
+    char prefix[160];
+    double frames, timed, gameTimed, audited, objFrames, objTimed, objRenderTimed;
+    u8 picked[PROF_OBJ_BUCKETS];
+    s32 length = 0, k, n;
+
+    prof_draw_mix_window(&mix, &scene, FALSE);
+    if (mix.frames == 0) {
+        return;
+    }
+    frames = (double) mix.frames;
+    timed = mix.timedFrames ? (double) mix.timedFrames : 1.0;
+    gameTimed = mix.gameTimedFrames ? (double) mix.gameTimedFrames : 1.0;
+    audited = mix.auditedFrames ? (double) mix.auditedFrames : 1.0;
+    plat_snprintf(prefix, sizeof(prefix), "%d,%d,%s,%s,%s,%s,%d,%s", (int) sRun, (int) sNext + 1,
+                  track_name(race->track), sCharacterNames[(s32) race->character], sVehicleNames[(s32) race->vehicle],
+                  graphics_setup(), is_bench() ? (int) race->config : -1, outcome);
+    for (k = 0; k < PORT_DRAW_KINDS; k++) {
+        const ProfKindStats *st = &mix.kinds[k];
+        double a = st->audited ? (double) st->audited : 1.0;
+        if (st->draws == 0) {
+            continue;
+        }
+        length += plat_snprintf(text + length, sizeof(text) - length,
+                                "%s,kind,%s,%.1f,%.1f,%.1f,%.3f,%.3f,,,,%.1f,%.1f,%.1f,%.3f,,,,,\n", prefix,
+                                prof_kind_name(k), st->tris / frames, st->draws / frames, st->verts / frames,
+                                st->renderNs / 1e6 / timed, st->buildNs / 1e6 / gameTimed, st->offscreen * 100.0 / a,
+                                st->backface * 100.0 / a, st->tiny * 100.0 / a,
+                                st->areaPx / audited / (400.0 * 240.0));
+    }
+    if (scene.frames > 0) {
+        length += plat_snprintf(text + length, sizeof(text) - length,
+                                "%s,scene,level,,,,,,,,,,,,,%.1f,%.1f,%.1f,%.1f,%.1f\n", prefix,
+                                (double) scene.segments / scene.frames, (double) scene.segmentsAllowed / scene.frames,
+                                (double) scene.segmentsDrawn / scene.frames, (double) scene.objects / scene.frames,
+                                (double) scene.objectsDrawn / scene.frames);
+    }
+    objFrames = obj->frames ? (double) obj->frames : 1.0;
+    objTimed = obj->timedFrames ? (double) obj->timedFrames : 1.0;
+    objRenderTimed = obj->renderTimedFrames ? (double) obj->renderTimedFrames : 1.0;
+    for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+        const ProfObjStats *o = &obj->objs[k];
+        picked[k] = o->updates == 0 && o->drawn == 0 && o->tris == 0;
+    }
+    // The costliest object kinds (game logic + building + renderer), the rest of the race's in the run's totals.
+    for (n = 0; n < DRAWMIX_TOP_OBJECTS && length < (s32) sizeof(text) - 256; n++) {
+        s32 best = -1;
+        double bestCost = -1.0;
+        for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+            const ProfObjStats *o = &obj->objs[k];
+            double cost = (o->logicNs + o->buildNs) / objTimed + o->renderNs / objRenderTimed + o->tris * 1e-3;
+            if (!picked[k] && cost > bestCost) {
+                best = k;
+                bestCost = cost;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        picked[best] = TRUE;
+        {
+            const ProfObjStats *o = &obj->objs[best];
+            length += plat_snprintf(text + length, sizeof(text) - length,
+                                    "%s,object,%s,%.1f,,,%.3f,%.3f,%.3f,%.1f,%.1f,,,,,,,,,\n", prefix,
+                                    prof_object_name(best), o->tris / objFrames, o->renderNs / 1e6 / objRenderTimed,
+                                    o->buildNs / 1e6 / objTimed, o->logicNs / 1e6 / objTimed, o->updates / objFrames,
+                                    o->drawn / objFrames);
+        }
+    }
+    append_file(DRAWMIX_FILE, text,
+                "run,race,track,character,vehicle,graphics,config,outcome,what,name,tris,draws,verts,rdp_ms,build_ms,"
+                "logic_ms,updated,drawn,off_pct,back_pct,tiny_pct,overdraw,segments,segments_allowed,segments_drawn,"
+                "objects,objects_drawn\n");
+
+    // The run's totals.
+    for (k = 0; k < PROF_KINDS; k++) {
+        ProfKindStats *t = &sRunMix.kinds[k];
+        const ProfKindStats *f = &mix.kinds[k];
+        t->draws += f->draws;
+        t->tris += f->tris;
+        t->verts += f->verts;
+        t->renderNs += f->renderNs;
+        t->buildNs += f->buildNs;
+        t->audited += f->audited;
+        t->offscreen += f->offscreen;
+        t->backface += f->backface;
+        t->tiny += f->tiny;
+        t->areaPx += f->areaPx;
+    }
+    sRunMix.frames += mix.frames;
+    sRunMix.timedFrames += mix.timedFrames;
+    sRunMix.gameTimedFrames += mix.gameTimedFrames;
+    sRunMix.auditedFrames += mix.auditedFrames;
+    sRunScene.frames += scene.frames;
+    sRunScene.segments += scene.segments;
+    sRunScene.segmentsAllowed += scene.segmentsAllowed;
+    sRunScene.segmentsDrawn += scene.segmentsDrawn;
+    sRunScene.objects += scene.objects;
+    sRunScene.objectsDrawn += scene.objectsDrawn;
+    for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+        ProfObjStats *t = &sRunObj.objs[k];
+        const ProfObjStats *f = &obj->objs[k];
+        t->updates += f->updates;
+        t->drawn += f->drawn;
+        t->tris += f->tris;
+        t->logicNs += f->logicNs;
+        t->buildNs += f->buildNs;
+        t->renderNs += f->renderNs;
+    }
+    sRunObj.frames += obj->frames;
+    sRunObj.timedFrames += obj->timedFrames;
+    sRunObj.renderTimedFrames += obj->renderTimedFrames;
+}
+
+/* The run's draw mix for its issue: per kind and the costliest object kinds, a frame. Returns the length written. */
+static s32 draw_mix_summary(char *out, s32 size) {
+    static char line[1024];
+    s32 length;
+    if (sRunMix.frames == 0) {
+        return 0;
+    }
+    prof_format_draw_mix(&sRunMix, &sRunScene, line, sizeof(line));
+    length = plat_snprintf(out, size,
+                           "\n### Where the time goes\n\nThe races' frames on average (each race's are in `" DRAWMIX_FILE
+                           "`). Per kind drawn: triangles/draws, renderer/game thread ms, wasted triangles "
+                           "off screen/facing away/under a pixel, overdraw:\n\n%s\n\n",
+                           line);
+    if (length < size) {
+        prof_format_object_mix(&sRunObj, 8, line, sizeof(line));
+        length += plat_snprintf(out + length, size - length,
+                                "Costliest object kinds (updated/drawn/triangles, logic/build/renderer ms):\n\n%s\n",
+                                line);
+    }
+    return length;
+}
+
 /* The run's hitches for its issue: how many, by cause, and the worst. Returns the length written. */
 static s32 hitch_summary(char *out, s32 size) {
     s32 length, c, i;
@@ -1035,8 +1214,10 @@ static void init(void) {
     plat_free(state);
     port_log("autorun: run %d, %d races, starting at %d", (int) sRun, (int) sNumRaces, (int) sNext + 1);
     reset_hitches();
+    reset_draw_mix();
     if (sNext == 0) {
         io_queue(HITCH_FILE, "", NULL, FALSE); // A new run: the last one's hitches went with its issue.
+        io_queue(DRAWMIX_FILE, "", NULL, FALSE);
     }
     set_phase(PHASE_TITLE);
     if (sNumRaces == 0) {
@@ -1585,7 +1766,7 @@ static void boss_summary(char *out, s32 size) {
 /* Sends the results so far as a GitHub issue (when bug reports are set up), and says so on the bottom screen. */
 static void send_results(const char *why) {
     char title[128];
-    static char summary[6144];
+    static char summary[8192];
     s32 length;
     io_flush(); // The summaries and the attached files read the results back.
     plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
@@ -1622,6 +1803,10 @@ static void send_results(const char *why) {
         boss_summary(summary + length, sizeof(summary) - length);
     } else if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
         bench_summary(summary + length, sizeof(summary) - length);
+    }
+    length = (s32) strlen(summary);
+    if (length < (s32) sizeof(summary) - 512) {
+        draw_mix_summary(summary + length, sizeof(summary) - length);
     }
     plat_status("%s %s: %d races, %d problems", port_text(sModes[sMode].name), port_text(why), (int) (sFinished + sProblems), (int) sProblems);
     plat_send_test_results(title, summary);
@@ -1676,6 +1861,7 @@ static void end_race(const char *outcome, s32 position) {
     sOutcome = outcome;
     record_result(outcome, position, sPhase == PHASE_RACING ? &sRaceStats : NULL);
     record_hitches(outcome);
+    record_draw_mix(outcome);
     if (str_equal(outcome, "finished")) {
         if (sRaceStats.elapsedNs > 0) {
             sFpsSum += sRaceStats.gameFrames * 1e9 / sRaceStats.elapsedNs;
@@ -1869,6 +2055,7 @@ void port_autorun_frame(s32 updateRate) {
         case PHASE_COUNTDOWN:
             if (racer != NULL && get_race_countdown() == 0) {
                 prof_window_start(PROF_WINDOW_SESSION);
+                prof_draw_mix_window(NULL, NULL, TRUE);
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
                 sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
                 set_phase(PHASE_RACING);

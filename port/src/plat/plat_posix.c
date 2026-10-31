@@ -72,6 +72,18 @@ void plat_overlay_show(const char *text) {
     (void) text;
 }
 
+void plat_overlay_graph(const unsigned char *halfMs, const unsigned char *kinds, int count) {
+    (void) halfMs;
+    (void) kinds;
+    (void) count;
+}
+
+int plat_overlay_tap(int x, int y) {
+    (void) x;
+    (void) y;
+    return 0;
+}
+
 void host_bottom_preview(const char *dir);
 
 void host_bottom_race_start(void);
