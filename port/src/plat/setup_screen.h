@@ -15,7 +15,8 @@ enum {
     SETUP_PAGE_PICTURE,  /* 30 fps with anti-aliasing, or 60 fps. */
     SETUP_PAGE_SCREEN,   /* Widescreen: 4:3, Wide, Balanced, Zoomed. */
     SETUP_PAGE_CAMERA,   /* Modern or Original. */
-    SETUP_PAGE_HUD       /* The race HUD: bottom screen, top screen, both. */
+    SETUP_PAGE_HUD,      /* The race HUD: bottom screen, top screen, both. */
+    SETUP_PAGE_LOOK      /* How the bottom screen looks: Classic, Glass, Broadcast, Dock. */
 };
 
 /* What each tile shows on the play style page (SetupScreen.styles). */

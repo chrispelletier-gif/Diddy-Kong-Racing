@@ -736,6 +736,7 @@ static int install(Channel *channel) {
 #endif
 
 int plat_3ds_setup_touch(int x, int y);
+int plat_3ds_take_close_menu(void);
 
 /* The touch screen, from the game's controller polling (input_3ds.c). Returns nonzero if the touch was a button. */
 int update_3ds_touch(int x, int y) {
@@ -847,6 +848,9 @@ static void update_thread(void *arg) {
                 } else if (menu_3ds_can_scroll(button == 1 ? -1 : 1)) {
                     plat_request_ui_sound(PLAT_UI_SOUND_MOVE);
                     menu_3ds_scroll(button == 1 ? -1 : 1);
+                }
+                if (result == MENU_STAY && plat_3ds_take_close_menu()) {
+                    result = MENU_CLOSE;
                 }
                 if (result == MENU_STAY) {
                     draw_menu_buttons();
