@@ -200,14 +200,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
  * path) and the breakdowns' clock reads were measured on an Old 3DS only; P40 culls back faces in the walk; a
  * texture's hash kept 8 frames is the Old 3DS's #241 setting. Not raced again: the system-call flush and the VFP
  * vectors, which #176 showed do nothing on a New 3DS. */
+/* New 3DS: empty. Switch bench #286 (2026-10-31): the two-core renderer (P21) took the renderer from 7.4-8.4 ms to
+ * 3.7-4.3 ms and kept Haunted Woods at 60 (1% low 30 -> 58), so it is on by default; the P38 cuts, the P40 cull and
+ * texture hashes kept 8 frames measured within noise of the usual settings on all three tracks. */
 static const BenchSwitch sSwitchesNew3ds[] = {
-    { "two-core renderer (P21)", { "DKR_SPLIT_RENDER", NULL }, 0, 1 },
-    { "texture lookup memo (P38)", { "DKR_TEX_MEMO", NULL }, 0, 1 },
-    { "lean walk (P38)", { "DKR_WALK_LEAN", NULL }, 0, 1 },
-    { "lean draw path (P38)", { "DKR_DRAW_LEAN", NULL }, 0, 1 },
-    { "walk and draw breakdowns off (P38)", { "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, 1, 0 },
-    { "back faces culled in the walk (P40)", { "DKR_CPU_CULL", NULL }, 0, 1 },
-    { "texture hashes kept 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
