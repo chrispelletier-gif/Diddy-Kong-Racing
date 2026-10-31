@@ -1,5 +1,11 @@
 #include "port_drawtag.h"
+#ifdef TARGET_PORT
+#include "plat/profile.h"
+#endif
 #include "objects.h"
+#ifdef TARGET_PORT
+extern Object *gSkydomeSegment;
+#endif
 #include "memory.h"
 
 #include "asset_enums.h"
@@ -2914,7 +2920,13 @@ void obj_update(s32 updateRate) {
     }
     // Update racers
     for (i = 0; i < gNumRacers; i++) {
+#ifdef TARGET_PORT
+        unsigned long long portStart = prof_object_logic_begin();
         update_player_racer((*gRacers)[i], updateRate);
+        prof_object_logic_end(BHV_RACER, portStart);
+#else
+        update_player_racer((*gRacers)[i], updateRate);
+#endif
     }
     if (level_type() == RACETYPE_DEFAULT) {
         for (i = 0; i < gNumRacers; i++) {
@@ -2938,7 +2950,13 @@ void obj_update(s32 updateRate) {
         for (i = gObjectListStart; i < j; i++) {
             obj = gObjPtrList[i];
             if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
+#ifdef TARGET_PORT
+                unsigned long long portStart = prof_object_logic_begin();
                 particle_update((Particle *) obj, updateRate);
+                prof_object_logic_end(PROF_OBJ_PARTICLES, portStart);
+#else
+                particle_update((Particle *) obj, updateRate);
+#endif
             }
         }
     }
@@ -3712,7 +3730,17 @@ void render_object(Gfx **dList, Mtx **mtx, Vertex **verts, Object *obj) {
     gObjectCurrDisplayList = *dList;
     gObjectCurrMatrix = *mtx;
     gObjectCurrVertexList = *verts;
-    port_draw_tag(gObjectCurrDisplayList++, obj->behaviorId == BHV_RACER ? PORT_DRAW_RACERS : PORT_DRAW_OBJECTS);
+#ifdef TARGET_PORT
+    if (obj == gSkydomeSegment) {
+        port_draw_tag(gObjectCurrDisplayList++, PORT_DRAW_SKY);
+    } else {
+        port_draw_tag_object(gObjectCurrDisplayList++,
+                             obj->behaviorId == BHV_RACER                 ? PORT_DRAW_RACERS
+                             : (obj->trans.flags & OBJ_FLAGS_PARTICLE) ? PORT_DRAW_EFFECTS
+                                                                       : PORT_DRAW_OBJECTS,
+                             (obj->trans.flags & OBJ_FLAGS_PARTICLE) ? PROF_OBJ_PARTICLES : (obj->behaviorId & 0x7F));
+    }
+#endif
     scale = obj->trans.scale;
     render_object_parts(obj);
     obj->trans.scale = scale;
@@ -10640,6 +10668,9 @@ s32 obj_init_property_flags(s32 behaviorId) {
  * One big switch statement for whichever object.
  */
 void run_object_loop_func(Object *obj, s32 updateRate) {
+#ifdef TARGET_PORT
+    unsigned long long portStart = prof_object_logic_begin();
+#endif
     update_object_stack_trace(OBJECT_UPDATE, obj->objectID);
     switch (obj->behaviorId) {
         case BHV_SCENERY:
@@ -10882,6 +10913,9 @@ void run_object_loop_func(Object *obj, s32 updateRate) {
             break;
     }
     update_object_stack_trace(OBJECT_UPDATE, OBJECT_CLEAR);
+#ifdef TARGET_PORT
+    prof_object_logic_end(obj->behaviorId & 0x7F, portStart);
+#endif
 }
 
 UNUSED void func_8002458C(UNUSED s32 arg0) {

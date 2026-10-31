@@ -361,6 +361,29 @@ line also goes to the log, followed on the 3DS by a `renderer parts` line that s
 calls (what is left is the display list walk) and, within them, the guard band clipping, the GPU settings and the
 vertex writes, in ms per frame.
 
+### Live monitor
+
+While the readout is on, the bottom screen is a live monitor: a graph of the last 158 frames (the newest on the
+right; the top is 50 ms, with lines at 60 and 30 fps), each bar coloured by what took its time (green game logic,
+cyan building the display list, yellow the renderer, orange texture decoding, red the GPU, grey waiting for the
+retrace; a white tip marks a hitch), over one of four pages. Tap under the graph for the next page; tap the graph to
+freeze it and the page, to read them.
+
+| Page | What it shows, a frame |
+| ---- | ---------------------- |
+| PROFILER | The readout above. |
+| DRAW KINDS | Per kind of thing drawn (menus and other, track, racers, objects, sky, see-through, effects, shadows, HUD): triangles, draws, the renderer's and the game thread's ms, and the share of its triangles wasted. Then the level segments drawn, of all and of those the visibility table allowed, and the objects drawn of those active. |
+| OBJECTS | The 13 costliest kinds of object (by behaviour; particles together): updated, drawn, triangles, and game logic, display list building and renderer ms. |
+| WASTE | Per kind, of its triangles: off the screen, facing away (the GPU culls them), under a pixel; and its overdraw (the screen area its triangles cover, x1.00 being the screen once). |
+
+With the two-core renderer (the default on both consoles) the renderer's time per kind is the display list walk's;
+the GPU hand-off on the other core is in the log's `two-core renderer` line. The renderer's and the game thread's
+times per kind are taken while the profiler is on (an Old 3DS, whose clock reads
+are system calls, times one frame in 8); the waste on one frame in 8. The log gets the same as `draw mix a frame` and
+`objects a frame` lines every few seconds. The GPU can't time its draws one by one, so the switch bench has four
+cost rows that leave a kind undrawn (`DKR_SKIP_KINDS`, a bit per kind): the GPU ms they save is what that kind costs
+it.
+
 ## Unattended test run (debug build only)
 
 Tap Settings, Test run, then Full test, and leave the console on its charger. From the
@@ -371,7 +394,9 @@ for 10 s (wedged, circling, or fallen under the track), it is put at the next ch
 progress bar. Your saves are not written while it runs. Tap Stop test (next to Settings) to end it early.
 
 - Results go to `sdmc:/3ds/dkr/`: `autorun_results.csv` (one line per race: outcome, frame rate, the profiler's
-  stages, worst frames) and `autorun_problems.txt`.
+  stages, worst frames), `autorun_problems.txt`, `autorun_hitches.txt` and `autorun_drawmix.csv` (every test run and
+  bench: per race a row per kind drawn, per costly object kind and for the scene, as on the monitor's pages); the
+  issue sums the draw mix up under "Where the time goes".
 - When the run ends or is stopped, and bug reports are set up, the results are sent as an issue titled
   "[3DS test run]". `python3 port/tools/bugreport_fetch.py <issue>` saves its files, and
   `python3 port/tools/autorun_report.py bugreport_<issue>/autorun_results.csv` turns them into tables by track and

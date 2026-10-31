@@ -67,6 +67,18 @@ void bs_clear_messages(void);
 void bs_set_style(int style);
 /* The profiler's readout, lines separated by '\n'; "" removes it. */
 void bs_set_overlay(const char *text);
+/*
+ * The profiler's frame graph, shown over its readout in place of the logo: the last count frames (at most
+ * BS_GRAPH_FRAMES, oldest first), each its length in half milliseconds and what took its time (BS_GRAPH_*, plus
+ * BS_GRAPH_HITCH). A count of 0 removes it.
+ */
+#define BS_GRAPH_FRAMES 158
+enum { BS_GRAPH_LOGIC, BS_GRAPH_SCENE, BS_GRAPH_RENDERER, BS_GRAPH_TEXTURES, BS_GRAPH_GPU, BS_GRAPH_RETRACE,
+       BS_GRAPH_KINDS };
+#define BS_GRAPH_HITCH 16
+void bs_set_frame_graph(const unsigned char *halfMs, const unsigned char *kinds, int count);
+/* The graph's bottom edge: a tap above it is on the graph. */
+#define BS_GRAPH_BOTTOM 67
 /* menu NULL closes it. */
 void bs_show_menu(const BsMenu *menu);
 /* Whether the menu or the overlay lines are up, so that the race HUD isn't drawn. */

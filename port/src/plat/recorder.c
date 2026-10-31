@@ -33,7 +33,7 @@ static void init(void) {
 }
 
 /* What took a frame's time: the game thread's biggest stage, or what the renderer it waited for was doing. */
-static int frame_cause(const RecFrame *r) {
+int rec_frame_cause(const RecFrame *r) {
     if (r->logicUs >= r->sceneUs && r->logicUs >= r->renderWaitUs && r->logicUs >= r->vsyncUs) {
         return REC_CAUSE_LOGIC;
     }
@@ -57,7 +57,7 @@ const char *rec_cause_name(int cause) {
 }
 
 static void describe_cause(const RecFrame *r, char *out, size_t size) {
-    switch (frame_cause(r)) {
+    switch (rec_frame_cause(r)) {
         case REC_CAUSE_LOGIC:
             snprintf(out, size, "game logic %u ms", r->logicUs / 1000);
             break;
@@ -92,7 +92,7 @@ static void record_hitch(const RecFrame *r) {
     h->frame = r->frame;
     h->endMs = r->endMs;
     h->periodUs = r->periodUs;
-    h->cause = frame_cause(r);
+    h->cause = rec_frame_cause(r);
     describe_cause(r, cause, sizeof(cause));
     length = snprintf(h->text, sizeof(h->text), "%s level %d%s: %s", mode_name(r->mode), r->level,
                       r->racing ? " racing" : "", cause);
@@ -364,10 +364,18 @@ static const char *mode_name(int mode) {
     }
 }
 
+/* Whether the last press is within the recording: one from long before (an earlier bug report, before a test run's
+ * report) is left out. */
+static int press_recorded(const RecState *s) {
+    unsigned int count, first = first_frame(s, &count);
+    return s->pressMs != 0 && count > 0 && s->pressMs >= s->frames[first % REC_FRAMES].endMs;
+}
+
 /* Times relative to the press, or to the last frame if there was none in the recording. */
 static unsigned int reference_ms(const RecState *s) {
-    unsigned int count, first = first_frame(s, &count);
-    if (s->pressMs != 0 && count > 0 && s->pressMs >= s->frames[first % REC_FRAMES].endMs) {
+    unsigned int count;
+    first_frame(s, &count);
+    if (press_recorded(s)) {
         return s->pressMs;
     }
     return count > 0 ? s->frames[(s->frameCount - 1) % REC_FRAMES].endMs : 0;
@@ -400,7 +408,7 @@ char *rec_format_csv(const RecState *s) {
     fEnd = f + frameCount;
     eEnd = e + eventCount;
     add(&b, "# DKR flight recorder, build %s; frame rate cap %u.%02u ms; %s\n", s->build, MS(s->targetUs),
-        s->pressMs != 0 ? "rel_ms is the time from the bug report shortcut (>>> row)" : "rel_ms is from the last frame");
+        press_recorded(s) ? "rel_ms is the time from the bug report shortcut (>>> row)" : "rel_ms is from the last frame");
     add(&b, "# kind f = a game frame (times in ms; renderer/GPU/sound columns are their work since the row before), "
             "e = an event, flags: 1 hitch, 2 shortcut pressed, 4 profiler on\n");
     add(&b, "kind,frame,render_frame,t_ms,rel_ms,period_ms,logic_ms,scene_ms,render_wait_ms,vsync_ms,rdp_ms,tex_ms,"
@@ -502,7 +510,7 @@ char *rec_format_summary(const RecState *s) {
             "the usual pace).\n",
             frameCount, (last->endMs - first->endMs) / 1000.0, s->targetUs / 1000, hitches);
     }
-    if (s->pressMs != 0) {
+    if (press_recorded(s)) {
         add(&b, "Shortcut pressed at %u ms, game frame %u. In the 2 s before it: %u frames (%.1f fps), slowest %u ms, "
                 "%u hitches.\n",
             s->pressMs, s->pressFrame, beforeFrames, beforeUs ? beforeFrames * 1e6 / beforeUs : 0.0,
@@ -516,7 +524,8 @@ char *rec_format_summary(const RecState *s) {
         }
         add(&b, ").\n");
     }
-    add(&b, "\nSlowest frames (time from the press; what took the time; what happened then):\n\n");
+    add(&b, "\nSlowest frames (time from the %s; what took the time; what happened then):\n\n",
+        press_recorded(s) ? "press" : "last frame");
     for (i = 0; i < worstN; i++) {
         const RecFrame *r = &s->frames[worstIdx[i] % REC_FRAMES];
         unsigned int start = r->endMs - r->periodUs / 1000, shown = 0, n;

@@ -1180,14 +1180,101 @@ static COLD void trace_batch(void) {
 static COLD void flush_model_batch(void);
 static COLD void flush_mesh_batch(void);
 
-/* The draw mix (profiler "draw mix" line): what the draws are for, from the game's tags (port_drawtag.h), and per kind
- * the draws, triangles and vertices since the profiler last took them. Plain counters: the walk's thread writes them. */
+/* The draw mix (profile.h ProfDrawMix): what the draws are for, from the game's tags (port_drawtag.h), and per kind
+ * what they cost and how much was wasted, since the profiler last took them. Plain counters: the walk's thread writes
+ * them, and a take that lands mid-frame is off by part of a frame. */
 static u8 sDrawKind;
-static unsigned long sDrawMix[4][3];
+static u32 sSkipKinds; // DKR_SKIP_KINDS (read_switches)
+static u8 sDrawObj = PROF_OBJ_NONE; // The object kind whose tag came last (profile.h ProfObjMix)
+static ProfDrawMix sMix;
+static unsigned long sObjTris[PROF_OBJ_BUCKETS + 1]; // The last one: no object's
+static unsigned long long sObjTicks[PROF_OBJ_BUCKETS + 1];
+static unsigned long long sKindTicks[PROF_KINDS];
+static unsigned long long sKindStart, sKindWaited;
+static s32 sKindTimed;  // This frame times each kind (kind_frame_start)
+static s32 sAuditFrame; // This frame's triangles are classified (audit_triangle)
 
-void gfx_draw_mix_take(unsigned long out[4][3]) {
-    __builtin_memcpy(out, sDrawMix, sizeof(sDrawMix));
-    __builtin_memset(sDrawMix, 0, sizeof(sDrawMix));
+void gfx_draw_mix_take(ProfDrawMix *out) {
+    unsigned long long perSecond = plat_ticks_per_second();
+    s32 k;
+    for (k = 0; k < PROF_KINDS; k++) {
+        ProfKindStats *in = &sMix.kinds[k], *to = &out->kinds[k];
+        to->draws += in->draws;
+        to->tris += in->tris;
+        to->verts += in->verts;
+        to->renderNs += sKindTicks[k] * 1000000000ULL / perSecond;
+        to->audited += in->audited;
+        to->offscreen += in->offscreen;
+        to->backface += in->backface;
+        to->tiny += in->tiny;
+        to->areaPx += in->areaPx;
+        sKindTicks[k] = 0;
+    }
+    out->frames += sMix.frames;
+    out->timedFrames += sMix.timedFrames;
+    out->auditedFrames += sMix.auditedFrames;
+    __builtin_memset(&sMix, 0, sizeof(sMix));
+}
+
+void gfx_object_mix_take(ProfObjMix *out) {
+    unsigned long long perSecond = plat_ticks_per_second();
+    s32 k;
+    for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+        out->objs[k].tris += sObjTris[k];
+        out->objs[k].renderNs += sObjTicks[k] * 1000000000ULL / perSecond;
+    }
+    __builtin_memset(sObjTris, 0, sizeof(sObjTris));
+    __builtin_memset(sObjTicks, 0, sizeof(sObjTicks));
+}
+
+/* The renderer's time goes to the kind whose tag came last. Out of line and cold: only a profiled frame reads the
+ * clock at each tag. */
+static COLD void kind_switch_timed(void) {
+    unsigned long long now = plat_ticks(), waited = gfx_split_walk_waited_ns(), spent = now - sKindStart;
+    // The two-core renderer's waits for the other core are no kind's (the "two-core renderer" log line has them).
+    unsigned long long waitTicks =
+        waited > sKindWaited ? (waited - sKindWaited) * plat_ticks_per_second() / 1000000000ULL : 0;
+    spent = spent > waitTicks ? spent - waitTicks : 0;
+    sKindTicks[sDrawKind] += spent;
+    sObjTicks[sDrawObj] += spent;
+    sKindStart = now;
+    sKindWaited = waited;
+}
+
+/* A tag's low 4 bits are the kind, bits 4-11 the object kind plus one (port_drawtag.h). */
+static inline void kind_switch(u32 tag) {
+    u32 obj = ((tag >> 4) & 0xFF) - 1; // No object (0) wraps round to a big number
+    if (UNLIKELY(sKindTimed)) {
+        kind_switch_timed();
+    }
+    sDrawKind = (u8) (tag & (PROF_KINDS - 1));
+    sDrawObj = (u8) (obj < PROF_OBJ_BUCKETS ? obj : PROF_OBJ_NONE);
+}
+
+/* At the start of a frame: whether it is timed per kind (while the profiler is on; on an Old 3DS, whose clock reads
+ * are system calls, one frame in 8) and audited (one in 8 while the profiler or a test run is on). */
+static void kind_frame_start(u32 frame) {
+    s32 profiling = prof_enabled();
+    sDrawKind = PORT_DRAW_OTHER;
+    sDrawObj = PROF_OBJ_NONE;
+    sMix.frames++;
+    sKindTimed = profiling && (!plat_old_3ds() || frame % 8 == 0);
+    sAuditFrame = profiling && frame % 8 == 4;
+    if (sKindTimed) {
+        sMix.timedFrames++;
+        sKindStart = plat_ticks();
+        sKindWaited = gfx_split_walk_waited_ns();
+    }
+    if (sAuditFrame) {
+        sMix.auditedFrames++;
+    }
+}
+
+static void kind_frame_end(void) {
+    if (sKindTimed) {
+        kind_switch(PORT_DRAW_OTHER);
+        sKindTimed = FALSE;
+    }
 }
 
 /* Draws the batch of transformed triangles. */
@@ -1201,8 +1288,8 @@ static NOINLINE HOT void flush_cpu_batch(void) {
         gfx_split_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
-        sDrawMix[sDrawKind][0]++;
-        sDrawMix[sDrawKind][1] += sBatchCount;
+        sMix.kinds[sDrawKind].draws++;
+        sMix.kinds[sDrawKind].tris += sBatchCount;
         REF_CALL(refb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount));
         walk_switch(part);
         sBatchCount = 0;
@@ -1371,6 +1458,9 @@ static void read_switches(void) {
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
     sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
+    // The switch bench's cost rows: the kinds (port_drawtag.h, a bit each) whose triangles are not drawn, so a race
+    // without them shows what they cost the GPU (the profiler times only the renderer's share per kind).
+    sSkipKinds = (u32) plat_switch("DKR_SKIP_KINDS", 0);
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -1625,6 +1715,103 @@ static void viewport_init(Viewport *vp) {
     vp->transY = 1.0f - g.vpTrans[1] / halfH;
 }
 
+/* An audited triangle's area on the screen in pixels: cut by the plane just in front of the camera (when a corner is
+ * behind it), projected, and cut by the screen's edges; -1 if nothing is left. x and y are in clip space (-w..w). */
+static COLD float audit_area(const float *x, const float *y, const float *w, s32 behind) {
+    float px[8], py[8], qx[8], qy[8], area = 0.0f;
+    s32 n = 0, k, edge;
+    for (k = 0; k < 3; k++) {
+        s32 j = k == 2 ? 0 : k + 1;
+        if (w[k] > 1e-3f) {
+            px[n] = x[k] / w[k];
+            py[n++] = y[k] / w[k];
+        }
+        if (behind && (w[k] > 1e-3f) != (w[j] > 1e-3f)) {
+            float t = (1e-3f - w[k]) / (w[j] - w[k]), cw = 1e-3f;
+            px[n] = (x[k] + (x[j] - x[k]) * t) / cw;
+            py[n++] = (y[k] + (y[j] - y[k]) * t) / cw;
+        }
+    }
+    // Sutherland-Hodgman against x <= 1, x >= -1, y <= 1, y >= -1.
+    for (edge = 0; edge < 4 && n >= 3; edge++) {
+        float sign = edge & 1 ? -1.0f : 1.0f;
+        float *a = edge < 2 ? px : py, *b = edge < 2 ? py : px;
+        s32 m = 0;
+        for (k = 0; k < n; k++) {
+            s32 j = k + 1 == n ? 0 : k + 1;
+            s32 inK = a[k] * sign <= 1.0f, inJ = a[j] * sign <= 1.0f;
+            if (inK && m < 8) {
+                qx[m] = a[k];
+                qy[m++] = b[k];
+            }
+            if (inK != inJ && m < 8) {
+                float t = (sign - a[k]) / (a[j] - a[k]);
+                qx[m] = sign;
+                qy[m++] = b[k] + (b[j] - b[k]) * t;
+            }
+        }
+        for (k = 0; k < m; k++) {
+            a[k] = qx[k];
+            b[k] = qy[k];
+        }
+        n = m;
+    }
+    if (n < 3) {
+        return -1.0f;
+    }
+    for (k = 0; k + 2 < n; k++) {
+        area += (px[k + 1] - px[0]) * (py[k + 2] - py[0]) - (px[k + 2] - px[0]) * (py[k + 1] - py[0]);
+    }
+    // Twice the area in clip units (2 x 2 for the screen), then in pixels.
+    return (area < 0.0f ? -area : area) * (400.0f * 240.0f / 8.0f);
+}
+
+/*
+ * Sorts one triangle of an audited frame (profile.h ProfKindStats): off the screen, facing away (one sided only, by
+ * the same determinant as DKR_CPU_CULL), smaller than a pixel, or drawn, with its area on the screen. The corners'
+ * x and y with the viewport folded in are in the GPU's clip space, where the screen spans -w..w.
+ */
+static COLD NOINLINE void audit_triangle(const u8 *idx, s32 oneSided, float keepSign, const Viewport *vp) {
+    ProfKindStats *s = &sMix.kinds[sDrawKind];
+    const RspVertex *v[3] = { &g.verts[idx[0]], &g.verts[idx[1]], &g.verts[idx[2]] };
+    float x[3], y[3], w[3], area;
+    s32 k, right = 0, left = 0, top = 0, bottom = 0, behind = 0;
+    s->audited++;
+    for (k = 0; k < 3; k++) {
+        w[k] = v[k]->w;
+        x[k] = v[k]->x * vp->scaleX + w[k] * vp->transX;
+        y[k] = v[k]->y * vp->scaleY + w[k] * vp->transY;
+        right += x[k] > w[k];
+        left += x[k] < -w[k];
+        top += y[k] > w[k];
+        bottom += y[k] < -w[k];
+        behind += w[k] <= 1e-3f;
+    }
+    if (right == 3 || left == 3 || top == 3 || bottom == 3 || behind == 3) {
+        s->offscreen++;
+        return;
+    }
+    if (oneSided) {
+        const RspVertex *a = v[0], *b = v[1], *c = v[2];
+        float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
+                    a->w * (b->x * c->y - c->x * b->y);
+        if (!(det * keepSign > 0.0f)) {
+            s->backface++;
+            return;
+        }
+    }
+    area = audit_area(x, y, w, behind);
+    if (area < 0.0f) {
+        s->offscreen++; // Off the screen past a corner, or not in front of the camera
+        return;
+    }
+    if (area < 1.0f) {
+        s->tiny++;
+        return;
+    }
+    s->areaPx += area;
+}
+
 /* Vertices loaded with fog off get their fog factor now that fog is on (rare: load_vertices does the rest). */
 static NOINLINE void fog_late_vertices(void) {
     s32 i;
@@ -1708,6 +1895,8 @@ static COLD void flush_model_batch(void) {
     gfxb_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount);
     prof_count(PROF_TRIANGLES, sModelCount);
     prof_count(PROF_DRAWS, 1);
+    sMix.kinds[sDrawKind].draws++;
+    sMix.kinds[sDrawKind].tris += sModelCount;
     REF_CALL(refb_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount));
     walk_switch(part);
     sModelCount = 0;
@@ -1949,6 +2138,8 @@ static COLD void flush_mesh_batch(void) {
     gfxb_draw_meshes(&sModelState, &sModelParams, sMeshParts, sMeshPartCount);
     prof_count(PROF_TRIANGLES, sMeshTriangles);
     prof_count(PROF_DRAWS, 1);
+    sMix.kinds[sDrawKind].draws++;
+    sMix.kinds[sDrawKind].tris += sMeshTriangles;
     walk_switch(part);
     sMeshPartCount = 0;
     sMeshTriangles = 0;
@@ -2228,6 +2419,10 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
     u32 generation;
     float keepSign; // The sign of a kept triangle's determinant, for the culling below
 
+    if (UNLIKELY(sSkipKinds != 0) && (sSkipKinds >> sDrawKind) & 1) {
+        return;
+    }
+    sObjTris[sDrawObj] += count;
     if (sAnyPending) {
         if (model_triangles(tris, count, textured)) {
             return;
@@ -2313,6 +2508,9 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
             }
         }
         state.flat = flat;
+        if (UNLIKELY(sAuditFrame) && !flat) {
+            audit_triangle(idx, state.cullMode != 0, keepSign, &vp);
+        }
         if (sCpuCull && state.cullMode != 0 && !flat) {
             // Flat draws keep the GPU's culling: on a wide screen gfx_flat_x moves their corners unevenly.
             const RspVertex *a = &g.verts[idx[0]], *b = &g.verts[idx[1]], *c = &g.verts[idx[2]];
@@ -2676,7 +2874,7 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         switch (op) {
             case OP(G_NOOP):
                 if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
-                    sDrawKind = w1 & 3;
+                    kind_switch(w1);
                 }
                 break;
             case OP(G_SPNOOP):
@@ -2718,7 +2916,7 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 }
                 load_vertices((const Vertex *) seg_addr(w1), count, g.vertexIndex);
                 g.vertexIndex += count;
-                sDrawMix[sDrawKind][2] += count;
+                sMix.kinds[sDrawKind].verts += count;
                 break;
             }
 
@@ -3178,7 +3376,7 @@ void port_gfx_run_task(void *taskPtr) {
     int snapshot;
     port_gfx_init();
     sFrameCount++;
-    sDrawKind = PORT_DRAW_OTHER;
+    kind_frame_start(sFrameCount);
 #ifdef PORT_GFX_REFERENCE
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
 #endif
@@ -3225,6 +3423,7 @@ void port_gfx_run_task(void *taskPtr) {
     walk_begin();
     run_dl((const Gfx *) task->t.data_ptr, -1);
     flush_batch();
+    kind_frame_end(); // The frame end's waits are no kind's.
     gPlatGfxStage = "ending the frame";
     walk_switch(WALK_FRAMEEND);
     gfx_split_frame_end();

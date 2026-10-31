@@ -23,6 +23,8 @@ void gfx_split_texture_free(GfxTexture *tex);
 
 /* Since the last call: the walk's time waiting for the backend, the backend's busy time and frames, and how often the
  * backend was woken (the profiler's "two-core renderer" line). */
+/* The walk's waits for the other core since start-up, in ns (the draw mix leaves them out of each kind's time). */
+unsigned long long gfx_split_walk_waited_ns(void);
 void gfx_split_take_times(unsigned long long *walkWaitNs, unsigned long long *backendBusyNs,
                           unsigned int *backendFrames, unsigned int *backendWakes);
 

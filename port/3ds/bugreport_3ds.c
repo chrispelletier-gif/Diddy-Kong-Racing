@@ -811,7 +811,7 @@ static void report_now(void) {
 static volatile int sReportRequested;
 static volatile int sResultsRequested;
 static char sResultsTitle[160];
-static char sResultsSummary[6144];
+static char sResultsSummary[8192];
 
 /* "Send a bug report" in the Settings menu (menu_3ds.c, via update_3ds.c): the same as SELECT + touch. */
 void bugreport_request(void) {
@@ -866,6 +866,7 @@ static void send_test_results(void) {
         rec_copy(&sRecording);
         attach_recording(&report, &sRecording, "timeline.csv");
     }
+    add_file(&report, "autorun_drawmix.csv");
     add_file(&report, "autorun_hitches.txt"); // Last: the largest after a long run.
     plat_log_recent(recent, sizeof(recent));
     build_body(&report, NULL, recent);

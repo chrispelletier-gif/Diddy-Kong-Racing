@@ -159,7 +159,85 @@ void prof_set_status(const char *text);
 }
 #endif
 
-/* The renderer's draw mix since the last call (gfx_rdp.c): per kind (port_drawtag.h) draws, triangles, vertices. */
-void gfx_draw_mix_take(unsigned long out[4][3]);
+/*
+ * The draw mix: per kind of thing drawn (port_drawtag.h PORT_DRAW_*), what it cost and how much of it was wasted.
+ * Counts are since the last take. The renderer's and the game thread's times are only taken while the profiler is on
+ * (on an Old 3DS, one frame in 8), the waste only on audited frames (one in 8 while the profiler or a test run is on):
+ * a triangle is off the screen if all its corners are past one edge or behind the camera, facing away if it is one
+ * sided and its back is to the camera (the GPU culls it), tiny if it covers less than a pixel; the rest add their area
+ * on the screen (an overestimate for those cut by an edge), which over the screen's gives the overdraw.
+ */
+#define PROF_KINDS 16
+typedef struct ProfKindStats {
+    unsigned long draws, tris, verts;
+    unsigned long long renderNs;  /* The renderer's time from this kind's tag to the next. */
+    unsigned long long buildNs;   /* The game thread's (port_profile.c fills it in). */
+    unsigned long audited;        /* Triangles looked at on audited frames, and of those: */
+    unsigned long offscreen, backface, tiny;
+    float areaPx;                 /* Screen area of the rest, in top screen pixels (400 x 240). */
+} ProfKindStats;
+typedef struct ProfDrawMix {
+    ProfKindStats kinds[PROF_KINDS];
+    unsigned long frames, timedFrames, auditedFrames;
+    unsigned long gameTimedFrames; /* Frames the game thread timed its building in (buildNs). */
+} ProfDrawMix;
+/* Adds the renderer's draw mix since the last call to out (gfx_rdp.c), and starts afresh. */
+void gfx_draw_mix_take(ProfDrawMix *out);
+/* The names of the kinds ("track", "racers"...). */
+const char *prof_kind_name(int kind);
+/* Adds the game thread's build time per kind since the last call to out, and starts afresh (port_profile.c). */
+void prof_kind_build_take(ProfDrawMix *out);
+/* What the game drew: level segments of all, those the visibility table allowed, and of those the ones in view and
+ * drawn; objects active (tracks.c, once a view) and drawn (counted from their tags). Read with prof_scene_take: totals
+ * since the last call. */
+typedef struct ProfSceneCounts {
+    unsigned long frames, segments, segmentsAllowed, segmentsDrawn, objects, objectsDrawn;
+} ProfSceneCounts;
+void prof_scene_frame(int segments, int segmentsAllowed, int segmentsDrawn, int objects);
+void prof_scene_take(ProfSceneCounts *out);
+/* The draw mix and scene counts of the last whole second (while the profiler or a test run is on). */
+void prof_draw_mix_last_second(ProfDrawMix *mix, ProfSceneCounts *scene);
+/* Those since the window was last restarted (mix NULL: only restarts it). A test run restarts it with each race. */
+void prof_draw_mix_window(ProfDrawMix *mix, ProfSceneCounts *scene, int restart);
+/* One line: per kind a frame the triangles, draws, times, waste and overdraw; then the scene counts. */
+void prof_format_draw_mix(const ProfDrawMix *mix, const ProfSceneCounts *scene, char *out, int size);
+/*
+ * The object mix: per kind of object (its behaviour, objects.h BHV_*; particles together) how many were updated and
+ * drawn, their triangles, and while the profiler is on (an Old 3DS: one frame in 8) the game logic's, the game
+ * thread's display list building's and the renderer's time on them. The renderer's share comes from the object's tag
+ * (port_drawtag.h port_draw_tag_object). Kept apart from the draw mix: it is bigger.
+ */
+#define PROF_OBJ_PARTICLES 128
+#define PROF_OBJ_BUCKETS 129
+#define PROF_OBJ_NONE PROF_OBJ_BUCKETS /* Draws that are no object's (the renderer's spare slot). */
+typedef struct ProfObjStats {
+    unsigned long updates, drawn, tris;
+    unsigned long long logicNs, buildNs, renderNs;
+} ProfObjStats;
+typedef struct ProfObjMix {
+    ProfObjStats objs[PROF_OBJ_BUCKETS];
+    unsigned long frames, timedFrames, renderTimedFrames; /* timedFrames: the game thread's, for logic and build. */
+} ProfObjMix;
+/* Adds the renderer's triangles and time per object kind since the last call to out, and starts afresh (gfx_rdp.c). */
+void gfx_object_mix_take(ProfObjMix *out);
+/* The object kind's name ("racer", "scenery"...). */
+const char *prof_object_name(int bucket);
+/* Game thread, around an object's update (objects.c): returns the start for the end. */
+unsigned long long prof_object_logic_begin(void);
+void prof_object_logic_end(int bucket, unsigned long long start);
+/* The object mix of the last whole second, and of the draw mix's window (restarted with it). Game thread. */
+const ProfObjMix *prof_object_mix_last_second(void);
+const ProfObjMix *prof_object_mix_window(void);
+/* The `top` costliest object kinds (by game logic + building + renderer time, else triangles), a frame each. */
+void prof_format_object_mix(const ProfObjMix *mix, int top, char *out, int size);
+/* A tap on the profiler's readout (any thread): on the graph freezes or unfreezes it, below it shows the next page.
+ * Returns nonzero if it took the tap. */
+int prof_monitor_tap(int x, int y);
+#ifdef PORT_RELEASE
+#define prof_monitor_tap(x, y) ((void) (x), (void) (y), 0)
+#define prof_scene_frame(segments, allowed, drawn, objects) ((void) 0)
+#define prof_object_logic_begin() 0ULL
+#define prof_object_logic_end(bucket, start) ((void) (start))
+#endif
 
 #endif

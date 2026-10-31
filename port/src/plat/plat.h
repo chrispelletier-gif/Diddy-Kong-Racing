@@ -230,6 +230,11 @@ unsigned int plat_log_total(void);
  * previous block; ignored elsewhere. Used by the profiler.
  */
 void plat_overlay_show(const char *text);
+/* The profiler's frame graph over the readout (bottom_screen.h bs_set_frame_graph); count 0 removes it. */
+void plat_overlay_graph(const unsigned char *halfMs, const unsigned char *kinds, int count);
+/* A tap on the bottom screen's top area while the profiler's readout shows (3DS input thread): the profiler's
+ * (port_profile.c prof_monitor_tap). Nonzero if it took it. */
+int plat_overlay_tap(int x, int y);
 /* Sends the unattended test run's results as a GitHub issue, in the background, if bug reports are set up (3DS). */
 void plat_send_test_results(const char *title, const char *summary);
 /*
