@@ -143,6 +143,8 @@ void port_load_game_frame(s32 gameMode, s32 levelId) {
 }
 
 /* Renderer: a frame has been handed to the GPU. The first one after a load finishes the load's log line. */
+void port_gfx_log_cache(void);
+
 void port_load_frame_done(void) {
     unsigned long long now;
     if (sWaitFirstFrame) {
@@ -156,5 +158,7 @@ void port_load_frame_done(void) {
         } else {
             plat_log("%s; first frame +%d ms", sLine, (int) ((now - sLoadEndNs) / 1000000ULL));
         }
+        plat_log_memory("after the load");
+        port_gfx_log_cache();
     }
 }

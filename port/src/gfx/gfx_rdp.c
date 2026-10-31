@@ -304,6 +304,8 @@ typedef struct TexCacheEntry {
     u8 wrapS, wrapT, tlutType;
     u8 gen; // Moves on when the entry is freed, so that the lookup memo notices (tex_memo_check)
     u32 lastFrame;
+    u32 hashSize;  // The bytes hashed at addr (and at tlut, tlutBytes), for sweep_stale_textures
+    u16 tlutBytes;
     GfxTexture tex;
     GfxTexture otherFilter; // The same texture with the other filter, sharing its GPU copy (when hasOtherFilter)
     u8 hasOtherFilter;
@@ -741,6 +743,12 @@ __attribute__((noinline)) static TexCacheEntry *decode_into_cache(TexCacheEntry 
     sTexCacheAddr[e - sTexCache] = load->addr;
     e->tlut = tlut;
     e->hash = hash;
+    e->hashSize = load->rowStride ? load->rowStride * height : load->size;
+    {
+        const u8 *paletteAddr;
+        u32 paletteBytes;
+        e->tlutBytes = (tlut != NULL && tile_palette(tile, &paletteAddr, &paletteBytes)) ? (u16) paletteBytes : 0;
+    }
     e->width = width;
     e->height = height;
     e->fmt = tile->fmt;
@@ -3218,6 +3226,23 @@ void port_gfx_texture_freed(const void *start, const void *end) {
     tex_queue_push();
 }
 
+/* For the memory line after each level load: how much the texture cache holds, to tell a leak from a full cache. */
+PLAT_COLD void port_gfx_log_cache(void) {
+    s32 i, used = 0, stale = 0;
+    u32 bytes = 0;
+    for (i = 0; i < TEX_CACHE_SIZE; i++) {
+        if (sTexCache[i].used) {
+            used++;
+            bytes += (u32) sTexCache[i].width * sTexCache[i].height;
+            if (sFrameCount - (s32) sTexCache[i].lastFrame > 600) {
+                stale++;
+            }
+        }
+    }
+    plat_log("texture cache: %d of %d entries (%d not drawn for 600 frames), %u K texels", (int) used,
+             TEX_CACHE_SIZE, (int) stale, (unsigned) (bytes / 1024));
+}
+
 /* Drops the cache entries (and remembered hashes) of texture data in [start, end). */
 static void drop_textures(const u8 *start, const u8 *end) {
     s32 i;
@@ -3238,6 +3263,44 @@ static void drop_textures(const u8 *start, const u8 *end) {
  * commands run against a scratch copy of the tile and TMEM state, with RGBA16 palettes. The filter doesn't matter: a
  * texture drawn with the other one shares the decoded copy (see texture_with_filter).
  */
+/*
+ * Not every texture the game stops using is freed where the cache hears of it (port_gfx_texture_freed): some sit in
+ * memory that is simply loaded over later. Their entries stayed until the cache's 2048 slots wrapped round, and on
+ * a PC autorun some 650 of 1400 entries were such leftovers after ten races, holding GPU memory. The Old 3DS ran out
+ * of it after a few dozen races, and textures that couldn't be uploaded were drawn white (the HUD's numbers).
+ * So at each level load, the entries not drawn during the last two levels (a race and the menus around it) whose
+ * memory now holds something else are freed (DKR_TEX_SWEEP=1; 2 frees them whatever the memory holds, 0 never).
+ */
+static u32 sSweepFrames[2];
+
+static s32 sweep_stale_textures(void) {
+    u32 before = sSweepFrames[0];
+    s32 mode = plat_switch("DKR_TEX_SWEEP", 1), i, swept = 0;
+    if (mode != 0 && before != 0) {
+        for (i = 0; i < TEX_CACHE_SIZE; i++) {
+            TexCacheEntry *e = &sTexCache[i];
+            if (e->used && e->lastFrame < before && !texture_in_use(e, NULL)) {
+                if (mode == 1) {
+                    // Kept while its memory still holds the same bytes: the game may draw it again (a texture
+                    // loaded once and used in some races only), and dropping it would make a hitch then.
+                    u32 hash = sample_hash(e->addr, e->hashSize);
+                    if (e->tlut != NULL) {
+                        hash ^= sample_hash(e->tlut, e->tlutBytes) * 31;
+                    }
+                    if (hash == e->hash) {
+                        continue;
+                    }
+                }
+                free_entry(e);
+                swept++;
+            }
+        }
+    }
+    sSweepFrames[0] = sSweepFrames[1];
+    sSweepFrames[1] = (u32) sFrameCount;
+    return swept;
+}
+
 static void prewarm_textures(void) {
     static Tile savedTiles[ARRAY_COUNT(g.tiles)];
     static TmemLoad savedTmem[ARRAY_COUNT(g.tmem)];
@@ -3249,7 +3312,7 @@ static void prewarm_textures(void) {
     const u8 *savedTlut;
     u32 savedTlutCount;
     s32 savedTlutFirst;
-    s32 decoded = 0, freed = 0, i;
+    s32 decoded = 0, freed = 0, swept = 0, i;
     unsigned long long start, elapsed;
 
     if (tail == head) {
@@ -3307,12 +3370,16 @@ static void prewarm_textures(void) {
     g.tlutCount = savedTlutCount;
     g.tlutFirst = savedTlutFirst;
     sTriStateValid = FALSE;
-    elapsed = plat_time_ns() - start;
     // Level loads, not the odd object texture coming and going mid-race.
+    if (decoded + freed >= 16) {
+        swept = sweep_stale_textures();
+    }
+    elapsed = plat_time_ns() - start;
     if (decoded + freed >= 16 || elapsed >= 1000000) {
-        plat_log("textures: %d decoded at load, %d freed, %.1f ms (frame %d, %u replaced while in use, %u not queued)",
-                 (int) decoded, (int) freed, elapsed / 1e6, (int) sFrameCount, (unsigned) sRecentEvictions,
-                 (unsigned) sTexQueueDropped);
+        plat_log("textures: %d decoded at load, %d freed, %d stale dropped, %.1f ms (frame %d, %u replaced while in "
+                 "use, %u not queued)",
+                 (int) decoded, (int) freed, (int) swept, elapsed / 1e6, (int) sFrameCount,
+                 (unsigned) sRecentEvictions, (unsigned) sTexQueueDropped);
     }
 }
 
