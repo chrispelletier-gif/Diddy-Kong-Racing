@@ -202,17 +202,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "cost: effects and shadows not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 6) | (1 << 7), 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
-/* The New 3DS's list: the Old 3DS work above, each turned on by itself against the New 3DS's usual settings (where it
- * is off), to see which buys the New 3DS headroom too. The two-core renderer (P21) was shelved on the New 3DS on
- * 2026-10-26 (#168: 59.8 fps with ~8 ms of renderer to spare at anti-aliasing off); here its backend runs on the game's
- * core (mostly idle on a New 3DS) while the walk keeps core 2. The P38 cuts (texture lookup memo, lean walk, lean draw
- * path) and the breakdowns' clock reads were measured on an Old 3DS only; P40 culls back faces in the walk; a
- * texture's hash kept 8 frames is the Old 3DS's #241 setting. Not raced again: the system-call flush and the VFP
- * vectors, which #176 showed do nothing on a New 3DS. */
-/* New 3DS: only the cost rows. Switch bench #286 (2026-10-31): the two-core renderer (P21) took the renderer from 7.4-8.4 ms to
- * 3.7-4.3 ms and kept Haunted Woods at 60 (1% low 30 -> 58), so it is on by default; the P38 cuts, the P40 cull and
- * texture hashes kept 8 frames measured within noise of the usual settings on all three tracks. */
+/* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
+ * 3.7-4.3 ms, Haunted Woods' 1% low 30 to 58 fps); the P38 cuts, the P40 cull and texture hashes kept 8 frames were
+ * within noise. At the player's 800 pixels and 4x anti-aliasing the GPU is the limit instead (#289, #291: 15-16 ms of
+ * a 16.7 ms frame, Crescent Island down to 45 fps), so the New 3DS races at those settings (sBenchRenderNew3ds) and
+ * tries the GPU savers: adaptive anti-aliasing (P37, drops to one sample only on frames that would miss 60; it never
+ * switched at #246's 400 pixels), anti-aliasing off, and textures in VRAM (P17, nothing in #176 at 400 pixels). */
 static const BenchSwitch sSwitchesNew3ds[] = {
+    { "adaptive anti-aliasing (P37)", { "DKR_ADAPTIVE_AA", NULL }, 0, 1, 0 },
+    { "anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_4X, PLAT_AA_OFF, 0 },
+    { "textures in VRAM (P17)", { "DKR_TEX_VRAM", NULL }, 0, 1, 0 },
     // The cost rows (the profiler's monitor, 2026-10-31): a kind of thing left undrawn (DKR_SKIP_KINDS, a bit per
     // port_drawtag.h kind) against the usual race shows what it costs the GPU, which can't time draws one by one.
     { "cost: track not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 1) | (1 << 5), 1 },
@@ -266,6 +265,13 @@ static void apply_config(s32 config) {
             { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },  { "BENCH_COLOUR", 0 },    { "BENCH_GUARD_BAND", 1 },
             { "DKR_STEREO3D", 0 },      { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 }, { "DKR_MODEL_MESH", 0 },
         };
+        // A New 3DS races at the player's GPU-bound settings (2026-10-31): 800 pixels, 4x anti-aliasing, colour boost.
+        static const struct {
+            const char *name;
+            s8 value;
+        } sBenchRenderNew3ds[] = {
+            { "BENCH_WIDE800", 1 }, { "BENCH_COLOUR", 1 }, { "BENCH_AA", PLAT_AA_4X },
+        };
         plat_set_60fps(!plat_old_3ds());
         for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
@@ -274,6 +280,11 @@ static void apply_config(s32 config) {
         plat_override_switch("BENCH_RENDER_AHEAD", 1);
         plat_override_switch("BENCH_WIDESCREEN", 2);
         plat_override_switch("BENCH_AA", PLAT_AA_2X);
+        if (!plat_old_3ds()) {
+            for (i = 0; i < (s32) ARRAY_COUNT(sBenchRenderNew3ds); i++) {
+                plat_override_switch(sBenchRenderNew3ds[i].name, sBenchRenderNew3ds[i].value);
+            }
+        }
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
                 plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
@@ -532,6 +543,9 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
  */
 static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
+    // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
+    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_CRESCENTISLAND, ASSET_LEVEL_DARKMOONCAVERNS,
+                                              ASSET_LEVEL_FROSTYVILLAGE };
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {
@@ -540,10 +554,12 @@ static void build_short_list(void) {
     };
     s32 quick = sMode == MODE_QUICK, boss = sMode == MODE_BOSS;
     s32 numBenchConfigs = config_count();
-    const s8 *defaultTracks = boss ? sBossTracks : quick ? sQuickTracks : sBenchTracks;
-    s32 numDefault = boss    ? (s32) ARRAY_COUNT(sBossTracks)
-                     : quick ? (s32) ARRAY_COUNT(sQuickTracks)
-                             : (s32) ARRAY_COUNT(sBenchTracks);
+    s32 newSwitch = sMode == MODE_SWITCH && !plat_old_3ds();
+    const s8 *defaultTracks = boss ? sBossTracks : quick ? sQuickTracks : newSwitch ? sSwitchTracksNew3ds : sBenchTracks;
+    s32 numDefault = boss        ? (s32) ARRAY_COUNT(sBossTracks)
+                     : quick     ? (s32) ARRAY_COUNT(sQuickTracks)
+                     : newSwitch ? (s32) ARRAY_COUNT(sSwitchTracksNew3ds)
+                                 : (s32) ARRAY_COUNT(sBenchTracks);
     const char *prefix = boss                    ? "DKR_AUTORUN_BOSS"
                          : quick                 ? "DKR_AUTORUN_QUICK"
                          : sMode == MODE_SWITCH ? "DKR_AUTORUN_SWITCH"
@@ -1615,12 +1631,14 @@ static void bench_summary(char *out, s32 size) {
                                "\n### Switches (averages of the finished races)\n\n"
                                "Each switch is flipped by itself; saved is against the usual settings' races. "
                                "Render settings, the bench's own in every race (see apply_config): %d fps cap, "
-                               "anti-aliasing %s, %s, 400 pixels, 3D off.\n\n"
+                               "anti-aliasing %s, %s, 3D off.\n\n"
                                "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
                                "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | limit |\n"
                                "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n",
                                60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
-                               plat_old_3ds() ? "the N64's 4:3" : "Balanced widescreen");
+                               plat_old_3ds() ? "the N64's 4:3, 400 pixels"
+                                              : "Balanced widescreen, 800 pixels (the 4x setting, drawn as 2x there), "
+                                                "colour boost");
     } else {
         length = plat_snprintf(out, size,
                                "\n### Render settings (averages of the finished races)\n\n"
