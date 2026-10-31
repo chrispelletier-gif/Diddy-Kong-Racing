@@ -60,6 +60,14 @@ static int prio_from_n64(int n64Priority) {
     if (n64Priority >= 150) {
         return PRIO_GAME_HIGHEST;
     }
+    // Above the game's main thread (10) are its audio manager (12) and scheduler (13). When the renderer shares their
+    // core (an Old 3DS with the renderer on the game's core) it held them up for a whole display list walk (~30 ms
+    // there): the sound's small lead over the output ran out, and the audio manager then makes its frames up to 15%
+    // longer to catch up, which played the music fast. Both run briefly once a frame, so there they go above the
+    // renderer (DKR_SOUND_ABOVE_RENDERER=0 = old).
+    if (n64Priority > 10 && sRcpCore == 0 && plat_switch("DKR_SOUND_ABOVE_RENDERER", 1)) {
+        return PRIO_HARDWARE;
+    }
     prio = PRIO_GAME_LOWEST - n64Priority;
     if (prio < PRIO_GAME_HIGHEST + 1) {
         prio = PRIO_GAME_HIGHEST + 1;
@@ -111,10 +119,13 @@ void plat_init(void) {
     // The system's own services, the GPU's among them, run there too: at the renderer's priority the sound held
     // them up and frame times doubled (bug report #78), so there it runs below them (DKR_SYSCORE_PRIO).
     // With the renderer on the system core the sound stays on the game's core (the DSP voices barely use it).
+    // On an Old 3DS it moves the audio task (the DSP voices' event work) at a 50% share by default. The game's audio
+    // manager (n64thread4) stays on core 0: the N64 OS emulation (os_core.c) relies on every game thread sharing one
+    // core with strict priorities, and the sound lists it edits are shared with the game thread.
     sAudioCore = sRcpCore == 1 ? 0 : sRcpCore;
     if (sRcpCore != 1 && settings_get("sound_core", 0) && plat_getenv("DKR_SINGLE_CORE") == NULL) {
         const char *env = plat_getenv("DKR_SYSCORE_LIMIT");
-        int limit = env != NULL ? atoi(env) : 80;
+        int limit = env != NULL ? atoi(env) : isNew3DS ? 80 : 50;
         Result res = APT_SetAppCpuTimeLimit(limit);
         if (R_SUCCEEDED(res)) {
             sAudioCore = 1;
@@ -166,6 +177,40 @@ int plat_renderer_syscore_share(void) {
     return sRcpCore == 1 ? sSyscoreShare : 0;
 }
 
+/*
+ * The two-core renderer going on or off (gfx_split.c). With the renderer on the game's core its second half runs on
+ * the system core, which needs a share of that core (DKR_SPLIT_SHARE, 80% by default): raised while it is on, and put
+ * back as it was when it goes off, so the switch bench's other races run with the system's services as usual.
+ */
+void plat_split_render_cores(int on) {
+    static int sRaised;
+    static u32 sBefore;
+    if (sRcpCore != 0) {
+        return;
+    }
+    if (on && !sRaised) {
+        const char *env = plat_getenv("DKR_SPLIT_SHARE");
+        int share = env != NULL ? atoi(env) : 80;
+        Result res;
+        if (R_FAILED(APT_GetAppCpuTimeLimit(&sBefore))) {
+            sBefore = 0;
+        }
+        res = APT_SetAppCpuTimeLimit(share);
+        plat_log("system core time limit %d%% for the two-core renderer (was %lu%%): %s (0x%08lX)", share,
+                 (unsigned long) sBefore, R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+        if (R_SUCCEEDED(res)) {
+            sRaised = 1;
+            sSyscoreShare = share;
+        }
+    } else if (!on && sRaised) {
+        Result res = APT_SetAppCpuTimeLimit(sBefore >= 5 ? sBefore : 5);
+        plat_log("system core time limit back to %lu%%: %s (0x%08lX)", (unsigned long) (sBefore >= 5 ? sBefore : 5),
+                 R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+        sRaised = 0;
+        sSyscoreShare = 0;
+    }
+}
+
 /* The Sound page's results label (audio_ndsp.c). */
 int plat_3ds_audio_on_system_core(void) {
     return sAudioCore == 1;
@@ -198,12 +243,25 @@ static volatile int sRendererPaused;
  * (see plat_3ds_exit).
  */
 void plat_3ds_quit_point(int parkedState) {
-    if (parkedState == PLAT_3DS_PARKED_GPU_IDLE) {
+    if (parkedState == PLAT_3DS_PARKED_GPU_IDLE && sPauseRequested && !sQuitting) {
+        // A renderer (or half of one) on an Old 3DS's system core gives its share of that core back while the game is away: the share
+        // holds even while the renderer waits, and slowed the HOME menu, whose services run there.
+        int lent = sSyscoreShare > 0; // The renderer's, or the two-core renderer's second half's
+        if (lent) {
+            Result res = APT_SetAppCpuTimeLimit(5);
+            plat_log("system core time limit 5%% while away: %s (0x%08lX)", R_SUCCEEDED(res) ? "ok" : "failed",
+                     (unsigned long) res);
+        }
         while (sPauseRequested && !sQuitting) {
             sRendererPaused = 1;
             svcSleepThread(1000000);
         }
         sRendererPaused = 0;
+        if (lent && !sQuitting) {
+            Result res = APT_SetAppCpuTimeLimit(sSyscoreShare);
+            plat_log("system core time limit %d%% again: %s (0x%08lX)", sSyscoreShare, R_SUCCEEDED(res) ? "ok" : "failed",
+                     (unsigned long) res);
+        }
     }
     if (!sQuitting) {
         return;
@@ -313,6 +371,24 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             }
             stackSize = 64 * 1024;
             break;
+        case PLAT_THREAD_RCP2:
+            // The other core from the walk's: the system core when the renderer is on the game's (its share raised
+            // to DKR_SPLIT_SHARE, 80% by default, unless the sound already holds one), else the game's core, where
+            // it goes above the game as the renderer does.
+            stackSize = 64 * 1024;
+            if (sRcpCore == 1 || sRcpCore == 2) {
+                // A New 3DS's walk has core 2 to itself, and its game core is mostly idle (#168: 80%), so the
+                // backend goes there, above the game, rather than onto the system core's limited share.
+                core = 0;
+                prio = PRIO_RCP;
+            } else {
+                // The share was raised first (plat_split_render_cores).
+                core = 1;
+                // Below the audio task when that is on the system core too (Mixing core System): threads of equal
+                // priority never preempt each other, and a backend behind by a frame would hold the sound up.
+                prio = PRIO_SYSCORE_AUDIO + 1;
+            }
+            break;
         default:
             prio = prio_from_n64(n64Priority);
             core = 0;
@@ -329,6 +405,9 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
         if (kind == PLAT_THREAD_RCP) {
             sRcpCore = 0;
             sSyscoreShare = 0;
+            prio = PRIO_RCP;
+        }
+        if (kind == PLAT_THREAD_RCP2) {
             prio = PRIO_RCP;
         }
         core = 0;
@@ -814,6 +893,26 @@ void plat_log(const char *fmt, ...) {
 static u16 sImage[BS_WIDTH * BS_HEIGHT];
 static LightEvent sScreenEvent;
 static volatile int sScreenThreadStarted;
+static volatile unsigned long long sScreenBusyNs; // Time its thread has spent drawing (the profiler's P36 line)
+static volatile unsigned long sScreenDraws;       // Areas it has drawn
+
+int plat_old_3ds(void) {
+    static int sOld = -1;
+    if (sOld < 0) {
+        bool isNew3DS = false;
+        APT_CheckNew3DS(&isNew3DS);
+        sOld = !isNew3DS;
+    }
+    return sOld;
+}
+
+unsigned long long plat_screen_busy_ns(void) {
+    return sScreenBusyNs;
+}
+
+unsigned long plat_screen_draws(void) {
+    return sScreenDraws;
+}
 
 /* Copies rows of the image to the framebuffer, which is the screen turned on its side (the console lock is held). */
 static void screen_copy(int first, int end) {
@@ -866,6 +965,7 @@ static void screen_thread(void *arg) {
         LightLock_Unlock(&sConsoleLock);
         // Drawn without the lock, from the copy taken; only the copy to the screen holds it (see plat_3ds_exit).
         if (changes != 0) {
+            unsigned long long start = plat_time_ns();
             int area;
             for (area = 0; area < BS_AREA_COUNT; area++) {
                 if (changes & (1 << area)) {
@@ -875,8 +975,12 @@ static void screen_thread(void *arg) {
                     LightLock_Lock(&sConsoleLock);
                     screen_copy(first, end);
                     LightLock_Unlock(&sConsoleLock);
+                    sScreenDraws++;
                 }
             }
+            // Includes any time other threads took the core meanwhile: on the game's core at a low priority, this
+            // is an upper bound.
+            sScreenBusyNs += plat_time_ns() - start;
         }
     }
 }
@@ -991,17 +1095,25 @@ void plat_set_bottom_style(int style) {
 }
 
 void plat_set_race_hud(const RaceHud *hud) {
-    static int sShown, sRacing;
+    static int sShown, sRacing, sEpoch = -1;
+    static u64 sIntervalNs = 66000000ULL;
     static RaceHud sLast;
     static u64 sLastNs;
     u64 now = svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000000) * 1000;
     int racing = hud != NULL && hud->mode < RACE_HUD_MODE_FIRST_MENU;
+    if (sEpoch != gPlatSwitchEpoch) {
+        // DKR_BS_HUD_MS (P36, a switch bench entry): the race HUD's redraw interval. On an Old 3DS the screen's thread
+        // shares the game's core.
+        int ms = plat_switch("DKR_BS_HUD_MS", 66);
+        sEpoch = gPlatSwitchEpoch;
+        sIntervalNs = (u64) (ms > 0 ? ms : 66) * 1000000ULL;
+    }
     if (hud != NULL && sShown) {
         // A menu's companion only changes with what the menu has highlighted. In a race, the timer and the map move
         // every frame; 15 redraws a second is plenty for them, which keeps the screen's thread from taking much of
         // its core. A change of place, lap, item, bananas or scores is drawn straight away.
         if (!racing ? memcmp(hud, &sLast, sizeof(*hud)) == 0
-                    : now - sLastNs < 66000000ULL && same_standing(hud, &sLast)) {
+                    : now - sLastNs < sIntervalNs && same_standing(hud, &sLast)) {
             return;
         }
     }

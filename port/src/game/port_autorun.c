@@ -37,7 +37,8 @@
  *   DKR_AUTORUN_SWITCH_TRACKS=id,...  Tracks (default: the GPU benchmark's three).
  *   DKR_AUTORUN_SWITCH_CHARACTER=n    Character (default Bumper).
  *   DKR_AUTORUN_SWITCH_CONFIGS=n,...  The races' switch sets: 0 every switch at its usual setting, n switch n-1 of
- *                                     sSwitches flipped (default all).
+ *                                     sSwitches flipped, and with two switches or more a last one with all of
+ *                                     them flipped together (default all).
  * Its files are switch_bench_state.txt and switch_bench_results.csv (with "config" and "pct_60fps" columns, as the
  * GPU benchmark's).
  *
@@ -84,6 +85,7 @@
 #include "plat/plat.h"
 #include "plat/profile.h"
 #include "plat/recorder.h"
+#include "gfx/gfx_split.h"
 #include <string.h>
 
 #define MAX_RACES 1024
@@ -145,22 +147,75 @@ typedef struct BenchSwitch {
     s8 usual, test;
 } BenchSwitch;
 
-/* Every race sets 3D itself (DKR_STEREO3D, off unless a switch turns it on) and the other render settings (see
- * apply_config), so the player's settings don't change what the bench measures. Settled before: GPU vertex maths
- * (P30) with the track and models recorded (P31, P34) gained nothing on a New 3DS, whose races are GPU-bound (#237),
- * and stay off (Settings > Picture > GPU vertex maths); stereo frames made once (P33) saved under 1 ms of renderer CPU
- * for more GPU time in 3D (#240) and stays off (3D made once); command list splits (P19) are off by default (#153), early depth (P20) was dropped
- * (#155), the white-line diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches: the
- * depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
+/* Command list splits (P19) are off by default (#153), early depth (P20) was dropped (#155), the white-line
+ * diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches on the New 3DS: the depth
+ * clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
  * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
- * transforms (P27) gained nothing and stay off. The list ends with an empty entry, so it may be otherwise empty (the
- * bench then says so instead of racing). Bench #246 settled the third top screen buffer (P35, on by default: the heavy
- * tracks went from 48 to 60 fps), while adaptive anti-aliasing and kernel waits per queue (P32) showed nothing and stay
- * off. The races run with anti-aliasing 2x, where the heavy tracks used to drop below 60 fps. */
-static const BenchSwitch sSwitches[] = {
+ * transforms (P27) gained nothing and stay off. The Old 3DS (roadmap O8) is another matter: its renderer is CPU-bound
+ * on a slower core without a second level cache. There VFP vectors won (#238), and the texture hash kept for 8 frames
+ * and cache flushes by system call won together (#241), so all three are on by default on an Old 3DS; redrawing the
+ * bottom screen's race HUD less often gained nothing (#241). Rendering ahead by 2 frames won on both of its renderer
+ * cores (#244, #245), so it is the Old 3DS default and the bench pins it there. In #251 a steady 20 fps cap matched
+ * or beat 30 with far fewer slower frames, so it is the Old 3DS default and the bench races at 20 there. The New
+ * 3DS's third top screen buffer (P35) was at most 1 fps ahead but took memory textures needed (#252), so it stays
+ * off there. The frame pacer (gfx_c3d.c) still cost frames on two tracks of three, so it is raced off against on.
+ * The Old 3DS renderer cuts (P38) each won in #255 (Jungle Falls 24.7 fps with all of them, 20.4 to 22.4 with one
+ * off) and the walk and draw breakdowns cost 2.5 to 4 fps there, so those rows are gone. The 20 fps cap now holds
+ * (src/video.c; #255 ran 60% of its frames at 30 under it), so 30 is raced against it. This list is the Old 3DS's:
+ * its usual 20 fps would pin a New 3DS to 20 too. The GPU route (ideas from other 3DS ports, shelved on the New 3DS
+ * after #237 where it gained nothing on a GPU-bound frame): GPU vertex maths (P30) by itself, then with the track's
+ * geometry kept on the GPU (P31), then with models recorded the first time they are drawn too (P34); off by default
+ * until this bench says otherwise on an Old 3DS.
+ * Bench #258/#259 (v21/v22, Old 3DS) settled the rest: the frame pacer stays on (off had more frames slower than 20 fps;
+ * still raced, as the bench needs one row),
+ * the 20 fps cap stays (30 reached 30 on only 11% of frames), and the GPU route gained nothing there either (P31 equal,
+ * P34 6.7 ms more renderer time, P30 tunnel walls missing as on the New 3DS, #234), so it is off and out of the bench.
+ * Bench #263 (v24, System 80%): the two-core renderer (P21) ran 29 fps against 20-21, with 93% of frames at 30, and
+ * showed the 20 fps cap had never held on the port (its code sat in the N64 branch of src/video.c). So 30 is the Old
+ * 3DS's cap and the bench races at 30 there; P21 is still raced while its best renderer core is found.
+ * The two-core renderer is now the Old 3DS default, raced off; with the GPU mostly idle (7-9 ms of a 33 ms frame) the
+ * looks an Old 3DS has off for speed are raced on one at a time (anti-aliasing 2x, Balanced widescreen, colour boost),
+ * and render ahead 1, as the split already keeps two frames in flight.
+ * Bench #266 (v27, Jungle Falls): the two-core renderer off fell to 21 fps, so it is out of the bench; anti-aliasing 2x,
+ * Balanced widescreen and render ahead 1 each kept 97-98% of frames at 30, so an Old 3DS now races with them as the
+ * New 3DS does, and each is raced back to the old setting on the heavier tracks. Colour boost cost nothing (a look,
+ * left to the player).
+ * The two-core renderer's backend is woken once 16 KB of draws are queued rather than for every draw (each wake-up is
+ * a system call on both cores); raced against waking it every time.
+ * Back faces culled in the walk (P40, DKR_CPU_CULL, on by default on an Old 3DS) is raced off against on: it stops
+ * a command's double sided triangles splitting its draw from the one sided ones (about one draw in eight).
+ * The list ends with an empty entry, so it may be otherwise empty. */
+static const BenchSwitch sSwitchesOld3ds[] = {
+    { "backend woken for every draw (P21)", { "DKR_SPLIT_WAKE_KB", NULL }, 16, 0 },
+    { "render ahead 2", { "BENCH_RENDER_AHEAD", NULL }, 1, 2 },
+    { "anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_2X, PLAT_AA_OFF },
+    { "the N64's 4:3", { "BENCH_WIDESCREEN", NULL }, 2, 0 },
+    { "back faces culled by the GPU, not the walk (P40 off)", { "DKR_CPU_CULL", NULL }, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
-#define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
+/* The New 3DS's list: the Old 3DS work above, each turned on by itself against the New 3DS's usual settings (where it
+ * is off), to see which buys the New 3DS headroom too. The two-core renderer (P21) was shelved on the New 3DS on
+ * 2026-10-26 (#168: 59.8 fps with ~8 ms of renderer to spare at anti-aliasing off); here its backend runs on the game's
+ * core (mostly idle on a New 3DS) while the walk keeps core 2. The P38 cuts (texture lookup memo, lean walk, lean draw
+ * path) and the breakdowns' clock reads were measured on an Old 3DS only; P40 culls back faces in the walk; a
+ * texture's hash kept 8 frames is the Old 3DS's #241 setting. Not raced again: the system-call flush and the VFP
+ * vectors, which #176 showed do nothing on a New 3DS. */
+static const BenchSwitch sSwitchesNew3ds[] = {
+    { "two-core renderer (P21)", { "DKR_SPLIT_RENDER", NULL }, 0, 1 },
+    { "texture lookup memo (P38)", { "DKR_TEX_MEMO", NULL }, 0, 1 },
+    { "lean walk (P38)", { "DKR_WALK_LEAN", NULL }, 0, 1 },
+    { "lean draw path (P38)", { "DKR_DRAW_LEAN", NULL }, 0, 1 },
+    { "walk and draw breakdowns off (P38)", { "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, 1, 0 },
+    { "back faces culled in the walk (P40)", { "DKR_CPU_CULL", NULL }, 0, 1 },
+    { "texture hashes kept 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
+};
+#define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
+// The usual settings, then each switch flipped
+#define SWITCH_CONFIGS (plat_old_3ds() ? (s32) ARRAY_COUNT(sSwitchesOld3ds) : (s32) ARRAY_COUNT(sSwitchesNew3ds))
+/* With two switches or more, a last race flips them all together: gains don't always add up. */
+#define SWITCH_ALL (SWITCH_CONFIGS > 2 ? SWITCH_CONFIGS : -1)
+#define SWITCH_RACES (SWITCH_CONFIGS + (SWITCH_ALL >= 0))
 #define MAX_CONFIGS 16
 
 static s32 sMode; // enum Mode
@@ -178,34 +233,41 @@ static void apply_config(s32 config) {
         return;
     }
     if (sMode == MODE_SWITCH) {
-        // The same render settings for every race, whatever the player's are: anti-aliasing 2x, 32-bit buffers,
-        // 60 fps, Balanced widescreen, 400 pixels, mipmaps on, no colour boost, edge trimming on, render ahead 1,
-        // GPU vertex maths off (the menu's settings would otherwise change what the bench measures). Then every
-        // variable at its usual setting, then the race's switch: a variable shared by several switches keeps the
-        // race's test setting.
+        // The menus' settings have no say in the bench's races (user rule, 2026-10-29): every race draws with the
+        // bench's own render settings: anti-aliasing 2x, 60 fps, Balanced widescreen and render ahead 1 on a New 3DS;
+        // anti-aliasing 2x, 30 fps, Balanced widescreen and render ahead 1 on an Old 3DS;
+        // 400 pixels, no 3D, mipmaps on, no colour boost, edge trimming on, GPU vertex maths off. Only
+        // where the renderer runs (an Old 3DS's Renderer row) needs a restart, so that one is the player's, and the
+        // results' graphics column says which. Then every variable at its usual setting, then the race's switches: a
+        // variable several switches share (the GPU route's rows) keeps the race's test setting.
         static const struct {
             const char *name;
             s8 value;
         } sBenchRender[] = {
-            { "BENCH_WIDESCREEN", 2 }, { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },
-            { "BENCH_COLOUR", 0 },     { "BENCH_GUARD_BAND", 1 },  { "BENCH_RENDER_AHEAD", 1 },
-            { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 },   { "DKR_MODEL_MESH", 0 },
+            { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },  { "BENCH_COLOUR", 0 },    { "BENCH_GUARD_BAND", 1 },
+            { "DKR_STEREO3D", 0 },      { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 }, { "DKR_MODEL_MESH", 0 },
         };
-        plat_set_gpu_config(PLAT_AA_2X);
-        plat_set_60fps(1);
+        plat_set_60fps(!plat_old_3ds());
         for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
+        plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
+        plat_override_switch("BENCH_RENDER_AHEAD", 1);
+        plat_override_switch("BENCH_WIDESCREEN", 2);
+        plat_override_switch("BENCH_AA", PLAT_AA_2X);
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
                 plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
             }
         }
-        if (config > 0) {
-            for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[config - 1].env[k] != NULL; k++) {
-                plat_override_switch(sSwitches[config - 1].env[k], sSwitches[config - 1].test);
+        for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
+            if (config == i + 1 || config == SWITCH_ALL) {
+                for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
+                    plat_override_switch(sSwitches[i].env[k], sSwitches[i].test);
+                }
             }
         }
+        plat_set_gpu_config(plat_switch("BENCH_AA", PLAT_AA_OFF)); // The bench's anti-aliasing, or a row's
         return;
     }
     plat_set_gpu_config(sBenchConfigs[config].aa);
@@ -254,7 +316,7 @@ static s32 is_bench(void) {
 }
 
 static s32 config_count(void) {
-    return sMode == MODE_SWITCH ? SWITCH_CONFIGS : BENCH_CONFIGS;
+    return sMode == MODE_SWITCH ? SWITCH_RACES : BENCH_CONFIGS;
 }
 
 static const char *config_name(s32 config) {
@@ -262,7 +324,7 @@ static const char *config_name(s32 config) {
         return "?";
     }
     if (sMode == MODE_SWITCH) {
-        return config == 0 ? "usual settings" : sSwitches[config - 1].name;
+        return config == 0 ? "usual settings" : config == SWITCH_ALL ? "all switches together" : sSwitches[config - 1].name;
     }
     return sBenchConfigs[config].name;
 }
@@ -642,6 +704,10 @@ static const char *graphics_setup(void) {
         s32 len = (s32) strlen(text);
         plat_snprintf(text + len, sizeof(text) - len, "/sys%d", (int) share);
     }
+    if (gfx_split_active()) {
+        s32 len = (s32) strlen(text);
+        plat_snprintf(text + len, sizeof(text) - len, "/split");
+    }
     return text;
 }
 
@@ -875,7 +941,7 @@ static void init(void) {
         for (i = 0; i < (s32) ARRAY_COUNT(switchNames); i++) {
             hash_text(plat_getenv(switchNames[i]));
         }
-        for (i = 1; i < SWITCH_CONFIGS; i++) {
+        for (i = 1; i < SWITCH_RACES; i++) {
             hash_text(config_name(i)); // A new switch starts a new run.
         }
     } else if (sMode == MODE_QUICK) {
@@ -1366,14 +1432,18 @@ static void bench_summary(char *out, s32 size) {
                                    (int) sRun, (int) previousRun);
         }
     } else if (sMode == MODE_SWITCH) {
+        static const char *const sAaNames[3] = { "off", "4x", "2x" };
+        s32 aa = plat_antialias();
         length = plat_snprintf(out, size,
                                "\n### Switches (averages of the finished races)\n\n"
                                "Each switch is flipped by itself; saved is against the usual settings' races. "
-                               "Render settings, the bench's own in every race (see apply_config): 60 fps cap, "
-                               "anti-aliasing 2x, Balanced widescreen, 400 pixels, 3D off.\n\n"
+                               "Render settings, the bench's own in every race (see apply_config): %d fps cap, "
+                               "anti-aliasing %s, %s, 400 pixels, 3D off.\n\n"
                                "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
                                "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | limit |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n");
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n",
+                               60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
+                               plat_old_3ds() ? "the N64's 4:3" : "Balanced widescreen");
     } else {
         length = plat_snprintf(out, size,
                                "\n### Render settings (averages of the finished races)\n\n"

@@ -868,6 +868,10 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
  * (gfx_model_to_vertex) and drawn as usual. DKR_GPU_TRANSFORM=1 still sends the frontend down its model path, so the
  * PC build checks that path's frames against the plain one (with the meshes, P31 and P34, too).
  */
+int gfxb_cpu_cull_ok(void) {
+    return 1;
+}
+
 int gfxb_gpu_transform(void) {
     return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
 }

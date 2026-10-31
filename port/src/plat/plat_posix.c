@@ -53,6 +53,18 @@ unsigned long long plat_render_idle_ns(void) {
     return 0;
 }
 
+int plat_old_3ds(void) {
+    return 0;
+}
+
+unsigned long long plat_screen_busy_ns(void) {
+    return 0;
+}
+
+unsigned long plat_screen_draws(void) {
+    return 0;
+}
+
 void plat_shutdown(void) {
 }
 
@@ -224,6 +236,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
 #endif
     pthread_attr_destroy(&attr);
     return thread;
+}
+
+void plat_split_render_cores(int on) {
+    (void) on;
 }
 
 void plat_thread_set_priority(PlatThread *thread, int n64Priority) {

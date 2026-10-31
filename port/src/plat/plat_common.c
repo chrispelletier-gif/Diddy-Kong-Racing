@@ -402,11 +402,25 @@ static volatile int sRenderAhead = -1;
 int plat_render_ahead(void) {
     if (sRenderAhead < 0) {
         const char *env = plat_getenv("DKR_RENDER_AHEAD");
+        // 1 everywhere. An Old 3DS rendered ahead by 2 while its renderer and game took turns on one core (switch
+        // benches #244, #245); with the two-core renderer, 1 kept 97% of frames at 30 like 2 did (#266), a frame
+        // sooner.
         int frames = settings_get("renderahead", env != NULL ? atoi(env) : 1);
         sRenderAhead = frames == 2 ? 2 : 1;
         plat_log("render ahead: %d frame%s", sRenderAhead, sRenderAhead == 1 ? "" : "s");
     }
     return plat_switch("BENCH_RENDER_AHEAD", sRenderAhead); // The switch bench may set its own
+}
+
+// Per thread: the walk sets it for the frame it walks, the two-core renderer's second thread for the frame it ends.
+static __thread int sFrameStep;
+
+void plat_set_frame_step(int retraces) {
+    sFrameStep = retraces;
+}
+
+int plat_frame_step(void) {
+    return sFrameStep;
 }
 
 void plat_set_render_ahead(int frames) {
@@ -443,7 +457,8 @@ void plat_set_stereo_once_setting(int on) {
 
 /* The 60 fps setting (see plat_frame_retraces): -1 until first read. sFps60 is what frames use now. sFps20 is the
  * steady 20 fps cap (settings.txt "fps20", else DKR_20FPS) for an Old 3DS that can't keep 30: every frame then takes
- * three retraces instead of jumping between two and three; 60 fps wins over it. */
+ * three retraces instead of jumping between two and three; 60 fps wins over it. It was an Old 3DS's default until the
+ * two-core renderer (P21, switch bench #263: 29 fps, 93% of frames at 30) made 30 the Old 3DS's target. */
 static volatile int sFps60Setting = -1, sFps60, sFps20;
 
 static void read_60fps_setting(void) {
@@ -458,7 +473,11 @@ static void read_60fps_setting(void) {
 }
 
 int plat_frame_retraces(void) {
+    int pinned = plat_switch("DKR_FPS_PIN", 0); // The switch bench's own frame rate (20, 30 or 60).
     read_60fps_setting();
+    if (pinned == 20 || pinned == 30 || pinned == 60) {
+        return 60 / pinned;
+    }
     return sFps60 ? 1 : sFps20 ? 3 : 2;
 }
 
